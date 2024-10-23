@@ -9,7 +9,7 @@ To achieve a greater inductive bias, we propose a method of encoding the three-d
 
 $\psi_k(r) = \sum_{i=1}^N \frac{e^{ik|r-r_i|}}{4 \pi |r - r_i|}$
 
-where $|r - r_i|$ is Euclidaean norm of the positions vector of the $i_th$ $C_a$ source and the observer, i.e. the input to the wavefunction, and k is the wavenumber, related to the wavelength $\lambda$ by $k = \frac{2\pi}{\lambda}$.
+where $|r - r_i|$ is Euclidaean norm of the positions vector of the $i_\text{th}$ $C_a$ source and the observer, i.e. the input to the wavefunction, and k is the wavenumber, related to the wavelength $\lambda$ by $k = \frac{2\pi}{\lambda}$.
 
 Moreover, we can define multiple wavefunctions, each with a different k, and thus a different wavelength. In this case, wave functions corresponding to small $\lambda$ encode local interactions between the $C_a$ atoms, while larger $\lambda$ encodes global interactions. Thus, the output of a wave function, $\psi_k$, corresponds to two features of the input $C_a$, real part and imaginary part.
 
