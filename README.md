@@ -1,7 +1,7 @@
 # proteusAI
 ## Protein Sequence Prediction of Target Structure via Wave Function Encoding and Self-Attention
 
-proteusAI is an AI that predicts the optimal protein sequence given a target structure of alpha-carbon ($C_a$) coordinates. 
+proteusAI is a transformer model that predicts the optimal protein sequence given a target structure of alpha-carbon ($C_a$) coordinates. 
 
 Many protein sequence prediction AI models use contact maps, distance metrics, and/or dihedral angles of the protein structure as input features to AI models. However, these features fail to encode local AND global interactions of the $C_a$/backbone atoms in a concise and efficient way that the model can gain a reasonable inductive bias from. 
 
