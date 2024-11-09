@@ -18,7 +18,7 @@ from pathlib import Path
 
 # ----------------------------------------------------------------------------------------------------------------------
 
-def pt_to_data(pts: Path, all_bb: int=0, device="cpu", features=False, num_inputs=512):
+def pt_to_data(pts: Path, all_bb: int=0, device="cpu", features=False, num_inputs=512, max_size=10000):
 	all_tensors = []
 	all_labels = []
 	for idx, pt_dir in enumerate(pts.iterdir()):
@@ -177,51 +177,44 @@ def rotate_with_PCA(bb_coords):
 
 class Data(Dataset):
 
-	def __init__(self, bb_coords, labels, device):
+	def __init__(self, clusters, device, pt_path, max_size=10000):
 
 		self.device = device
 
+		features, labels = [], []
+
+		unique_clusters = cluster.groupby("CLUSTER").sample(n=1)
+		for _, pdb in unique_clusters.iterrows():
+			section = Path("".join(pdb.CHAINID.split("_")[0][1:3]))
+			pdb_path = pt_path / section / Path(f"{pdb.CHAINID}_wf.pt")
+
+			features_and_labels = torch.load(pdb_path, weights_only=True)
+			pdb_features = features_and_labels["features"]
+			pdb_labels = features_and_labels["labels"]
+
+			features.append(pdb_features)
+			labels.append(pdb_labels)
+
+		# append tensor of max size so padded to this value
+		features = [f[:max_size, :] if f.size(0)==max_size else f for f in features] + torch.zeros(max_size, features.size(1))
+		labels = [l[:max_size, :] if l.size(0)==max_size else l for l in labels] + torch.zeros(max_size, labels.size(1))
+
 		# pad the input 
-		self.bb_coords = pad_sequence(bb_coords, batch_first=True, padding_value=1000).to(device)
-		self.prediction = torch.full((self.bb_coords.size(0), self.bb_coords.size(1), 20), 0.05).to(device)
-		self.labels = pad_sequence(labels, batch_first=True, padding_value=-1).to(device)
+		self.features = pad_sequence(features, batch_first=True, padding_value=0)[:-1, :].to(device)
+		self.labels = pad_sequence(labels, batch_first=True, padding_value=-1)[:-1, :].to(device)
+		self.key_padding_mask = torch.all(self.labels == -1, dim=-1).to(device)
 
-		self.key_padding_mask = torch.all(self.bb_coords == 1000, dim=-1).to(device)
-		self.prediction[self.key_padding_mask] = 0
-		self.bb_coords[self.key_padding_mask] = 0
-
-		assert self.bb_coords.size(0) == self.labels.size(0)
+		assert self.features.size(0) == self.labels.size(0)
 
 	def __len__(self):
-		return self.bb_coords.size(0)
+		return self.features.size(0)
 	
 	def __getitem__(self, idx):
 
-		item = self.bb_coords[idx]
-		prediction = self.prediction[idx]
-
+		item = self.features[idx]
 		label = self.labels[idx]
 		key_padding_mask = self.key_padding_mask[idx]
 		
-		return item, prediction, label, key_padding_mask
-		
-
-	def split_train_val_test(self, split_train: int=0.8, split_val_test: int=0.5):
-
-		split_train_idx = int(self.bb_coords.size(0) * split_train)
-		split_val_idx = split_train_idx + int( (self.bb_coords.size(0) - split_train_idx) * split_val_test ) 
-
-		self.bb_coords_train = self.bb_coords[:split_train_idx]
-		self.labels_train = self.labels[:split_train_idx]
-
-		self.bb_coords_val = self.bb_coords[split_train_idx:split_val_idx]
-		self.labels_val = self.labels[split_train_idx:split_val_idx]
-
-		self.bb_coords_test = self.bb_coords[split_val_idx:]
-		self.labels_test = self.labels[split_val_idx:]
-
-		self.train_data = Data(self.bb_coords_train, self.labels_train, self.device)
-		self.val_data = Data(self.bb_coords_val, self.labels_val, self.device)
-		self.test_data = Data(self.bb_coords_test, self.labels_test, self.device)
+		return item, label, key_padding_mask
 
 # ----------------------------------------------------------------------------------------------------------------------

@@ -1,0 +1,21 @@
+name: protAI_env
+channels:
+  - pytorch
+  - nvidia
+  - bioconda
+  - defaults
+  - conda-forge
+dependencies:
+  - biopython=1.84
+  - matplotlib
+  - numpy
+  - pip
+  - python=3.11
+  - pytorch=2.4.1
+  - scikit-learn
+  - scipy
+  - tqdm
+  - pytorch-cuda=12.1
+  - pip:
+      - torchviz
+prefix: /usr/local/usrapps/wangyy/hjc2538/conda/envs/protAI_env
