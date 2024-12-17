@@ -7,12 +7,9 @@ description:	utility functions
 # ----------------------------------------------------------------------------------------------------------------------
 
 import torch
-import torch.nn.functional as F
-
-from pathlib import Path
 import math
-import gc
-
+import triton
+import triton.language as tl
 
 @triton.jit
 def _protein_to_wavefunc_kernel(
@@ -138,9 +135,9 @@ def protein_to_wavefunc(coords, d_model, min_wl, max_wl, base, mask=None):
 	out = torch.zeros(batch, N, d_model, dtype=torch.float64, device=coords.device).contiguous()
 
 	# total block size should be less than number of threads per block (approx. 1024)
-	BLOCK_NI = 16    # edges
-	BLOCK_NJ = 16     # batch
-	BLOCK_BD = 4     # d_model
+	BLOCK_NI = 16    # N_i
+	BLOCK_NJ = 16    # N_j
+	BLOCK_BD = 4     # batch x d_model
 	# BLOCK_E x BLOCK_B x BLOCK_D <= 1024
 
 	# compute the grid size
@@ -165,9 +162,7 @@ def protein_to_wavefunc(coords, d_model, min_wl, max_wl, base, mask=None):
 
 	return out
 
-def protein_to_wavefunc_torch(coords: torch.Tensor, key_padding_mask: torch.Tensor, d_model: int=512, 
-						return_wl=False, min_wl=3.7, max_wl=20, base=20, max_splits=16,
-						device="cuda"):
+def protein_to_wavefunc_torch(coords, d_model, min_wl, max_wl, base, mask=None, max_splits=16):
 	'''
 	converts the alpha carbon coordinates of a protein into a tensor of 
 	wavefunction outputs.
@@ -194,33 +189,31 @@ def protein_to_wavefunc_torch(coords: torch.Tensor, key_padding_mask: torch.Tens
 									size = batch x N x 512
 	'''
 
-	# specify device
-	coords = coords.to(device)
-	key_padding_mask = key_padding_mask.to(device)
 
-	batch, seq_len, _ = coords.shape
+	# get shape
+	batch, N, _ = coords.shape
 
 	# **GET PAIRWISE DISTANCES**
 
 	# get the euclidean distances ; batch x N x 3 --> batch x N x N 
-	pw_dists = torch.sqrt_((coords.unsqueeze(1) - coords.unsqueeze(2)).pow_(2).sum(dim=-1)).to(device)
+	pw_dists = torch.sqrt_((coords.unsqueeze(1) - coords.unsqueeze(2)).pow_(2).sum(dim=-1)).to(coords.device)
 	
 	# diagonal set to 1 to avoid division by zero
-	pw_dists += torch.eye(pw_dists.size(1), device=device).unsqueeze(0).expand(batch, -1, -1)
+	pw_dists += torch.eye(pw_dists.size(1), device=coords.device).unsqueeze(0).expand(batch, -1, -1)
 
 	# set masked values to inf to exclude from wave function calculation (1/inf = 0)
-	pw_dist_mask = key_padding_mask.unsqueeze(1) | key_padding_mask.unsqueeze(2) # batch x N x N
+	pw_dist_mask = mask.unsqueeze(1) | mask.unsqueeze(2) # batch x N x N
 	pw_dists.masked_fill_(pw_dist_mask, float('inf'))
 	
 	# **DEFINE WAVELENGTHS**
 
 	# Create a tensor of wavelengths
-	wl_tensor = get_wavelengths(min_wl, max_wl, d_model, device=device, base=base) # num_wl, 
+	wl_tensor = get_wavelengths(min_wl, max_wl, d_model, device=coords.device, base=base) # num_wl, 
 
 	# **COMPUTE GREENS FN
 
 	# split along wavelengths dimension, as these computations are independant from each other
-	splits = max(1, int(2**int( math.log( (seq_len / 8000) * max_splits, 2 ) )))
+	splits = max(1, int(2**int( math.log( min(1, (N / 10000)) * max_splits, 2 ) )))
 	sub_wl = d_model // 2 // splits
 	wl_splits = [wl_tensor[step*sub_wl:(1+step)*sub_wl] for step in range(splits)]
 
@@ -229,9 +222,7 @@ def protein_to_wavefunc_torch(coords: torch.Tensor, key_padding_mask: torch.Tens
 	pw_dists = pw_dists.unsqueeze(-1).expand(-1, -1, -1, sub_wl)
 	pw_dist_mask = pw_dist_mask.unsqueeze(-1).expand(-1, -1, -1, sub_wl)
 
-	# only remove from memory if not needed
-	if not return_wl:
-		del wl_tensor
+	del wl_tensor
 	torch.cuda.empty_cache()
 
 	real, imag = [], []
@@ -256,7 +247,7 @@ def protein_to_wavefunc_torch(coords: torch.Tensor, key_padding_mask: torch.Tens
 
 		# take care of padded values and identity positions
 		batch, N, _, wl = greens_fn_real.shape
-		greens_fn_real.masked_fill_(torch.eye(N, device=device, dtype=torch.bool).unsqueeze(0).unsqueeze(-1).expand(batch, -1, -1, wl) | pw_dist_mask, 0.0) # batch x N x N x num_wl
+		greens_fn_real.masked_fill_(torch.eye(N, device=coords.device, dtype=torch.bool).unsqueeze(0).unsqueeze(-1).expand(batch, -1, -1, wl) | pw_dist_mask, 0.0) # batch x N x N x num_wl
 		
 		# superpose all other Ca point sources to each Ca
 		superpositions_real = greens_fn_real.sum(dim=2)  # sum over the third dimension ; batch x N x num_wl
@@ -275,7 +266,7 @@ def protein_to_wavefunc_torch(coords: torch.Tensor, key_padding_mask: torch.Tens
 		del phase
 		torch.cuda.empty_cache()
 
-		greens_fn_imag.masked_fill_(torch.eye(N, device=device, dtype=torch.bool).unsqueeze(0).unsqueeze(-1).expand(batch, -1, -1, wl) | pw_dist_mask, 0.0) # batch x N x N x num_wl
+		greens_fn_imag.masked_fill_(torch.eye(N, device=coords.device, dtype=torch.bool).unsqueeze(0).unsqueeze(-1).expand(batch, -1, -1, wl) | pw_dist_mask, 0.0) # batch x N x N x num_wl
 		superpositions_imag = greens_fn_imag.sum(dim=2)  # sum over the third dimension ; batch x N x num_wl
 		imag.append(superpositions_imag)
 
@@ -305,10 +296,7 @@ def protein_to_wavefunc_torch(coords: torch.Tensor, key_padding_mask: torch.Tens
 	# normalize so that max is one and sign is preserved
 	features.div_(features.abs().max(dim=1, keepdim=True).values)
 
-	if return_wl:
-		return features, wl_tensor
-	else:
-		return features
+	return features
 
 def get_wavelengths(min_wl=3.7, max_wl=20, d_model=512, base=20, device="cpu"):
 
