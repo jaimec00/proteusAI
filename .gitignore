@@ -1,4 +1,4 @@
-testing
 out.*
 err.*
-output
+wf_plots*
+
