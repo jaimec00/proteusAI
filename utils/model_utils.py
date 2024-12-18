@@ -100,9 +100,14 @@ def _protein_to_wavefunc_kernel(
 	real = tl.cos(phase) / tl.where(pad_mask_IJ, dist, float("inf")) # BD x NI x NJ
 	imag = tl.sin(phase) / tl.where(pad_mask_IJ, dist, float("inf")) # BD x NI x NJ
 
+	# superpose real and imag parts in the tile
 	real_superposition = tl.sum(real, axis=2, keep_dims=True) + (NJ*0) # BD x NI x NJ 
 	imag_superposition = tl.sum(imag, axis=2, keep_dims=True) + (NJ*0) # BD x NI x NJ
+
+	# compute pad mask, check if at least one NJ for each BD x NI
 	pad_mask_IJ = (tl.sum(pad_mask_IJ.to(tl.int32), axis=2, keep_dims=True) > 0) # BD x NI x 1 (like torch.any(x, dim=-1))
+	
+	# only one thread per NI writes to global memory (first NJ thread in the block per BD x NI)
 	pad_mask_IJ = (pad_mask_IJ) & ((NJ%BLOCK_NJ)==0) # BD x NI x NJ
 
 	# compute d_model index
