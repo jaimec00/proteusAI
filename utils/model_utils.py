@@ -41,77 +41,81 @@ def _protein_to_wavefunc_kernel(
 ):
 
 	# get i, j indices
-	NI = tl.program_id(0) * BLOCK_NI + tl.arange(0, BLOCK_NI)[None, :, None] # 1 x N x 1
-	NJ = tl.program_id(1) * BLOCK_NJ + tl.arange(0, BLOCK_NJ)[None, None, :] # 1 x 1 x N
+	NI = (tl.program_id(0) * BLOCK_NI) + tl.arange(0, BLOCK_NI)[None, :, None] # 1 x NI x 1
+	NJ = (tl.program_id(1) * BLOCK_NJ) + tl.arange(0, BLOCK_NJ)[None, None, :] # 1 x 1 x NJ
 
 	# get batch and wavenumber indices
-	BD = tl.program_id(2) * BLOCK_BD + tl.arange(0, BLOCK_BD)[:, None, None]
+	BD = (tl.program_id(2) * BLOCK_BD) + tl.arange(0, BLOCK_BD)[:, None, None]
 	num_wn = d_model//2
 	B = BD // num_wn # BD x 1 x 1
 	D = BD % num_wn # BD x 1 x 1
 
 	# get (x, y, z) pointers
-	coords_ptr_NI_x = coords_ptr + (B*stride_coords_B) + (NI*stride_coords_N) + (NJ*0) + (0*stride_coords_space) # BD x N x N
-	coords_ptr_NI_y = coords_ptr_NI_x + (1*stride_coords_space) # BD x N x N
-	coords_ptr_NI_z = coords_ptr_NI_x + (2*stride_coords_space) # BD x N x N
+	coords_ptr_NI_x = coords_ptr + (B*stride_coords_B) + (NI*stride_coords_N) + (NJ*0) + (0*stride_coords_space) # BD x NI x NJ
+	coords_ptr_NI_y = coords_ptr_NI_x + (1*stride_coords_space) # BD x NI x NJ
+	coords_ptr_NI_z = coords_ptr_NI_x + (2*stride_coords_space) # BD x NI x NJ
 
-	coords_ptr_NJ_x = coords_ptr + (B*stride_coords_B) + (NJ*stride_coords_N) + (NI*0) + (0*stride_coords_space) # BD x N x N
-	coords_ptr_NJ_y = coords_ptr_NJ_x + (1*stride_coords_space) # BD x N x N
-	coords_ptr_NJ_z = coords_ptr_NJ_x + (2*stride_coords_space) # BD x N x N
+	coords_ptr_NJ_x = coords_ptr + (B*stride_coords_B) + (NJ*stride_coords_N) + (NI*0) + (0*stride_coords_space) # BD x NI x NJ
+	coords_ptr_NJ_y = coords_ptr_NJ_x + (1*stride_coords_space) # BD x NI x NJ
+	coords_ptr_NJ_z = coords_ptr_NJ_x + (2*stride_coords_space) # BD x NI x NJ
 
 	# create i, j masks (True means compute)
-	mask_NI = ((NI < tot_N) & (B < tot_batch) & (D < num_wn)) # BD x N x N
-	mask_NJ = ((NJ < tot_N) & (B < tot_batch) & (D < num_wn)) # BD x N x N
+	mask_IJ = ((NI < tot_N) & (NJ < tot_N) & (NI!=NJ) & (B < tot_batch) & (D < num_wn)) # BD x NI x NJ
 	
 	# get pointers for masks (add 0*N(J/I) to match the shape)
-	pad_mask_ptr_NI = pad_mask_ptr + (B*stride_pad_mask_B) + (NI*stride_pad_mask_N) + (NJ*0) # BD x N x N
-	pad_mask_ptr_NJ = pad_mask_ptr + (B*stride_pad_mask_B) + (NJ*stride_pad_mask_N) + (NI*0) # BD x N x N
+	pad_mask_ptr_NI = pad_mask_ptr + (B*stride_pad_mask_B) + (NI*stride_pad_mask_N) + (NJ*0) # BD x NI x NJ
+	pad_mask_ptr_NJ = pad_mask_ptr + (B*stride_pad_mask_B) + (NJ*stride_pad_mask_N) + (NI*0) # BD x NI x NJ
 
 	# load the masks
-	pad_mask_NI = tl.load(pad_mask_ptr_NI, mask=mask_NI, other=0).to(tl.int1) # BD x N x N
-	pad_mask_NJ = tl.load(pad_mask_ptr_NJ, mask=mask_NJ, other=0).to(tl.int1) # BD x N x N
+	pad_mask_NI = tl.load(pad_mask_ptr_NI, mask=mask_IJ, other=0).to(tl.int1) # BD x NI x NJ
+	pad_mask_NJ = tl.load(pad_mask_ptr_NJ, mask=mask_IJ, other=0).to(tl.int1) # BD x NI x NJ
 
 	# combine masks and ensure not to compute self distance
-	pad_mask_IJ = pad_mask_NI & pad_mask_NJ & (NI!=NJ) # BD x N x N
+	pad_mask_IJ = pad_mask_NI & pad_mask_NJ # BD x NI x NJ
 
 	# load into SRAM
-	coords_NI_x = tl.load(coords_ptr_NI_x, mask=pad_mask_IJ, other=0).to(tl.float64) # BD x N x N
-	coords_NI_y = tl.load(coords_ptr_NI_y, mask=pad_mask_IJ, other=0).to(tl.float64) # BD x N x N
-	coords_NI_z = tl.load(coords_ptr_NI_z, mask=pad_mask_IJ, other=0).to(tl.float64) # BD x N x N
+	coords_NI_x = tl.load(coords_ptr_NI_x, mask=pad_mask_IJ, other=0).to(tl.float64) # BD x NI x NJ
+	coords_NI_y = tl.load(coords_ptr_NI_y, mask=pad_mask_IJ, other=0).to(tl.float64) # BD x NI x NJ
+	coords_NI_z = tl.load(coords_ptr_NI_z, mask=pad_mask_IJ, other=0).to(tl.float64) # BD x NI x NJ
 
-	coords_NJ_x = tl.load(coords_ptr_NJ_x, mask=pad_mask_IJ, other=0).to(tl.float64) # BD x N x N
-	coords_NJ_y = tl.load(coords_ptr_NJ_y, mask=pad_mask_IJ, other=0).to(tl.float64) # BD x N x N
-	coords_NJ_z = tl.load(coords_ptr_NJ_z, mask=pad_mask_IJ, other=0).to(tl.float64) # BD x N x N
+	coords_NJ_x = tl.load(coords_ptr_NJ_x, mask=pad_mask_IJ, other=0).to(tl.float64) # BD x NI x NJ
+	coords_NJ_y = tl.load(coords_ptr_NJ_y, mask=pad_mask_IJ, other=0).to(tl.float64) # BD x NI x NJ
+	coords_NJ_z = tl.load(coords_ptr_NJ_z, mask=pad_mask_IJ, other=0).to(tl.float64) # BD x NI x NJ
 
 	# compute distances
-	dist_x = (coords_NI_x - coords_NJ_x) * (coords_NI_x - coords_NJ_x) # BD x N x N
-	dist_y = (coords_NI_y - coords_NJ_y) * (coords_NI_y - coords_NJ_y) # BD x N x N
-	dist_z = (coords_NI_z - coords_NJ_z) * (coords_NI_z - coords_NJ_z) # BD x N x N
+	dist_x = (coords_NI_x - coords_NJ_x) * (coords_NI_x - coords_NJ_x) # BD x NI x NJ
+	dist_y = (coords_NI_y - coords_NJ_y) * (coords_NI_y - coords_NJ_y) # BD x NI x NJ
+	dist_z = (coords_NI_z - coords_NJ_z) * (coords_NI_z - coords_NJ_z) # BD x NI x NJ
 
-	dist = (dist_x + dist_y + dist_z).sqrt() # BD x N x N
+	dist = (dist_x + dist_y + dist_z).sqrt() # BD x NI x NJ
 
 	# get wavenumbers
-	wavenumber_ptr = wavenumber_ptr + (D*stride_wavenumber) + (NI*0) + (NJ*0)# BD x N x N
-	wavenumber = tl.load(wavenumber_ptr, mask=pad_mask_IJ, other=0).to(tl.float64) # BD x N x N
+	wavenumber_ptr = wavenumber_ptr + (D*stride_wavenumber) + (NI*0) + (NJ*0) # BD x NI x NJ
+	wavenumber = tl.load(wavenumber_ptr, mask=pad_mask_IJ, other=0).to(tl.float64) # BD x NI x NJ
 
 	# compute phase
-	phase = (wavenumber*dist) % (2*pi) # BD x N x N 
+	phase = (wavenumber*dist) % (2*pi) # BD x NI x NJ 
 
 	# compute real and imag parts
-	real = tl.cos(phase) / tl.where(pad_mask_IJ, dist, float("inf")) # BD x N x N
-	imag = tl.sin(phase) / tl.where(pad_mask_IJ, dist, float("inf")) # BD x N x N
+	real = tl.cos(phase) / tl.where(pad_mask_IJ, dist, float("inf")) # BD x NI x NJ
+	imag = tl.sin(phase) / tl.where(pad_mask_IJ, dist, float("inf")) # BD x NI x NJ
+
+	real_superposition = tl.sum(real, axis=2, keep_dims=True) + (NJ*0) # BD x NI x NJ 
+	imag_superposition = tl.sum(imag, axis=2, keep_dims=True) + (NJ*0) # BD x NI x NJ
+	pad_mask_IJ = (tl.sum(pad_mask_IJ.to(tl.int32), axis=2, keep_dims=True) > 0) # BD x NI x 1 (like torch.any(x, dim=-1))
+	pad_mask_IJ = (pad_mask_IJ) & ((NJ%BLOCK_NJ)==0) # BD x NI x NJ
 
 	# compute d_model index
 	D_real = 1 + (D * 2 - 1) # BD x 1 x 1
 	D_imag = 1 + (D * 2) # BD x 1 x 1
 
 	# prepare output pointers (only write to NI)
-	out_ptr_real = (out_ptr + (B*stride_out_B) + (D_real*stride_out_D) + (NI*stride_out_N) + (NJ*0)) # BD x N x N
-	out_ptr_imag = (out_ptr + (B*stride_out_B) + (D_imag*stride_out_D) + (NI*stride_out_N) + (NJ*0)) # BD x N x N
+	out_ptr_real = (out_ptr + (B*stride_out_B) + (D_real*stride_out_D) + (NI*stride_out_N) + (NJ*0)) # BD x NI x NJ
+	out_ptr_imag = (out_ptr + (B*stride_out_B) + (D_imag*stride_out_D) + (NI*stride_out_N) + (NJ*0)) # BD x NI x NJ
 
 	# add real and imag parts to output tensor
-	tl.atomic_add(out_ptr_real, real, mask=pad_mask_IJ)
-	tl.atomic_add(out_ptr_imag, imag, mask=pad_mask_IJ)
+	tl.atomic_add(out_ptr_real, real_superposition, mask=pad_mask_IJ)
+	tl.atomic_add(out_ptr_imag, imag_superposition, mask=pad_mask_IJ)
 
 def protein_to_wavefunc(coords, d_model, min_wl, max_wl, base, mask=None):
 	
@@ -135,15 +139,15 @@ def protein_to_wavefunc(coords, d_model, min_wl, max_wl, base, mask=None):
 	out = torch.zeros(batch, N, d_model, dtype=torch.float64, device=coords.device).contiguous()
 
 	# total block size should be less than number of threads per block (approx. 1024)
-	BLOCK_NI = 16    # N_i
-	BLOCK_NJ = 16    # N_j
-	BLOCK_BD = 4     # batch x d_model
+	BLOCK_NI = 2    # N_i
+	BLOCK_NJ = 256    # N_j
+	BLOCK_BD = 2     # batch x d_model
 	# BLOCK_E x BLOCK_B x BLOCK_D <= 1024
 
 	# compute the grid size
-	grid_NI = (N // BLOCK_NI) + 1   # number of edge blocks
-	grid_NJ = (N // BLOCK_NJ) + 1   # number of edge blocks
-	grid_BD = (batch * num_wl // BLOCK_BD) + 1      # number of feature blocks
+	grid_NI = (N // BLOCK_NI) + 1   # number of NI blocks
+	grid_NJ = (N // BLOCK_NJ) + 1   # number of NJ blocks
+	grid_BD = (batch * num_wl // BLOCK_BD) + 1      # number of batch+feature blocks
 
 	# define the grid
 	grid = (grid_NI, grid_NJ, grid_BD)
@@ -158,7 +162,7 @@ def protein_to_wavefunc(coords, d_model, min_wl, max_wl, base, mask=None):
 								)
 
 	# normalize each feature by the maximum absolute value in the sample
-	out.div_(out.abs().max(dim=1, keepdim=True).values)
+	# out.div_(out.abs().max(dim=1, keepdim=True).values)
 
 	return out
 
@@ -294,7 +298,7 @@ def protein_to_wavefunc_torch(coords, d_model, min_wl, max_wl, base, mask=None, 
 	features = features.view(features.size(0), features.size(1), -1)  # Final shape: batch x N x d_model
 
 	# normalize so that max is one and sign is preserved
-	features.div_(features.abs().max(dim=1, keepdim=True).values)
+	# features.div_(features.abs().max(dim=1, keepdim=True).values)
 
 	return features
 

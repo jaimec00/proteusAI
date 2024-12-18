@@ -8,9 +8,9 @@ def main():
 	# device
 	device = torch.device('cuda')
 
-	batch, N, d_model = 4, 1024, 512
+	batch, N, d_model = 4, 10000, 512
 	min_wl, max_wl, base = 3.7, 20, 20
-	coords = 1000 * torch.randn((batch, N, 3), dtype=torch.float64, device=device)
+	coords = torch.tensor([[[i,i,i] for i in range(N)] for j in range(batch)], dtype=torch.float64, device=device)
 	mask = (torch.rand((batch, N), device=coords.device) > 1)
 
 	torch.cuda.synchronize()  # Ensure no ongoing GPU operations
@@ -39,6 +39,8 @@ def main():
 	error = calculate_error(torch_out, triton_out)
 
 	# print(f"{torch_out=}\n{triton_out=}\n")
+	# print(f"{torch_out/triton_out}\n")
+	# print(f"{torch_out-triton_out}\n")
 
 	print(f"triton implementation is correct: {torch.allclose(triton_out, torch_out, atol=1e-4, rtol=1e-4, equal_nan=True)}")
 	print(f"triton percent error: {error:.5f}%")

@@ -4,7 +4,7 @@ import triton.language as tl
 
 def main():
 
-    batch, N = 1, 4
+    batch, N = 1, 8
     pw_matrix = torch.ones(batch, N, N, dtype=torch.float32, device=torch.device("cuda"))
 
     triton_out = reduction(pw_matrix)
