@@ -15,10 +15,12 @@ from torch.utils.data import DataLoader
 from Bio.Data.IUPACData import protein_letters_3to1
 from Bio.PDB import PDBParser
 
+from concurrent.futures import ThreadPoolExecutor
 from collections import defaultdict
 from pathlib import Path
 from tqdm import tqdm
 import pandas as pd
+import numpy as np
 import argparse
 import gc
 
@@ -213,8 +215,8 @@ class DataCleaner():
 		# load the cluster dataframe, and remove high resolution and non canonical chains
 		self.cluster_info = pd.read_csv(self.data_path / all_clusters_path, header=0)
 
-		if test: # only include pdbs in 'lw' pdb section (e.g. 4lwq)
-			self.cluster_info = self.cluster_info.loc[self.cluster_info.CHAINID.apply(lambda x: x[1:3]).eq("lw")]
+		if test: # only include pdbs in 'l3' pdb section (e.g. 4l3q)
+			self.cluster_info = self.cluster_info.loc[self.cluster_info.CHAINID.apply(lambda x: x[1:3]).eq("l3")]
 		self.cluster_info = self.cluster_info.loc[self.cluster_info.RESOLUTION <= min_resolution, :]
 		if not include_ncaa:
 			self.cluster_info = self.cluster_info.loc[~self.cluster_info.SEQUENCE.str.contains("X", na=False), :]
@@ -222,14 +224,6 @@ class DataCleaner():
 		# initialize BIOUNIT list. Not sure if multiple biounits per chain, but will check afterwards
 		self.cluster_info["BIOUNIT"] = None
 		self.cluster_info["PDB"] = self.cluster_info.CHAINID.apply(lambda x: x.split("_")[0])
-
-		# remove chains that don't exist
-		print(len(self.cluster_info))
-		chain_exists = self.cluster_info.CHAINID.apply(lambda x: (self.pdb_path / Path(f"{x[1:3]}/{x}.pt")).exists())
-		self.cluster_info = self.cluster_info.loc[chain_exists, :]
-		print(len(self.cluster_info))
-
-		self.cluster_info = self.cluster_info.sort_values(by="CHAINID")
 
 		# maximum sequence length
 		self.max_tokens = max_tokens
@@ -251,84 +245,69 @@ class DataCleaner():
 
 		self.gpu = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-		self.finished_biounits = []
-
-	def compute_biounits(self):
-
-		raise ValueError
-
-		for pdbid in self.cluster_info.PDB.drop_duplicates():
-
-			pdb_path = self.pdb_path / Path(pdbid[1:3])
-
-			chainids = self.cluster_info.loc[self.cluster_info.PDB.eq(pdbid), "CHAINID"].apply(lambda x: x.split("_")[1]).drop_duplicates().tolist()
-			chainids = [chainid for chainid in chainids if (pdb_path / Path(f"{pdbid}_{chainid}.pt")).exists()]
-
-			pdb_pt = self.load_pdb(pdbid)
-			if pdb_pt is None:
-				biounits = [[chain] for chain in chainids]
-			else:
-				biounits = pdb_pt["asmb_chains"]
-				biounits = [[chain for chain in biounit if chain in chainids] for biounit in biounits]
-
-			# remove empty biounits
-			biounits = [biounit for biounit in biounits if biounit]
-
-			for biounit in biounits:
-				biounit_name = f"{pdbid}_{'_'.join(chain for chain in biounit)}"
-				self.cluster_info.loc[self.cluster_info.CHAINID.isin([f"{pdbid}_{chain}" for chain in biounit]), "BIOUNIT"] = biounit_name
-
-			# chains without biounits that are valid are assigned their own chain as the biounit
-			chain_wo_biounit = self.cluster_info.BIOUNIT.isna() & self.cluster_info.CHAINID.isin([f"{pdbid}_{chain}" for chain in chainids])
-			self.cluster_info.loc[chain_wo_biounit, "BIOUNIT"] = self.cluster_info.CHAINID
-
-			print(self.cluster_info)
-			raise ValueError
-
-
-
-
-
 	def get_pmpnn_pdbs(self):
-
-		self.compute_biounits()
 		
 		# no gradients
 		with torch.no_grad():
 
-			# initialize progress bar
-			pbar = tqdm(total=len(self.cluster_info.CHAINID), desc="wavefunction embedding progress", unit="wf_processed")
+			num_gpus = torch.cuda.device_count()
+			devices = [torch.device(f"cuda:{i}") for i in range(num_gpus)]
+			all_pdbs = self.cluster_info.PDB.drop_duplicates()
+			pdb_chunks = np.array_split(all_pdbs, num_gpus)
+
+			results = []
+			with ThreadPoolExecutor(max_workers=num_gpus) as executor:
+				futures = [
+					executor.submit(compute_biounits, pdb_chunks[i], devices[i])
+					for i in range(num_gpus)
+				]
+				for future in futures:
+					results.append(future.result())
+
+
+				# # initialize progress bar
+				# pbar = tqdm(total=len(pdbs_chunk.CHAINID), desc="wavefunction embedding progress", unit="wf_processed")
 			
-			# loop through each chain entry 
-			for _, chainid in self.cluster_info.CHAINID.items():
+				# self.compute_biounits(pdb_chunk, device)
 
-				# get pdbid, and load the corresponding pdb (not the chain, yet)
-				pdbid = chainid.split("_")[0]
-				biounits, biounits_finished = self.get_pdb_biounits(pdbid)
-
-				# first check if this chain is in any of its corresponding pdbs biounits
-				chain_in_biounits = any(chainid.split("_")[1] in biounit.split("_")[1:] for biounit in biounits)
-				chain_finished = (chainid in self.cluster_info.loc[self.cluster_info.CHAINID.eq(chainid), "BIOUNIT"].values[0]) or \
-									(chainid.split("_")[1] in [chain for biounit in biounits_finished for chain in biounit.split("_")[1:]])
-
-				if chain_in_biounits:
-					for biounit in biounits:
-						self.save_biounit(biounit)
-
-				# if it is not, will compute the single chain as a biounit.
-				elif not chain_finished:
-					self.save_biounit(chainid)
-
-				pbar.update(1)
+				# pbar.update(1)
 
 			# plot aa count and seq length count histograms
-			aa_one_distributions = {self.rev_aa_idx[aa]: count for aa, count in self.aa_distributions.items()}
-			self.output.plot_aa_counts(aa_one_distributions)
-			self.output.plot_seq_len_hist(self.seq_lengths)
+			# aa_one_distributions = {self.rev_aa_idx[aa]: count for aa, count in self.aa_distributions.items()}
+			# self.output.plot_aa_counts(aa_one_distributions)
+			# self.output.plot_seq_len_hist(self.seq_lengths)
 
-			# remove clusters that were not used (those that have empty lists in BIOUNIT)
-			self.cluster_info = self.cluster_info.loc[~self.cluster_info.BIOUNIT.isin([[]]), :]
-			self.output.write_new_clusters(self.cluster_info, self.val_clusters, self.test_clusters)
+			# # remove clusters that were not used (those that have empty lists in BIOUNIT)
+			# self.cluster_info = self.cluster_info.loc[~self.cluster_info.BIOUNIT.isin([[]]), :]
+			# self.output.write_new_clusters(self.cluster_info, self.val_clusters, self.test_clusters)
+
+	def compute_biounits(self, pdbs_chunk, device):
+
+		pdbs_chunk = self.cluster_info.loc[self.cluster_info.PDB.isin(pdbs_chunk), :]
+		# loop through each chain entry 
+		for _, pdbid in pdbs_chunk.PDB.items():
+
+			# get pdbid, and load the corresponding pdb (not the chain, yet)
+			biounits = self.get_pdb_biounits(pdbid)
+			chains = pdbs_chunk.loc[pdbs_chunk.PDB.eq(pdbid), "CHAINID"]
+
+			for biounit in biounits:
+				biounit_chains = 
+
+			
+
+			# first check if this chain is in any of its corresponding pdbs biounits
+			chain_in_biounits = any(chainid.split("_")[1] in biounit.split("_")[1:] for biounit in biounits)
+			chain_finished = (chainid in self.cluster_info.loc[self.cluster_info.CHAINID.eq(chainid), "BIOUNIT"].values[0]) or \
+								(chainid.split("_")[1] in [chain for biounit in biounits_finished for chain in biounit.split("_")[1:]])
+
+			if chain_in_biounits:
+				for biounit in biounits:
+					self.save_biounit(biounit)
+
+			# if it is not, will compute the single chain as a biounit.
+			elif not chain_finished:
+				self.save_biounit(chainid)
 
 	def get_pdb_biounits(self, pdbid):
 		
@@ -336,12 +315,7 @@ class DataCleaner():
 		biounits = pdb["asmb_chains"]
 		biounits = [f"{pdbid}_{'_'.join(biounit.split(','))}" for biounit in biounits]
 
-		biounits_finished = [biounit for biounit in biounits if biounit in self.finished_biounits]
-		biounits = [biounit for biounit in biounits if biounit not in self.finished_biounits]
-
-		self.finished_biounits.extend(biounits)
-
-		return biounits, biounits_finished
+		return biounits
 
 	def save_biounit(self, biounit):
 
@@ -572,7 +546,7 @@ if __name__ == "__main__":
 	parser.add_argument("--base", default=40, type=int, help="base to use to samples wavelengths")
 	parser.add_argument("--max_splits", default=1, type=int, help="maximum number of splits to do in case where sequence length is too long. will split along wavelength dimension")
 	parser.add_argument("--num_devices", default=1, type=int, help="number of devices to parallelize the computations on")
-	parser.add_argument("--test", default=False, type=bool, help="number of devices to parallelize the computations on")
+	parser.add_argument("--test", default=True, type=bool, help="number of devices to parallelize the computations on")
 
 	args = parser.parse_args()
 
@@ -584,4 +558,4 @@ if __name__ == "__main__":
 									d_model=args.d_model, min_wl=args.min_wl, max_wl=args.max_wl, base=args.base, max_splits=args.max_splits,
 									test=args.test
 								)
-		data_cleaner.get_pmpnn_pdbs()
+		# data_cleaner.get_pmpnn_pdbs()
