@@ -147,12 +147,12 @@ def protein_to_wavefunc(coords, d_model, min_wl, max_wl, base, mask=None):
 	BLOCK_NI = 2    # N_i
 	BLOCK_NJ = 256    # N_j
 	BLOCK_BD = 2     # batch x d_model
-	# BLOCK_E x BLOCK_B x BLOCK_D <= 1024
+	# BLOCK_NI x BLOCK_NJ x BLOCK_BD <= 1024
 
 	# compute the grid size
 	grid_NI = (N // BLOCK_NI) + 1   # number of NI blocks
 	grid_NJ = (N // BLOCK_NJ) + 1   # number of NJ blocks
-	grid_BD = (batch * num_wl // BLOCK_BD) + 1      # number of batch+feature blocks
+	grid_BD = (batch * num_wl // BLOCK_BD) + 1      # number of batch x feature blocks
 
 	# define the grid
 	grid = (grid_NI, grid_NJ, grid_BD)
@@ -167,7 +167,7 @@ def protein_to_wavefunc(coords, d_model, min_wl, max_wl, base, mask=None):
 								)
 
 	# normalize each feature by the maximum absolute value in the sample
-	# out.div_(out.abs().max(dim=1, keepdim=True).values)
+	out.div_(out.abs().max(dim=1, keepdim=True).values)
 
 	return out
 
@@ -303,7 +303,7 @@ def protein_to_wavefunc_torch(coords, d_model, min_wl, max_wl, base, mask=None, 
 	features = features.view(features.size(0), features.size(1), -1)  # Final shape: batch x N x d_model
 
 	# normalize so that max is one and sign is preserved
-	# features.div_(features.abs().max(dim=1, keepdim=True).values)
+	features.div_(features.abs().max(dim=1, keepdim=True).values)
 
 	return features
 

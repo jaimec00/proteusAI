@@ -8,7 +8,7 @@ def main():
 	# device
 	device = torch.device('cuda')
 
-	batch, N, d_model = 4, 10000, 512
+	batch, N, d_model = 1, 40000, 512
 	min_wl, max_wl, base = 3.7, 20, 20
 	coords = torch.tensor([[[i,i,i] for i in range(N)] for j in range(batch)], dtype=torch.float64, device=device)
 	mask = (torch.rand((batch, N), device=coords.device) > 1)
@@ -29,8 +29,8 @@ def main():
 	torch.cuda.empty_cache()  # Clear the cache for consistent results
 	torch.cuda.reset_peak_memory_stats()
 	start_event.record()
-	torch_out = protein_to_wavefunc_torch(coords, d_model, min_wl, max_wl, base, mask, 32).to(torch.float64)
-	# torch_out = triton_out
+	# torch_out = protein_to_wavefunc_torch(coords, d_model, min_wl, max_wl, base, mask, 32).to(torch.float64)
+	torch_out = triton_out
 	end_event.record()
 	torch.cuda.synchronize()  # Wait for all GPU work to finish
 	torch_time = start_event.elapsed_time(end_event)  # Time in milliseconds
