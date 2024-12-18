@@ -26,7 +26,7 @@ def main():
 
     torch_out = torch_attn(wf, coords, nheads, Q_proj, K_proj, V_proj, spreads, mask=mask)
 
-    print(torch_out, torch_out.shape)
+    # print(torch_out, torch_out.shape)
 
     
 
@@ -103,9 +103,10 @@ def triton_attn(wf, coords, nheads, Q_proj, K_proj, V_proj, spreads, mask=None, 
     mask = torch.zeros(batch, N) if mask is None else mask # batch x N
 
     out = torch.zeros_like(wf)
+    l = torch.zeros_like(mask)
 
-    # BLOCK_ = 
-    # BLOCK_ = 
+    BLOCK_Bc = 
+    BLOCK_Br = 
     # BLOCK_ = 
 
     # grid_
@@ -157,7 +158,11 @@ def torch_attn(wf, coords, nheads, Q_proj, K_proj, V_proj, spreads, mask=None, d
     K = torch.matmul(wf[:, None, :, :], K_proj[None, :, :, :]) # batch x nheads x N x d_k
     V = torch.matmul(wf[:, None, :, :], V_proj[None, :, :, :]) # batch x nheads x N x d_k
 
+    print(f"{Q=}, {K=}, {V=}")
+
     dists = torch.sqrt(torch.sum(coords[:, :, None, :] - coords[:, None, :, :], dim=-1).abs()) # batch x N x N
+
+    print(f"{dists=}")
 
     # prepare for broadcasting with target shape of batch x nheads x N x N
     dists = dists[:, None, :, :]
@@ -180,17 +185,27 @@ def torch_attn(wf, coords, nheads, Q_proj, K_proj, V_proj, spreads, mask=None, d
         dists
     )
 
+    print(f"{dists=}")
+
     # compute rbf
     rbf = torch.exp( (-dists**2) / (2*spreads**2) ) # batch x nheads x N x N
     attn = torch.matmul(Q, K.transpose(-2,-1)) / torch.sqrt(torch.tensor(d_k)) # batch x nheads x N x N
+
+    print(f"{rbf}")
+    print(f"{attn}")
 
     rbf = torch.where(attn < 0, 1/rbf, rbf)
     attn = attn * rbf
     attn = attn.masked_fill(mask[:, None, :, None] | far_mask, float("-inf"))
     attn = F.softmax(attn, dim=-1)
 
+    print(f"{attn}")
+
     out = torch.matmul(attn, V) # batch x nheads x N x d_k
+    
+    print(f"{out=}")
     out = out.view(batch, N, d_model) # batch x N x d_model
+    print(f"{out=}")
 
     return out
 
