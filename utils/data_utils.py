@@ -187,7 +187,7 @@ class Data(Dataset):
 class DataCleaner():
 
 	def __init__(self, 	data_path=Path("/share/wangyy/hjc2538/proteusAI/pdb_2021aug02"),
-						new_data_path=Path("/share/wangyy/hjc2538/proteusAI/pdb_2021aug02_filtered_test"),
+						new_data_path=Path("/share/wangyy/hjc2538/proteusAI/pdb_2021aug02_filtered"),
 						pdb_path=Path("pdb"),
 						all_clusters_path=Path("list.csv"),
 						val_clusters_path=Path("valid_clusters.txt"),
@@ -250,11 +250,13 @@ class DataCleaner():
 		# no gradients
 		with torch.no_grad():
 
+			# split into chunks and send different subset of pdbs to each gpu 
 			num_gpus = torch.cuda.device_count()
 			devices = [torch.device(f"cuda:{i}") for i in range(num_gpus)]
 			all_pdbs = self.cluster_info.PDB.drop_duplicates()
 			pdb_chunks = np.array_split(all_pdbs, num_gpus)
 
+			# start a process for each gpu and have it compute the biounits for each pdb
 			results = []
 			with ThreadPoolExecutor(max_workers=num_gpus) as executor:
 				futures = [
@@ -268,8 +270,6 @@ class DataCleaner():
 				# # initialize progress bar
 				# pbar = tqdm(total=len(pdbs_chunk.CHAINID), desc="wavefunction embedding progress", unit="wf_processed")
 			
-				# self.compute_biounits(pdb_chunk, device)
-
 				# pbar.update(1)
 
 			# plot aa count and seq length count histograms
@@ -283,44 +283,61 @@ class DataCleaner():
 
 	def compute_biounits(self, pdbs_chunk, device):
 
+		# get chain ids for each pdb
 		pdbs_chunk = self.cluster_info.loc[self.cluster_info.PDB.isin(pdbs_chunk), :]
-		# loop through each chain entry 
+
+		# loop through each pdb entry 
 		for _, pdbid in pdbs_chunk.PDB.items():
 
 			# get pdbid, and load the corresponding pdb (not the chain, yet)
 			biounits = self.get_pdb_biounits(pdbid)
 			chains = pdbs_chunk.loc[pdbs_chunk.PDB.eq(pdbid), "CHAINID"]
 
-			for biounit in biounits:
-				biounit_chains = 
+			coords, labels, chain_masks = [], [], []
+			for idx, biounit in enumerate(biounits):
+				biounit_chains = [chain for chain in biounit if chain in chains.values]
+				bu_coords, bu_labels, bu_chain_masks = get_biounit_tensors(pdbid, biounit_chains)
 
+				if bu_labels.size(0) > self.max_tokens:
+					bu_coords, bu_labels, bu_chain_masks = self.split_biounit(bu_coords, bu_labels, bu_chain_masks)
+
+
+					coords.extend([chain_coords for chain_coords in bu_coords if chain_coords.size(0) < self.max_tokens])
+					labels.extend([chain_labels for chain_labels in bu_labels if chain_labels.size < self.max_tokens])
+					chain_masks.extend(bu_chain_masks)
+
+				else:
+					coords.append(bu_coords)
+					labels.append(bu_labels)
+					chain_masks.append(bu_chain_masks)
 			
+			# concatenate all the biounits for featurization
+			coords, mask = self.pad_tensors(coords)
 
-			# first check if this chain is in any of its corresponding pdbs biounits
-			chain_in_biounits = any(chainid.split("_")[1] in biounit.split("_")[1:] for biounit in biounits)
-			chain_finished = (chainid in self.cluster_info.loc[self.cluster_info.CHAINID.eq(chainid), "BIOUNIT"].values[0]) or \
-								(chainid.split("_")[1] in [chain for biounit in biounits_finished for chain in biounit.split("_")[1:]])
+			features = protein_to_wavefunc(coords, self.d_model, self.min_wl, self.max_wl, self.base, mask)
 
-			if chain_in_biounits:
-				for biounit in biounits:
-					self.save_biounit(biounit)
+			for features in 
 
-			# if it is not, will compute the single chain as a biounit.
-			elif not chain_finished:
-				self.save_biounit(chainid)
+			biounit_data = {
+				"coords": biounit_coords,
+				"features": biounit_features,
+				"labels": biounit_labels,
+				"chain_idxs": chain_indices # [start, end(exclusive)]
+			}
+
+	def pad_tensors(self, coords):
+
+
 
 	def get_pdb_biounits(self, pdbid):
 		
 		pdb = self.load_pdb(pdbid)
 		biounits = pdb["asmb_chains"]
-		biounits = [f"{pdbid}_{'_'.join(biounit.split(','))}" for biounit in biounits]
+		biounits = [biounit.split(',') for biounit in biounits]
 
 		return biounits
 
-	def save_biounit(self, biounit):
-
-		pdb = biounit.split("_")[0]
-		chains = biounit.split("_")[1:]
+	def get_biounit_tensors(self, pdb, chains):
 
 		chain_indices = defaultdict(list)
 		chain_start_idx = 0
@@ -356,36 +373,16 @@ class DataCleaner():
 			biounit_labels.append(labels)
 
 		if biounit_coords==[] or biounit_labels==[]:
-			return
+			return None, None, None
 
 		biounit_coords = torch.cat(biounit_coords, dim=0)
 		biounit_labels = torch.cat(biounit_labels, dim=0)
 
-		# if it is too big, split it into individual chains
-		biounit_size = biounit_labels.size(0)
+		return biounit_coords, biounit_labels, chain_indices
 
-		if biounit_size == 0: return
-		if biounit_size > self.max_tokens:
-			self.split_biounit(pdb, biounit_coords, biounit_labels, chain_indices)
-			return
 
-		elif biounit_size > self.max_seq_len:
-			self.max_seq_len = biounit_size
-			self.output.log.info(f"new max sequence length: {self.max_seq_len}")
 
-		biounit_features = protein_to_wavefunc(	biounit_coords.unsqueeze(0).to(self.gpu), 
-												torch.zeros(biounit_coords.size(0), dtype=torch.bool, device=self.gpu).unsqueeze(0), 
-												d_model=self.d_model, min_wl=self.min_wl, max_wl=self.max_wl, return_wl=False, base=self.base, 
-												max_splits=self.max_splits, device=self.gpu
-											).squeeze(0).to("cpu")
-
-		biounit_data = {
-			"coords": biounit_coords,
-			"features": biounit_features,
-			"labels": biounit_labels,
-			"chain_idxs": chain_indices # [start, end(exclusive)]
-		}
-
+	def other(self):
 		# for stats on dataset
 		self.seq_lengths.append(biounit_size)
 		for label in biounit_labels:
