@@ -4,8 +4,8 @@
 
 #BSUB -n 2
 #BSUB -R "span[ptile=2]"
-#BSUB -gpu "num=2:mode=shared:mps=yes"
-##BSUB -gpu "num=1:mode=exclusive_process"
+##BSUB -gpu "num=2:mode=shared:mps=yes"
+#BSUB -gpu "num=2:mode=exclusive_process"
 #BSUB -q gpu
 
 #BSUB -W 00:10
@@ -13,8 +13,8 @@
 
 ##BSUB -R "select[h100]"
 ##BSUB -R "select[a100 || h100]"
-#BSUB -R "select[a10 || a30]"
-##BSUB -R "select[l40 || a100 || h100]"
+##BSUB -R "select[a10 || a30]"
+#BSUB -R "select[l40 || a100 || h100]"
 
 #BSUB -o out.%J
 #BSUB -e err.%J
@@ -28,4 +28,5 @@ nvidia-smi
 
 export PYTHONPATH="/home/hjc2538/ondemand/data/sys/myjobs/projects/proteusAI/"
 
-torchrun --nproc_per_node=2 other/test_functions.py
+python tests/test_multi_gpu.py
+# torchrun --nproc_per_node=2 tests/test_functions.py
