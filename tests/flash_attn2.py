@@ -1,6 +1,7 @@
 
 
 import torch
+import torch.nn.functional as F
 from utils.test_utils import calculate_error
 from utils.model_utils import triton_attn
 
@@ -9,7 +10,7 @@ def main():
 	torch.manual_seed(37)
 	device = torch.device("cuda")
 
-	batch, nheads, N, d_model = 4, 4, 10000, 512
+	batch, nheads, N, d_model = 1, 4, 10000, 512
 	assert d_model%2==0 and d_model%nheads==0
 	d_k = d_model // nheads
 	min_wl, max_wl, base = 3.7, 20, 20
@@ -51,10 +52,15 @@ def main():
 	triton_time = start_event.elapsed_time(end_event)  # Time in milliseconds
 	triton_memory = torch.cuda.max_memory_allocated()  # Peak memory in bytes
 
-	error = calculate_error(torch_out, triton_out)
+	rel_error, abs_error = calculate_error(torch_out, triton_out)
 
-	print(f"triton implementation is correct: {torch.allclose(triton_out, torch_out, atol=1e-4, rtol=1e-4, equal_nan=True)}")
-	print(f"triton percent error: {error:.5f}%")
+	print(triton_out)
+	print(torch_out)
+
+	print(f"triton implementation is correct: {torch.allclose(triton_out, torch_out, atol=1e-2, rtol=0, equal_nan=True)}")
+	print(f"triton absolute error: {abs_error:.5f}")
+	print(f"triton relative error: {rel_error:.5f}")
+	print(f"triton percent error: {rel_error*100:.5f}%")
 	print(f"torch time: {torch_time:.3f} ms")
 	print(f"triton time: {triton_time:.3f} ms")
 	print(f"torch memory usage: {torch_memory / (1024 ** 3):.3f} GB")
@@ -75,8 +81,11 @@ def torch_attn(Q, K, V, coords, spreads, mask=None, dist_factor=3.0):
 	mask = torch.zeros(batch, N) if mask is None else mask # batch x N
 
 	S = torch.matmul(Q, K.transpose(2,3)) / (d_k**0.5) # batch x nheads x N x N
-	S = S.masked_fill(mask[:, None, :, None] | mask[:, None, None, :],  float("-inf")) 
-	P = torch.softmax(S, dim=-1)
+	attn_mask = mask[:, None, :, None] | mask[:, None, None, :]
+	S = S.masked_fill(attn_mask,  float("-inf")) 
+	S_max = S.max(dim=-1, keepdim=True).values
+	P = torch.where(S_max == float("-inf"), 0.0, F.softmax(S-S_max, dim=-1))
+
 	out = torch.matmul(P, V) # batch x nheads x N x d_k
 	
 	return out

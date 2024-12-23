@@ -219,7 +219,7 @@ def _triton_attn_kernel(
 	tot_Z: tl.constexpr,
 	nheads: tl.constexpr,
 	d_k: tl.constexpr,
-	min_d_k: tl.constexpr, # min(16, d_k) bc tl.dot requires dim>=16
+	min_d_k: tl.constexpr, # max(16, d_k) bc tl.dot requires dim>=16
 	softmax_scale: tl.constexpr,
 
 	BLOCK_I: tl.constexpr, # block sizes
@@ -272,8 +272,9 @@ def _triton_attn_kernel(
 
 	# initialize output and statistics block
 	Oi = tl.zeros_like(Qi)
-	li = tl.zeros((BLOCK_I, ), dtype=tl.float32)
-	mi = tl.zeros_like(li) - float("inf") 
+	li = tl.zeros((BLOCK_I, ), dtype=tl.float32) #+ 1.0
+	inf = float("inf")
+	mi = tl.zeros_like(li) - inf
 
 	# create mask pointer for Q/O rows. loading already masks out-of-bounds, 
 	# but also make custom mask to set masked vals to -inf in attention mechanism
@@ -286,7 +287,6 @@ def _triton_attn_kernel(
 		order=(0, )
 	)
 	mask_i = tl.load(mask_i_ptr, boundary_check=(0,), padding_option="zero").to(tl.int1) # N x d_k
-	mask_i = mask_i & ((I_offs + tl.arange(0, BLOCK_I)) < tot_N) # N
 
 	# create K/V column mask pointer (loaded in the next loop)
 	mask_j_ptr = tl.make_block_ptr( # N,
@@ -304,32 +304,31 @@ def _triton_attn_kernel(
 		# load K^T and the mask
 		KjT = tl.load(KjT_block_ptr, boundary_check=(0,1), padding_option="zero") # d_k x N
 		mask_j = tl.load(mask_j_ptr, boundary_check=(0,), padding_option="zero").to(tl.int1) # N
-		mask_j = mask_j & ((j*BLOCK_J + tl.arange(0, BLOCK_J)) < tot_N) # N
 
 		# QKT/sqrt(d_k)
 		Sij = tl.dot(Qi, KjT) * softmax_scale # N x N
 
 		# set masked positions to -inf
-		Sij = tl.where(mask_i[:, None] | mask_j[None, :], Sij, float("-inf")) # N x N
+		Sij = tl.where(mask_i[:, None] & mask_j[None, :], Sij, -inf) # N x N
 
-		# join mi and Sij_max to get N x 2, then compute max along axis 1 to get mij of shape N,
-		mij = tl.max(tl.join(mi, tl.max(Sij, axis=1)), axis=1) # N, 
+		# max pf each row
+		mij = tl.maximum(mi, tl.max(Sij, axis=1)) # N, 
 
 		# compute Pij
-		Pij = tl.exp(Sij - mij[:, None]) # N x N
+		Pij = tl.exp(tl.where(mij[:, None]==-inf, -inf, Sij - mij[:, None])) # N x N
 		lij = tl.sum(Pij, axis=1)
 
 		# compute alpha
-		alpha = tl.exp(mi - mij)
+		alpha = tl.exp(tl.where((mi==-inf) | (mij==-inf), tl.where((mi==-inf) & (mij==-inf), 0, -inf), mi - mij))
 		
 		# compute lij
 		li = alpha*li + lij # N, 
 
-		# load Vj
-		Vj = tl.load(Vj_block_ptr, boundary_check=(0,1), padding_option="zero") # N x d_k
-
 		# update output
 		Oi = Oi*alpha[:, None]
+
+		# load Vj
+		Vj = tl.load(Vj_block_ptr, boundary_check=(0,1), padding_option="zero") # N x d_k
 		Oi = tl.dot(Pij, Vj, Oi) # N x d_k
 
 		# update statistics
@@ -343,10 +342,11 @@ def _triton_attn_kernel(
 	# epliogue
 
 	# normalize output
-	Oi = Oi / li[:, None]
+	Oi = tl.where(mask_i[:, None], Oi / li[:, None], 0)
 
 	# compute log sum exponential
-	Li = mi + tl.log(li)
+	mi += tl.log(li)
+	mi = tl.where(mask_i, mi, -inf)
 
 	# create output block pointer
 	Oi_block_ptr = tl.make_block_ptr( # N x d_k
@@ -370,7 +370,7 @@ def _triton_attn_kernel(
 
 	# store output and logsum exp
 	tl.store(Oi_block_ptr, Oi, boundary_check=(0,1))
-	tl.store(Li_block_ptr, Li, boundary_check=(0,))
+	tl.store(Li_block_ptr, mi, boundary_check=(0,))
 
 class triton_attn(torch.autograd.Function):
 
@@ -401,13 +401,14 @@ class triton_attn(torch.autograd.Function):
 		spreads = spreads.contiguous()
 
 		# define block sizes (minimum of 16, as tl.dot needs all dimensions to be >=16)
-		BLOCK_I = 16 
+		BLOCK_I = 64 
 		BLOCK_J = 16
 		
 		# define the grid
 		grid = lambda args: (   triton.cdiv(args["tot_N"], args["BLOCK_I"]), 
 								args["tot_Z"]*args["nheads"],
-								1)
+								1
+							)
 
 		# run the kernel
 		_triton_attn_kernel[grid](  out, out.stride(0), out.stride(1), out.stride(2), out.stride(3), # batch x nheads x N x d_k
