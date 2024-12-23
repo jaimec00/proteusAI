@@ -174,66 +174,71 @@ def protein_to_wavefunc(coords, d_model, min_wl, max_wl, base, mask=None):
 
 @triton.jit
 def _triton_attn_kernel(
-	O_ptr,
+	O_ptr, # output
 	stride_O_Z,
 	stride_O_H,
 	stride_O_N,
 	stride_O_D,
 
-	Q_ptr,
+	Q_ptr, # query
 	stride_Q_Z,
 	stride_Q_H,
 	stride_Q_N,
 	stride_Q_D,
 	
-	K_ptr,
+	K_ptr, # key
 	stride_K_Z,
 	stride_K_H,
 	stride_K_N,
 	stride_K_D,
 	
-	V_ptr,
+	V_ptr, # value
 	stride_V_Z,
 	stride_V_H,
 	stride_V_N,
 	stride_V_D,
 
-	coords_ptr,
+	coords_ptr, # 3d coordinates
 	stride_coords_Z,
 	stride_coords_N,
 	stride_coords_S,
 
-	spread_ptr,
+	spread_ptr, # head specific spreads
 	stride_spread_H,
 
-	L_ptr,
+	L_ptr, # log sum exponential
 	stride_L_Z,
 	stride_L_H,
 	stride_L_N,
 
-	mask_ptr,
+	mask_ptr, # mask
 	stride_mask_Z,
 	stride_mask_N,
 
-	tot_N:tl.constexpr,
-	tot_Z:tl.constexpr,
-	nheads:tl.constexpr,
-	d_k:tl.constexpr,
-	min_d_k:tl.constexpr,
-	softmax_scale:tl.constexpr,
+	tot_N: tl.constexpr, # constants
+	tot_Z: tl.constexpr,
+	nheads: tl.constexpr,
+	d_k: tl.constexpr,
+	min_d_k: tl.constexpr, # min(16, d_k) bc tl.dot requires dim>=16
+	softmax_scale: tl.constexpr,
 
-	BLOCK_I:tl.constexpr,
-	BLOCK_J:tl.constexpr,
+	BLOCK_I: tl.constexpr, # block sizes
+	BLOCK_J: tl.constexpr,
 ):
 	# get block info
+
+	# get start index for query/output rows
 	start_I = tl.program_id(0)
-	start_ZH = tl.program_id(1) # note that exactly batch*nheads launched along y axis, so no need to mask this
+
+	# get the batch and head combo used for this block
+	start_ZH = tl.program_id(1) # note that exactly batch*nheads processes launched along y axis, so no need to mask this
 	start_Z = (start_ZH // nheads).to(tl.int64)
 	start_H = (start_ZH % nheads).to(tl.int64)
 
+	# calculate offset of this block
 	I_offs = (start_I.to(tl.int64)*BLOCK_I).to(tl.int32)
 
-	# create Q, K, V, and O block pointers
+	# create Q, K, and V block pointers
 	Qi_block_ptr = tl.make_block_ptr( # N x d_k
 		base=Q_ptr + (start_Z*stride_Q_Z) + (start_H*stride_Q_H),
 		shape=(tot_N, d_k),
@@ -250,7 +255,7 @@ def _triton_attn_kernel(
 		strides=(stride_K_D, stride_K_N),
 		offsets=(0, 0),
 		block_shape=(min_d_k, BLOCK_J),
-		order=(1, 0)
+		order=(0, 1)
 	)
 
 	Vj_block_ptr = tl.make_block_ptr( # N x d_k
@@ -262,21 +267,16 @@ def _triton_attn_kernel(
 		order=(0, 1)
 	)
 
-	# load the Qi block first, out of bounds values are 0
-	Qi_block = tl.load(Qi_block_ptr, boundary_check=(0,1), padding_option="zero") # N x d_k
+	# load the Qi block first, out of bounds values are 0, stays in SRAM throughout
+	Qi = tl.load(Qi_block_ptr, boundary_check=(0,1), padding_option="zero") # N x d_k
 
 	# initialize output and statistics block
-	Oi_block = tl.zeros_like(Qi_block)
-	li_block = tl.zeros((BLOCK_I, ), dtype=tl.float32)
-	mi_block = tl.zeros_like(li_block) - float("inf") 
+	Oi = tl.zeros_like(Qi)
+	li = tl.zeros((BLOCK_I, ), dtype=tl.float32)
+	mi = tl.zeros_like(li) - float("inf") 
 
-	# make an identity so can perform mat mults from linear arrays easily
-	identity_block_i = tl.where(
-		tl.arange(0, BLOCK_I)[:, None] == tl.arange(0, BLOCK_I)[None, :],
-		1.0,
-		0.0
-	)
-
+	# create mask pointer for Q/O rows. loading already masks out-of-bounds, 
+	# but also make custom mask to set masked vals to -inf in attention mechanism
 	mask_i_ptr = tl.make_block_ptr( # N,
 		base=mask_ptr + (start_Z*stride_mask_Z),
 		shape=(tot_N, ),
@@ -286,7 +286,9 @@ def _triton_attn_kernel(
 		order=(0, )
 	)
 	mask_i = tl.load(mask_i_ptr, boundary_check=(0,), padding_option="zero").to(tl.int1) # N x d_k
+	mask_i = mask_i & ((I_offs + tl.arange(0, BLOCK_I)) < tot_N) # N
 
+	# create K/V column mask pointer (loaded in the next loop)
 	mask_j_ptr = tl.make_block_ptr( # N,
 		base=mask_ptr + (start_Z*stride_mask_Z),
 		shape=(tot_N, ),
@@ -296,43 +298,57 @@ def _triton_attn_kernel(
 		order=(0, )
 	)
 
+	# loop through columns of K and V
 	for j in tl.range(0, triton.cdiv(tot_N, BLOCK_J), 1):
 
-		KjT_block = tl.load(KjT_block_ptr, boundary_check=(0,1), padding_option="zero") # d_k x N
-		Vj_block = tl.load(Vj_block_ptr, boundary_check=(0,1), padding_option="zero") # N x d_k
+		# load K^T and the mask
+		KjT = tl.load(KjT_block_ptr, boundary_check=(0,1), padding_option="zero") # d_k x N
 		mask_j = tl.load(mask_j_ptr, boundary_check=(0,), padding_option="zero").to(tl.int1) # N
+		mask_j = mask_j & ((j*BLOCK_J + tl.arange(0, BLOCK_J)) < tot_N) # N
 
-		Sij = tl.dot(Qi_block, KjT_block) / softmax_scale # N x N
+		# QKT/sqrt(d_k)
+		Sij = tl.dot(Qi, KjT) * softmax_scale # N x N
+
+		# set masked positions to -inf
 		Sij = tl.where(mask_i[:, None] | mask_j[None, :], Sij, float("-inf")) # N x N
 
 		# join mi and Sij_max to get N x 2, then compute max along axis 1 to get mij of shape N,
-		mij = tl.max(tl.join(mi_block, tl.max(Sij, axis=1)), axis=1) # N, 
+		mij = tl.max(tl.join(mi, tl.max(Sij, axis=1)), axis=1) # N, 
 
-		Pij = tl.exp(tl.where((Sij==float("-inf")) | (mij[:, None]==float("-inf")), float("-inf"), Sij - mij[:, None])) # N x N
+		# compute Pij
+		Pij = tl.exp(Sij - mij[:, None]) # N x N
+		lij = tl.sum(Pij, axis=1)
 
-		mi_mij_diff = tl.where((mi_block==float("-inf")) | (mij==float("-inf")), float("-inf"), mi_block - mij)
-		lij = tl.exp(mi_mij_diff)*li_block + tl.sum(Pij, axis=1) # N, 
+		# compute alpha
+		alpha = tl.exp(mi - mij)
+		
+		# compute lij
+		li = alpha*li + lij # N, 
 
-		diag_exp_inv = tl.where(
-			(mi_mij_diff)==float("-inf"), 
-			0.0, 
-			tl.exp(-mi_mij_diff)
-		)[:, None] * identity_block_i # N x N 
+		# load Vj
+		Vj = tl.load(Vj_block_ptr, boundary_check=(0,1), padding_option="zero") # N x d_k
 
-		Oi_block = tl.dot(diag_exp_inv, Oi_block) + tl.dot(Pij, Vj_block) # N x d_k
+		# update output
+		Oi = Oi*alpha[:, None]
+		Oi = tl.dot(Pij, Vj, Oi) # N x d_k
 
-		li_block = lij
-		mi_block = mij
+		# update statistics
+		mi = mij
 
+		# advance block pointers for columns
 		KjT_block_ptr = tl.advance(KjT_block_ptr, (0, BLOCK_J))
 		Vj_block_ptr = tl.advance(Vj_block_ptr, (BLOCK_J, 0))
 		mask_j_ptr = tl.advance(mask_j_ptr, (BLOCK_J, ))
 	
-	diag_li = identity_block_i*li_block[:, None]
-	diag_li_inv = tl.where(diag_li==0, 0.0, 1/diag_li)
-	Oi_block = tl.dot(diag_li_inv, Oi_block)
-	Li_block = mi_block + tl.log(li_block)
+	# epliogue
 
+	# normalize output
+	Oi = Oi / li[:, None]
+
+	# compute log sum exponential
+	Li = mi + tl.log(li)
+
+	# create output block pointer
 	Oi_block_ptr = tl.make_block_ptr( # N x d_k
 		base=O_ptr + (start_Z*stride_O_Z) + (start_H*stride_O_H),
 		shape=(tot_N, d_k),
@@ -342,6 +358,7 @@ def _triton_attn_kernel(
 		order=(0, 1)
 	)
 
+	# create log sum exp pointer
 	Li_block_ptr = tl.make_block_ptr( # N,
 		base=L_ptr + (start_Z*stride_L_Z) + (start_H*stride_L_H),
 		shape=(tot_N, ),
@@ -351,14 +368,16 @@ def _triton_attn_kernel(
 		order=(0, )
 	)
 
-	tl.store(Oi_block_ptr, Oi_block, boundary_check=(0,1))
-	tl.store(Li_block_ptr, Li_block, boundary_check=(0,))
+	# store output and logsum exp
+	tl.store(Oi_block_ptr, Oi, boundary_check=(0,1))
+	tl.store(Li_block_ptr, Li, boundary_check=(0,))
 
 class triton_attn(torch.autograd.Function):
 
 	@staticmethod
 	def forward(Q, K, V, coords, spreads, mask=None, dist_factor=3.0):
 		
+		# checks
 		assert (Q.shape == K.shape) and (K.shape == V.shape), f"Q, K, and V projection shapes must match, but got {Q.shape=}, {K.shape=}, {V.shape=}"
 		batch, nheads, N, d_k = Q.shape
 		d_model = nheads*d_k
@@ -369,23 +388,28 @@ class triton_attn(torch.autograd.Function):
 		assert spreads.size(0) == nheads, f"number of spreads must be equal to nheads, not {spreads.size(0)=} and {nheads=}"
 		assert torch.all(spreads != 0), f"spreads must be a tensor of non-zero floats, not {spreads}"
 
+		# initialize mask, output, and logsumexp tensors
 		mask = (torch.ones(batch, N, device=Q.device) if mask is None else ~mask).contiguous() # batch x N
 		out = torch.zeros(batch, nheads, N, d_k, device=Q.device).contiguous() # batch x N x d_model
 		L = torch.zeros(batch, nheads, N, device=Q.device).contiguous() # batch x nheads x N
 
+		# make sure everything is contiguous
 		Q = Q.contiguous()
 		K = K.contiguous()
 		V = V.contiguous()
 		coords = coords.contiguous()
 		spreads = spreads.contiguous()
 
+		# define block sizes (minimum of 16, as tl.dot needs all dimensions to be >=16)
 		BLOCK_I = 16 
-		BLOCK_J = BLOCK_I
+		BLOCK_J = 16
 		
+		# define the grid
 		grid = lambda args: (   triton.cdiv(args["tot_N"], args["BLOCK_I"]), 
 								args["tot_Z"]*args["nheads"],
 								1)
 
+		# run the kernel
 		_triton_attn_kernel[grid](  out, out.stride(0), out.stride(1), out.stride(2), out.stride(3), # batch x nheads x N x d_k
 									Q, Q.stride(0), Q.stride(1), Q.stride(2), Q.stride(3), # batch x nhead x N x d_k
 									K, K.stride(0), K.stride(1), K.stride(2), K.stride(3), # batch x nhead x N x d_k
@@ -394,7 +418,7 @@ class triton_attn(torch.autograd.Function):
 									spreads, spreads.stride(0), # nhead, 
 									L, L.stride(0), L.stride(1), L.stride(2), # batch x nhead x N
 									mask, mask.stride(0), mask.stride(1), # batch x N
-									N, batch, nheads, d_k, max(d_k, 16), d_k**0.5,
+									N, batch, nheads, d_k, max(d_k, 16), 1/(d_k**0.5),
 									BLOCK_I, BLOCK_J
 								)
 
