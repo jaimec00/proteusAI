@@ -1,7 +1,7 @@
 
 
 import torch
-from utils.model_utils import protein_to_wavefunc, protein_to_wavefunc_torch 
+# from utils.model_utils import protein_to_wavefunc, protein_to_wavefunc_torch 
 
 def main():
 
