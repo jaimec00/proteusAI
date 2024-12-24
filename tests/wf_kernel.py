@@ -53,31 +53,6 @@ def main():
 	print(f"triton kernel memory usage: {triton_memory / (1024 ** 3):.3f} GB")
 
 def protein_to_wavefunc_torch(coords, d_model, min_wl, max_wl, base, mask=None, max_splits=16):
-	'''
-	converts the alpha carbon coordinates of a protein into a tensor of 
-	wavefunction outputs.
-	converts a batch x N x 3 tensor to a batch x N x d_model tensor.
-	each feature for a Ca is their output of the wave function with a specific wavelength
-	each output gets two features, one for the real part, and another for the imaginary part
-	the wave function is a superposition of Green's functions, treating each Ca as a point source
-	note that this function is very memory conscious, planning on computing in portions along the wavelength (d_model)
-	dimension if required
-
-	Args:
-		coords (torch.Tensor):              tensor containing batches of Ca coords. 
-											size = batch x N x 3 
-		key_padding_mask (torch.Tensor):    tenor containing key padding mask
-											size = batch x N 
-		d_model (int):						features to create. d_model = number_of_wavelengths*2
-		return_wl (bool): 					whether to return the wavelengths used, useful for plotting 
-		min_wl (float):						minimum wavelength to use
-		max_wl (float):						maximum wavelength to use
-		base (int|float):					wavelengths are sampled logarithmically, chooses the base to use
-	
-	Returns:
-		features (torch.Tensor):    tensor containing batches of token (Ca) features.
-									size = batch x N x 512
-	'''
 
 
 	# get shape

@@ -1,3 +1,68 @@
+# ----------------------------------------------------------------------------------------------------------------------
+'''
+author: 		jaime cardenas
+title:  		featurization.py
+description:	converts alpha carbon coordinates to features by modeling each Ca as a point source using Green's
+				function solution to the Hemholtz eq. in 3D: 
+					nabla^2 psi_k(r) = k^2 * psi_k(r)
+
+				extending this equation to multiple point sources and superposing their wave functions:
+					sum_i=0^N( nabla^2 psi_k(r_i) ) = k^2*sum_i=0^N( psi_k(r_i) )
+
+				the solution to this eq. is:
+							 				  exp( ik * |r - r_n| )
+					psi_k(r) =	sum_n=0^N   -----------------------
+											       |r - r_n| 
+
+				since this corresponds to single wavenumber, k=(2pi / wavelength), we can assign a k value, and 
+				thus a wavelength to each feature space. note that the output of psi_k(r) is a complex number,
+				so each output generates two features, the real part and the imaginary part, i.e. cos and sin terms (euler's formula). 
+				so for a particular feature index, its feature is the real/imaginary (depends if odd or even) output of 
+				the wavefunction output for its position, r. we assign low index features to small wavelength,
+				representing local interactions, and large index features with large wavelengths, representing global interactions.
+
+				formally, the transformation termed WF, takes the feature index and protein coordinates as input,
+				the parameters that need to be defined are min_wl, max_wl, and base. these are used to sample
+				the wavelengths logarithmically, to emphasize shorter wavelengths, as those are more prone to large
+				fluctuations from small changes in wavelength
+
+				WF(r, 2i) = 	lambda <- min_wl + ( (max_wl-min_wl) * (base^(2i/d_model) - 1) / (base-1) )
+								k <- 2pi / lambda
+
+												  cos( k * |r - r_n| )
+								sum_n=0^N   	-----------------------
+												       |r - r_n| 
+								
+				WF(r, 2i+1) = 	lambda <- min_wl + ( (max_wl-min_wl) * (base^(2i/d_model) - 1) / (base-1) )
+								k <- 2pi / lambda	
+
+												  sin( k * |r - r_n| )
+								sum_n=0^N   	-----------------------
+												       |r - r_n| 
+
+				note that this is reminiscent of positional encoding:
+				
+											 pos 
+				PE(pos, 2i)	= 	sin( ----------------------- )
+										10000^(2i/d_model) 
+
+											 pos 
+				PE(pos, 2i)	= 	cos( ----------------------- )
+										10000^(2i/d_model) 
+
+				this is because the wave function featurization function serves as a generalization of positional encoding
+				for irregularly spaced tokens in arbitrary dimensions. this makes the model chain and sequence agnostic,
+				relying solely on the wave function features which depend on the spatial arrangement of the Ca coordinates.
+				the actual distances are also used in the model, by performing multi-scale gaussian attention on these features,
+				where each head uses a distinct spread in its RBF scaling computation, which aligns with the wavelengths
+				used to compute the features of the tokens for that head's target feature space. see utils/model_utils/attn.py  
+
+				while this computation would be memory intensive in pytorch, protein_to_wavefunc quickly and efficiently computes the
+				exact features by fusing all the required operations into a single triton kernel, with no approximation.
+
+'''
+# ----------------------------------------------------------------------------------------------------------------------
+
 import torch
 import math
 import triton
@@ -142,8 +207,31 @@ def _protein_to_wavefunc_kernel(
 
 class protein_to_wavefunc(torch.autograd.Function):
 
-	@staticmethod # might make wavelengths learnable and make a backward pass, but not focusing on MHA kernel first
+	@staticmethod # might make wavelengths learnable and make a backward pass, but focusing on MHA kernel first
 	def forward(ctx, coords, d_model, min_wl, max_wl, base, mask=None):
+		'''
+		converts the alpha carbon coordinates of a protein into a tensor of 
+		wavefunction outputs.
+		converts a batch x N x 3 tensor to a batch x N x d_model tensor.
+		each feature for a Ca is their output of the wave function with a specific wavelength
+		each output gets two features, one for the real part, and another for the imaginary part
+		the wave function is a superposition of Green's functions, treating each Ca as a point source
+
+		Args:
+			coords (torch.Tensor):              tensor containing batches of Ca coords. 
+												size = batch x N x 3 
+			d_model (int):						features to create. d_model = number_of_wavelengths*2
+			min_wl (float):						minimum wavelength to use
+			max_wl (float):						maximum wavelength to use
+			base (int|float):					wavelengths are sampled logarithmically, chooses the base to use
+			mask (torch.Tensor):    			tenor containing key padding mask
+												size = batch x N 
+		
+		Returns:
+			features (torch.Tensor):    tensor containing batches of token (Ca) features.
+										size = batch x N x d_model
+		'''
+
 
 		# checks
 		assert (coords.dim() == 3) and (coords.size(2) == 3), f"coords must be of shape (batch x N x 3), not {coords.shape}"
@@ -166,7 +254,7 @@ class protein_to_wavefunc(torch.autograd.Function):
 
 		# total block size should be less than number of threads per block (approx. 1024)
 		BLOCK_NJ = min(1024, triton.next_power_of_2(N))
-		BLOCK_NI = 1024 // BLOCK_NJ    # N_i
+		BLOCK_NI = triton.cdiv(1024, BLOCK_NJ)
 		BLOCK_D = 1
 		# BLOCK_NI x BLOCK_NJ <= 1024
 

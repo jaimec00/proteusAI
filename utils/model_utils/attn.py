@@ -1,8 +1,22 @@
 # ----------------------------------------------------------------------------------------------------------------------
 '''
 author: 		jaime cardenas
-title:  		utils.py
-description:	utility functions
+title:  		attn.py
+description:	multi-scale gaussian flash attention kernel written in triton. 
+				(in development, currently just flash_attention2)
+				kernel based on:
+					FlashAttention2 paper: https://arxiv.org/abs/2307.08691
+					Triton Implementation: https://github.com/triton-lang/triton/blob/main/python/tutorials/06-fused-attention.py
+				
+				Performs Flash attention, as described in the paper, but includes scaling of attention logits using RBF
+				functions based on euclidean distances of alpha carbon pairs. each head uses a distinct spread to compute
+				the RBFs, where the spread corresponds to (roughly) the average wavelength of the feature space it is 
+				operating on. wavelength, in this context, refers to the wavelength used to compute the wave function 
+				features for a particular feature index, see utils/model_utils/featurization.py). 
+
+				will include a forward and backward pass, currently implementing vanilla FlashAttention2 and make sure 
+				it is functioning before adding the gaussian scaling
+
 '''
 # ----------------------------------------------------------------------------------------------------------------------
 
@@ -212,11 +226,6 @@ def _attn_fwd(
 
 @triton.jit
 def _attn_bwd(
-	O_ptr,
-	stride_O_Z,
-	stride_O_H,
-	stride_O_N,
-	stride_O_D,
 
 	Q_ptr,
 	stride_Q_Z,
@@ -326,7 +335,7 @@ def _attn_bwd(
 	Vj = tl.load(Vj_ptr, boundary_check=(0, 1), padding_option="zero").to(tl.int1)
 
 	# initialize pointers for Qi, Oi, dQi, dOi, Li, and Di. only loaded within loop
-	Qi_ptr = tl.make_block_ptr( # N x d_k
+	Qi_block_ptr = tl.make_block_ptr( # N x d_k
 		base=Q_ptr + (start_Z*stride_Q_Z) + (start_H*stride_Q_H),
 		shape=(tot_N, d_k),
 		strides=(stride_Q_N, stride_Q_D),
@@ -335,25 +344,11 @@ def _attn_bwd(
 		order=(0, 1)
 	)
 
-	Oi_ptr = tl.make_block_ptr( # N x d_k
-		base=O_ptr + (start_Z*stride_O_Z) + (start_H*stride_O_H),
-		shape=(tot_N, d_k),
-		strides=(stride_O_N, stride_O_D),
-		offsets=(0, 0),
-		block_shape=(BLOCK_I, min_d_k),
-		order=(0, 1)
-	)
+	# perform atomic adds on dQi, which don't support block pointers, so do manual indexing
+	dQi_start_ptr = dQi_ptr + (start_Z*stride_dQ_Z) + (start_H*stride_dQ_H)
+	dQi_block_ptr = dQi_start_ptr + (tl.arange(0,BLOCK_I)[:, None]*stride_dQ_N) + (tl.arange(0,min_dk)[None, :]*stride_dQ_D)
 
-	dQi_ptr = tl.make_block_ptr( # N x d_k
-		base=dQi_ptr + (start_Z*stride_dQ_Z) + (start_H*stride_dQ_H),
-		shape=(tot_N, d_k),
-		strides=(stride_dQ_N, stride_dQ_D),
-		offsets=(0, 0),
-		block_shape=(BLOCK_I, min_d_k),
-		order=(0, 1)
-	)
-
-	dOi_ptr = tl.make_block_ptr( # N x d_k
+	dOi_block_ptr = tl.make_block_ptr( # N x d_k
 		base=dO_ptr + (start_Z*stride_dO_Z) + (start_H*stride_dO_H),
 		shape=(tot_N, d_k),
 		strides=(stride_dO_N, stride_dO_D),
@@ -362,7 +357,7 @@ def _attn_bwd(
 		order=(0, 1)
 	)
 
-	Li_ptr = tl.make_block_ptr( # N
+	Li_block_ptr = tl.make_block_ptr( # N
 		base=L_ptr + (start_Z*stride_L_Z) + (start_H*stride_L_H),
 		shape=(tot_N, ),
 		strides=(stride_L_N, ),
@@ -371,7 +366,7 @@ def _attn_bwd(
 		order=(0, )
 	)
 
-	Di_ptr = tl.make_block_ptr( # N
+	Di_block_ptr = tl.make_block_ptr( # N
 		base=D_ptr + (start_Z*stride_D_Z) + (start_H*stride_D_H),
 		shape=(tot_N, ),
 		strides=(stride_D_N, ),
@@ -390,32 +385,42 @@ def _attn_bwd(
 		order=(0, )
 	)
 
+	inf = float("inf") # convenience
 	for i in tl.range(0, triton.cdiv(tot_N, BLOCK_J), 1):
 
-		# load the tensors to SRAM
-		Qi = tl.load(Qi_ptr, boundary_check=(0, 1), padding_option="zeros")
-		Oi = tl.load(Oi_ptr, boundary_check=(0, 1), padding_option="zeros")
-		dQi = tl.load(dQi_ptr, boundary_check=(0, 1), padding_option="zeros")
-		dOi = tl.load(dOi_ptr, boundary_check=(0, 1), padding_option="zeros")
-		Li = tl.load(Li_ptr, boundary_check=(0, ), padding_option="zeros")
-		Di = tl.load(Di_ptr, boundary_check=(0, ), padding_option="zeros")
-		mask_i = tl.load(mask_i_ptr, boundary_check=(0, ), padding_option="zeros")
-		
-		# LOGIC
+		Qi = tl.load(Qi_block_ptr, boundary_check=(0, 1), padding_option="zeros")
+		Sij = tl.dot(Qi, KjT) # N x N
+
+		mask_i = tl.load(mask_i_block_ptr, boundary_check=(0, ), padding_option="zeros").to(tl.int1)
+		attn_mask = mask_i[:, None] & mask_j[None, :] # N x N
+		Li = tl.load(Li_block_ptr, boundary_check=(0, ), padding_option="zeros")
+		Pij = tl.exp(tl.where(attn_mask, Sij - Li[:, None], -inf)) # N x N
+
+		dOi = tl.load(dOi_block_ptr, boundary_check=(0, 1), padding_option="zeros")
+		dVj = tl.dot(tl.permute(Pij, (1,0)), dOi, dVj)
+
+		dPij = tl.dot(dOi, tl.permute(Vj, (1,0)))
+
+		Di = tl.load(Di_block_ptr, boundary_check=(0, ), padding_option="zeros")
+		dSij = Pij * (dPij - Di[:, None])
+
+		# will do atomic add instead of loading, as other J in parallel leads to race condition
+		dQi = tl.dot(dSij, tl.permute(KjT, (1,0)))
+		dQi_mask = mask_i[:, None] & (tl.arange(0,min_dk)[None, :] < d_k)
+		tl.atomic_add(dQi_block_ptr, dQi, mask=dQi_mask)
+
+		dKj = tl.dot(tl.permute(dSij, (1,0)), Qi, dKj)
 
 		# advance the pointers
-		Qi_ptr = tl.advance(Qi_ptr, (BLOCK_I, 0))
-		Oi_ptr = tl.advance(Oi_ptr, (BLOCK_I, 0))
-		dQi_ptr = tl.advance(dQi_ptr, (BLOCK_I, 0))
-		dOi_ptr = tl.advance(dOi_ptr, (BLOCK_I, 0))
-		Li_ptr = tl.advance(Li_ptr, (BLOCK_I, ))
-		Di_ptr = tl.advance(Di_ptr, (BLOCK_I, ))
+		Qi_block_ptr = tl.advance(Qi_block_ptr, (BLOCK_I, 0))
+		dQi_block_ptr += BLOCK_I*stride_dQ_N
+		dOi_block_ptr = tl.advance(dOi_block_ptr, (BLOCK_I, 0))
+		Li_block_ptr = tl.advance(Li_block_ptr, (BLOCK_I, ))
+		Di_block_ptr = tl.advance(Di_block_ptr, (BLOCK_I, ))
 		mask_i_ptr = tl.advance(mask_i_ptr, (BLOCK_I, ))
 
-
-
 	# initialize dK and dV pointers to write output
-	dKj_ptr = tl.make_block_ptr( # N x d_k
+	dKj_block_ptr = tl.make_block_ptr( # N x d_k
 		base=dK_ptr + (start_Z*stride_dK_Z) + (start_H*stride_dK_H),
 		shape=(tot_N, d_k),
 		strides=(stride_dK_N, stride_dK_D),
@@ -424,7 +429,7 @@ def _attn_bwd(
 		order=(0, 1)
 	)
 
-	dVj_ptr = tl.make_block_ptr( # N x d_k
+	dVj_block_ptr = tl.make_block_ptr( # N x d_k
 		base=dV_ptr + (start_Z*stride_dV_Z) + (start_H*stride_dV_H),
 		shape=(tot_N, d_k),
 		strides=(stride_V_N, stride_V_D),
@@ -433,9 +438,8 @@ def _attn_bwd(
 		order=(0, 1)
 	)
 
-
-
-
+	tl.store(dKj_block_ptr, dKj, boundary_check=(0,1))
+	tl.store(dVj_block_ptr, dVj, boundary_check=(0,1))
 
 class attn(torch.autograd.Function):
 
@@ -477,20 +481,19 @@ class attn(torch.autograd.Function):
 							)
 
 		# run the kernel
-		_attn_fwd[grid](  out, out.stride(0), out.stride(1), out.stride(2), out.stride(3), # batch x nheads x N x d_k
-									Q, Q.stride(0), Q.stride(1), Q.stride(2), Q.stride(3), # batch x nhead x N x d_k
-									K, K.stride(0), K.stride(1), K.stride(2), K.stride(3), # batch x nhead x N x d_k
-									V, V.stride(0), V.stride(1), V.stride(2), V.stride(3), # batch x nhead x N x d_k
-									coords, coords.stride(0), coords.stride(1), coords.stride(2), # batch x N x 3
-									spreads, spreads.stride(0), # nhead, 
-									L, L.stride(0), L.stride(1), L.stride(2), # batch x nhead x N
-									mask, mask.stride(0), mask.stride(1), # batch x N
-									N, batch, nheads, d_k, max(d_k, 16), softmax_scale,
-									BLOCK_I, BLOCK_J
-								)
+		_attn_fwd[grid](  	out, out.stride(0), out.stride(1), out.stride(2), out.stride(3), # batch x nheads x N x d_k
+							Q, Q.stride(0), Q.stride(1), Q.stride(2), Q.stride(3), # batch x nhead x N x d_k
+							K, K.stride(0), K.stride(1), K.stride(2), K.stride(3), # batch x nhead x N x d_k
+							V, V.stride(0), V.stride(1), V.stride(2), V.stride(3), # batch x nhead x N x d_k
+							coords, coords.stride(0), coords.stride(1), coords.stride(2), # batch x N x 3
+							spreads, spreads.stride(0), # nhead, 
+							L, L.stride(0), L.stride(1), L.stride(2), # batch x nhead x N
+							mask, mask.stride(0), mask.stride(1), # batch x N
+							N, batch, nheads, d_k, max(d_k, 16), softmax_scale,
+							BLOCK_I, BLOCK_J
+						)
 
 		ctx.save_for_backward(Q, K, V, out, L)
-		ctx.grid = grid
 		ctx.softmax_scale = softmax_scale
 
 		return out
@@ -516,9 +519,7 @@ class attn(torch.autograd.Function):
 			1
 		)
 
-		_attn_bwd[grid](
-							O, O.stride(0), O.stride(1), O.stride(2), O.stride(3),
-							Q, Q.stride(0), Q.stride(1), Q.stride(2), Q.stride(3), 
+		_attn_bwd[grid](	Q, Q.stride(0), Q.stride(1), Q.stride(2), Q.stride(3), 
 							K, K.stride(0), K.stride(1), K.stride(2), K.stride(3), 
 							V, V.stride(0), V.stride(1), V.stride(2), V.stride(3), 
 							dO, dO.stride(0), dO.stride(1), dO.stride(2), dO.stride(3), 
@@ -532,5 +533,6 @@ class attn(torch.autograd.Function):
 							BLOCK_I, BLOCK_J
 						 )
 
-		return dQ, dK, dV
+		return dQ, dK, dV, None, None, None, None
+		# possibly make spreads and dist factor learnable, but we'll see
 
