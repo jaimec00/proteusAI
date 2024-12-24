@@ -3,7 +3,7 @@
 import torch
 import torch.nn.functional as F
 from utils.test_utils import calculate_error
-from utils.model_utils import triton_attn
+from utils.model_utils.attn import attn
 
 def main():
 

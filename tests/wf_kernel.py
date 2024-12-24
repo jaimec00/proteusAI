@@ -1,7 +1,7 @@
 
 
 import torch
-from utils.model_utils import protein_to_wavefunc 
+from utils.model_utils.featurization import protein_to_wavefunc 
 
 import triton
 import triton.language as tl
