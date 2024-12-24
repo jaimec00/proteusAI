@@ -163,7 +163,7 @@ def _attn_fwd(
 		# set masked positions to -inf
 		Sij = tl.where(mask_i[:, None] & mask_j[None, :], Sij, -inf) # N x N
 
-		# max pf each row
+		# max of each row
 		mij = tl.maximum(mi, tl.max(Sij, axis=1)) # N, 
 
 		# compute Pij
@@ -388,7 +388,7 @@ def _attn_bwd(
 	for i in tl.range(0, triton.cdiv(tot_N, BLOCK_J), 1):
 
 		Qi = tl.load(Qi_block_ptr, boundary_check=(0, 1), padding_option="zero")
-		Sij = tl.dot(Qi, KjT) # N x N
+		Sij = tl.dot(Qi, KjT) * softmax_scale # N x N
 
 		mask_i = tl.load(mask_i_ptr, boundary_check=(0, ), padding_option="zero").to(tl.int1)
 		attn_mask = mask_i[:, None] & mask_j[None, :] # N x N
@@ -396,7 +396,7 @@ def _attn_bwd(
 		Pij = tl.exp(tl.where(attn_mask, Sij - Li[:, None], -inf)) # N x N
 
 		dOi = tl.load(dOi_block_ptr, boundary_check=(0, 1), padding_option="zero")
-		dVj = tl.dot(tl.permute(Pij, (1,0)), dOi, dVj)
+		dVj += tl.where(mask_j[:, None], tl.dot(tl.permute(Pij, (1,0)), dOi), 0.0)
 
 		dPij = tl.dot(dOi, tl.permute(Vj, (1,0)))
 
@@ -404,12 +404,12 @@ def _attn_bwd(
 		dSij = Pij * (dPij - Di[:, None])
 
 		# will do atomic add instead of loading, as other J in parallel leads to race condition
-		dQi = tl.dot(dSij, tl.permute(KjT, (1,0)))
+		dQi = tl.dot(dSij, tl.permute(KjT, (1,0))) * softmax_scale
 		dQi_mask = mask_i[:, None] & (tl.arange(0,min_d_k)[None, :] < d_k)
 		# tl.device_print("", dQi_mask)
 		tl.atomic_add(dQi_block_ptr, dQi, mask=dQi_mask)
 
-		dKj = tl.dot(tl.permute(dSij, (1,0)), Qi, dKj)
+		dKj += tl.where(mask_j[:, None], tl.dot(tl.permute(dSij, (1,0)), Qi), 0.0) * softmax_scale
 
 		# advance the pointers
 		Qi_block_ptr = tl.advance(Qi_block_ptr, (BLOCK_I, 0))
@@ -515,7 +515,7 @@ class attn(torch.autograd.Function):
 		spreads.contiguous()
 		mask.contiguous()
 
-		BLOCK_I = 16
+		BLOCK_I = 32
 		BLOCK_J = 16
 
 		# initialize mask, output, and logsumexp tensors
