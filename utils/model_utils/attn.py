@@ -306,7 +306,7 @@ def _attn_bwd(
 		order=(0, 1)
 	)
 
-	# initialize masks, mask_i is only loaded within for loop as it changes each iter
+	# initialize mask for j columns
 	mask_j_ptr = tl.make_block_ptr( # N 
 		base=mask_ptr + (start_Z*stride_mask_Z),
 		shape=(tot_N, ),
@@ -317,15 +317,6 @@ def _attn_bwd(
 	)
 	mask_j = tl.load(mask_j_ptr, boundary_check=(0, ), padding_option="zero").to(tl.int1)
 
-	mask_i_ptr = tl.make_block_ptr( # N 
-		base=mask_ptr + (start_Z*stride_mask_Z),
-		shape=(tot_N, ),
-		strides=(stride_mask_N, ),
-		offsets=(0, ),
-		block_shape=(BLOCK_I, ),
-		order=(0, )
-	)
-
 	# initialize dKj and dVj
 	dKj = tl.zeros((BLOCK_J, d_k), dtype=tl.float32)
 	dVj = tl.zeros((BLOCK_J, d_k), dtype=tl.float32)
@@ -335,12 +326,93 @@ def _attn_bwd(
 	Vj = tl.load(Vj_ptr, boundary_check=(0, 1), padding_option="zero").to(tl.int1)
 
 	# initialize pointers for Qi, Oi, dQi, dOi, Li, and Di. only loaded within loop
-	 
+	Qi_ptr = tl.make_block_ptr( # N x d_k
+		base=Q_ptr + (start_Z*stride_Q_Z) + (start_H*stride_Q_H),
+		shape=(tot_N, d_k),
+		strides=(stride_Q_N, stride_Q_D),
+		offsets=(0, 0),
+		block_shape=(BLOCK_I, min_d_k),
+		order=(0, 1)
+	)
+
+	Oi_ptr = tl.make_block_ptr( # N x d_k
+		base=O_ptr + (start_Z*stride_O_Z) + (start_H*stride_O_H),
+		shape=(tot_N, d_k),
+		strides=(stride_O_N, stride_O_D),
+		offsets=(0, 0),
+		block_shape=(BLOCK_I, min_d_k),
+		order=(0, 1)
+	)
+
+	dQi_ptr = tl.make_block_ptr( # N x d_k
+		base=dQi_ptr + (start_Z*stride_dQ_Z) + (start_H*stride_dQ_H),
+		shape=(tot_N, d_k),
+		strides=(stride_dQ_N, stride_dQ_D),
+		offsets=(0, 0),
+		block_shape=(BLOCK_I, min_d_k),
+		order=(0, 1)
+	)
+
+	dOi_ptr = tl.make_block_ptr( # N x d_k
+		base=dO_ptr + (start_Z*stride_dO_Z) + (start_H*stride_dO_H),
+		shape=(tot_N, d_k),
+		strides=(stride_dO_N, stride_dO_D),
+		offsets=(0, 0),
+		block_shape=(BLOCK_I, min_d_k),
+		order=(0, 1)
+	)
+
+	Li_ptr = tl.make_block_ptr( # N
+		base=L_ptr + (start_Z*stride_L_Z) + (start_H*stride_L_H),
+		shape=(tot_N, ),
+		strides=(stride_L_N, ),
+		offsets=(0, ),
+		block_shape=(BLOCK_I, ),
+		order=(0, )
+	)
+
+	Di_ptr = tl.make_block_ptr( # N
+		base=D_ptr + (start_Z*stride_D_Z) + (start_H*stride_D_H),
+		shape=(tot_N, ),
+		strides=(stride_D_N, ),
+		offsets=(0, ),
+		block_shape=(BLOCK_I, ),
+		order=(0, )
+	)
+
+	# initialize mask for i rows
+	mask_i_ptr = tl.make_block_ptr( # N 
+		base=mask_ptr + (start_Z*stride_mask_Z),
+		shape=(tot_N, ),
+		strides=(stride_mask_N, ),
+		offsets=(0, ),
+		block_shape=(BLOCK_I, ),
+		order=(0, )
+	)
 
 	for i in tl.range(0, triton.cdiv(tot_N, BLOCK_J), 1):
+
+		# load the tensors to SRAM
+		Qi = tl.load(Qi_ptr, boundary_check=(0, 1), padding_option="zeros")
+		Oi = tl.load(Oi_ptr, boundary_check=(0, 1), padding_option="zeros")
+		dQi = tl.load(dQi_ptr, boundary_check=(0, 1), padding_option="zeros")
+		dOi = tl.load(dOi_ptr, boundary_check=(0, 1), padding_option="zeros")
+		Li = tl.load(Li_ptr, boundary_check=(0, ), padding_option="zeros")
+		Di = tl.load(Di_ptr, boundary_check=(0, ), padding_option="zeros")
+		mask_i = tl.load(mask_i_ptr, boundary_check=(0, ), padding_option="zeros")
 		
-		mask_j_ptr = tl.advance(mask_j_ptr, (BLOCK_J))
-		mask_j_ptr = tl.advance(mask_j_ptr, (BLOCK_J))
+		# LOGIC
+
+		# advance the pointers
+		Qi_ptr = tl.advance(Qi_ptr, (BLOCK_I, 0))
+		Oi_ptr = tl.advance(Oi_ptr, (BLOCK_I, 0))
+		dQi_ptr = tl.advance(dQi_ptr, (BLOCK_I, 0))
+		dOi_ptr = tl.advance(dOi_ptr, (BLOCK_I, 0))
+		Li_ptr = tl.advance(Li_ptr, (BLOCK_I, ))
+		Di_ptr = tl.advance(Di_ptr, (BLOCK_I, ))
+		mask_i_ptr = tl.advance(mask_i_ptr, (BLOCK_I, ))
+
+
 
 	# initialize dK and dV pointers to write output
 	dKj_ptr = tl.make_block_ptr( # N x d_k
@@ -462,11 +534,3 @@ class attn(torch.autograd.Function):
 
 		return dQ, dK, dV
 
-
-
-def mod_d_model(wf_features, trgt_d_model):
-
-    if wf_features.size(-1) == trgt_d_model:
-    	return wf_features
-    else:
-        raise NotImplementedError

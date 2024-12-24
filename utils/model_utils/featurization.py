@@ -189,3 +189,10 @@ class protein_to_wavefunc(torch.autograd.Function):
 		out.div_(out.abs().max(dim=1, keepdim=True).values)
 
 		return out
+
+def mod_d_model(wf_features, trgt_d_model):
+
+    if wf_features.size(-1) == trgt_d_model:
+    	return wf_features
+    else:
+        raise NotImplementedError
