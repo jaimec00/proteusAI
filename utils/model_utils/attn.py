@@ -273,7 +273,6 @@ def _attn_bwd(
 	stride_D_Z,
 	stride_D_H,
 	stride_D_N,
-	stride_D_D,
 
 	L_ptr,
 	stride_L_Z,
@@ -284,9 +283,9 @@ def _attn_bwd(
 	stride_mask_Z,
 	stride_mask_N,
 
-	tot_N: tl.constexpr, tot_Z: tl.constexpr, 
+	tot_Z: tl.constexpr, tot_N: tl.constexpr, 
 	nheads: tl.constexpr, 
-	d_k: tl.constexpr, min_dk: tl.constexpr, softmax_scale: tl.constexpr,
+	d_k: tl.constexpr, min_d_k: tl.constexpr, softmax_scale: tl.constexpr,
 	BLOCK_I: tl.constexpr, BLOCK_J: tl.constexpr
 ):
 	J_start = tl.program_id(0)
@@ -331,8 +330,8 @@ def _attn_bwd(
 	dVj = tl.zeros((BLOCK_J, d_k), dtype=tl.float32)
 
 	# load KjT and Vj
-	KjT = tl.load(KjT_ptr, boundary_check=(0, 1), padding_option="zero").to(tl.int1)
-	Vj = tl.load(Vj_ptr, boundary_check=(0, 1), padding_option="zero").to(tl.int1)
+	KjT = tl.load(KjT_ptr, boundary_check=(0, 1), padding_option="zero")
+	Vj = tl.load(Vj_ptr, boundary_check=(0, 1), padding_option="zero")
 
 	# initialize pointers for Qi, Oi, dQi, dOi, Li, and Di. only loaded within loop
 	Qi_block_ptr = tl.make_block_ptr( # N x d_k
@@ -345,8 +344,8 @@ def _attn_bwd(
 	)
 
 	# perform atomic adds on dQi, which don't support block pointers, so do manual indexing
-	dQi_start_ptr = dQi_ptr + (start_Z*stride_dQ_Z) + (start_H*stride_dQ_H)
-	dQi_block_ptr = dQi_start_ptr + (tl.arange(0,BLOCK_I)[:, None]*stride_dQ_N) + (tl.arange(0,min_dk)[None, :]*stride_dQ_D)
+	dQi_start_ptr = dQ_ptr + (start_Z*stride_dQ_Z) + (start_H*stride_dQ_H)
+	dQi_block_ptr = dQi_start_ptr + (tl.arange(0,BLOCK_I)[:, None]*stride_dQ_N) + (tl.arange(0,min_d_k)[None, :]*stride_dQ_D)
 
 	dOi_block_ptr = tl.make_block_ptr( # N x d_k
 		base=dO_ptr + (start_Z*stride_dO_Z) + (start_H*stride_dO_H),
@@ -388,25 +387,26 @@ def _attn_bwd(
 	inf = float("inf") # convenience
 	for i in tl.range(0, triton.cdiv(tot_N, BLOCK_J), 1):
 
-		Qi = tl.load(Qi_block_ptr, boundary_check=(0, 1), padding_option="zeros")
+		Qi = tl.load(Qi_block_ptr, boundary_check=(0, 1), padding_option="zero")
 		Sij = tl.dot(Qi, KjT) # N x N
 
-		mask_i = tl.load(mask_i_block_ptr, boundary_check=(0, ), padding_option="zeros").to(tl.int1)
+		mask_i = tl.load(mask_i_ptr, boundary_check=(0, ), padding_option="zero").to(tl.int1)
 		attn_mask = mask_i[:, None] & mask_j[None, :] # N x N
-		Li = tl.load(Li_block_ptr, boundary_check=(0, ), padding_option="zeros")
+		Li = tl.load(Li_block_ptr, boundary_check=(0, ), padding_option="zero")
 		Pij = tl.exp(tl.where(attn_mask, Sij - Li[:, None], -inf)) # N x N
 
-		dOi = tl.load(dOi_block_ptr, boundary_check=(0, 1), padding_option="zeros")
+		dOi = tl.load(dOi_block_ptr, boundary_check=(0, 1), padding_option="zero")
 		dVj = tl.dot(tl.permute(Pij, (1,0)), dOi, dVj)
 
 		dPij = tl.dot(dOi, tl.permute(Vj, (1,0)))
 
-		Di = tl.load(Di_block_ptr, boundary_check=(0, ), padding_option="zeros")
+		Di = tl.load(Di_block_ptr, boundary_check=(0, ), padding_option="zero")
 		dSij = Pij * (dPij - Di[:, None])
 
 		# will do atomic add instead of loading, as other J in parallel leads to race condition
 		dQi = tl.dot(dSij, tl.permute(KjT, (1,0)))
-		dQi_mask = mask_i[:, None] & (tl.arange(0,min_dk)[None, :] < d_k)
+		dQi_mask = mask_i[:, None] & (tl.arange(0,min_d_k)[None, :] < d_k)
+		# tl.device_print("", dQi_mask)
 		tl.atomic_add(dQi_block_ptr, dQi, mask=dQi_mask)
 
 		dKj = tl.dot(tl.permute(dSij, (1,0)), Qi, dKj)
@@ -493,25 +493,35 @@ class attn(torch.autograd.Function):
 							BLOCK_I, BLOCK_J
 						)
 
-		ctx.save_for_backward(Q, K, V, out, L)
+		ctx.save_for_backward(Q, K, V, out, L, coords, spreads, mask)
 		ctx.softmax_scale = softmax_scale
+		ctx.dist_factor = dist_factor
 
 		return out
 
 	@staticmethod
 	def backward(ctx, dO):
-		Q, K, V, O, L = ctx.saved_tensors
+		Q, K, V, O, L, coords, spreads, mask = ctx.saved_tensors
 		D = torch.sum(O*dO, dim=3) # Z x H x N x D -> Z x H x N
-		assert q.stride() == k.stride() == v.stride() == o.stride() == do.stride()
+		assert Q.stride() == K.stride() == V.stride() == O.stride()
 		batch, nheads, N, d_k = Q.shape 
+
+		Q.contiguous()
+		K.contiguous()
+		V.contiguous()
+		D.contiguous()
+		L.contiguous()
+		coords.contiguous()
+		spreads.contiguous()
+		mask.contiguous()
 
 		BLOCK_I = 16
 		BLOCK_J = 16
 
 		# initialize mask, output, and logsumexp tensors
-		dQ = torch.zeros_like(Q)
-		dK = torch.zeros_like(K)
-		dV = torch.zeros_like(V)
+		dQ = torch.zeros_like(Q).contiguous()
+		dK = torch.zeros_like(K).contiguous()
+		dV = torch.zeros_like(V).contiguous()
 		
 		grid = lambda args: (
 			triton.cdiv(args["tot_N"], args["BLOCK_J"]), # parralel along J for bwd
@@ -528,7 +538,7 @@ class attn(torch.autograd.Function):
 							dV, dV.stride(0), dV.stride(1), dV.stride(2), dV.stride(3),
 							D, D.stride(0), D.stride(1), D.stride(2),
 							L, L.stride(0), L.stride(1), L.stride(2),
-							mask, mask.stride(0), mask.stride(1), mask.stride(2),
+							mask, mask.stride(0), mask.stride(1),
 							batch, N, nheads, d_k, max(d_k, 16), ctx.softmax_scale,
 							BLOCK_I, BLOCK_J
 						 )

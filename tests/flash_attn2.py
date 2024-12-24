@@ -45,7 +45,7 @@ def main():
 	torch.cuda.reset_peak_memory_stats()
 	start_event.record()
 
-	triton_out = triton_attn.apply(Q, K, V, coords, spreads, mask) # batch x N x d_model
+	triton_out = attn.apply(Q, K, V, coords, spreads, mask) # batch x N x d_model
 
 	end_event.record()
 	torch.cuda.synchronize()  # Wait for all GPU work to finish
@@ -74,7 +74,7 @@ def main():
 
 	# torch
 	torch_out.sum().backward()
-	torch_dQ, torch_dK, torch_dV = [Q.grad, K.grad, V.grad]
+	torch_dQ, torch_dK, torch_dV = [Q.grad.clone(), K.grad.clone(), V.grad.clone()]
 
 	end_event.record()
 	torch.cuda.synchronize()  # Wait for all GPU work to finish
@@ -91,7 +91,7 @@ def main():
 
 	# triton
 	triton_out.sum().backward()
-	triton_dQ, triton_dK, triton_dV = [Q.grad, K.grad, V.grad]
+	triton_dQ, triton_dK, triton_dV = [Q.grad.clone(), K.grad.clone(), V.grad.clone()]
 
 	end_event.record()
 	torch.cuda.synchronize()  # Wait for all GPU work to finish
@@ -105,13 +105,13 @@ def main():
 	print(f"triton dQ percent error: {Q_rel_error*100:.5f}%\n")
 
 	K_rel_error, K_abs_error = calculate_error(torch_dK, triton_dK)
-	print(f"dK is correct: {torch.allclose(triton_out, torch_out, atol=atol, rtol=rtol, eKual_nan=True)}")
+	print(f"dK is correct: {torch.allclose(triton_out, torch_out, atol=atol, rtol=rtol, equal_nan=True)}")
 	print(f"triton dK absolute error: {K_abs_error:.5f}")
 	print(f"triton dK relative error: {K_rel_error:.5f}")
 	print(f"triton dK percent error: {K_rel_error*100:.5f}%\n")
 
 	V_rel_error, V_abs_error = calculate_error(torch_dV, triton_dV)
-	print(f"dV is correct: {torch.allclose(triton_out, torch_out, atol=atol, rtol=rtol, eVual_nan=True)}")
+	print(f"dV is correct: {torch.allclose(triton_out, torch_out, atol=atol, rtol=rtol, equal_nan=True)}")
 	print(f"triton dV absolute error: {V_abs_error:.5f}")
 	print(f"triton dV relative error: {V_rel_error:.5f}")
 	print(f"triton dV percent error: {V_rel_error*100:.5f}%\n")
