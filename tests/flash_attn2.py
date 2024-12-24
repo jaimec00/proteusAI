@@ -17,7 +17,7 @@ def main():
 
 	coords = max_wl * torch.randn((batch, N, 3), dtype=torch.float64, device=device) # batch x N x 3
 	spreads = min_wl + (torch.logspace(0, 1, nheads, base, dtype=torch.float32, device=coords.device) - 1) / (base-1) * (max_wl-min_wl) # nheads,
-	mask = torch.rand((batch, N), device=coords.device) > 1 # batch x N
+	mask = torch.rand((batch, N), device=coords.device) > 0.8 # batch x N
 
 	# getting numerical instability with exponential computations, so will apply 
 	# layer norm after projections in real model, but for now just initialize a 
@@ -45,7 +45,7 @@ def main():
 	torch.cuda.reset_peak_memory_stats()
 	start_event.record()
 
-	triton_out = triton_attn.forward(Q, K, V, coords, spreads, mask=mask) # batch x N x d_model
+	triton_out = triton_attn.apply(Q, K, V, coords, spreads, mask) # batch x N x d_model
 
 	end_event.record()
 	torch.cuda.synchronize()  # Wait for all GPU work to finish
