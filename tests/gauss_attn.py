@@ -109,7 +109,7 @@ def torch_attn(Q, K, V, coords, spreads, mask=None, dist_factor=3.0):
 
 	S = torch.matmul(Q, K.transpose(2,3)) / (d_k**0.5) # batch x nheads x N x N
 	attn_mask = mask[:, None, :, None] | mask[:, None, None, :] #| dists_mask
-	S = torch.where(attn_mask, float("-inf"), S)
+	S = torch.where(attn_mask, float("-inf"), dists)#S)
 
 	# S_max = S.max(dim=-1, keepdim=True).values
 	# exp_sum = torch.exp(S).sum(dim=-1, keepdim=True)

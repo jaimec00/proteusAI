@@ -166,7 +166,7 @@ def _attn_fwd(
 		Sij = tl.dot(Qi, KjT) * softmax_scale # N x N
 
 		# scale attention logits by rbf
-		Sij = tl.where(attn_mask, Sij, -inf) # N x N
+		Sij = tl.where(attn_mask, dists, -inf) # N x N
 
 		# tl.device_print("", rbfs)
 
