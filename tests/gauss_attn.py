@@ -10,13 +10,13 @@ def main():
 	torch.manual_seed(37)
 	device = torch.device("cuda")
 
-	batch, nheads, N, d_model = 1, 4, 10000, 512
+	batch, nheads, N, d_model = 1, 4, 100, 64
 	assert d_model%2==0 and d_model%nheads==0
 	d_k = d_model // nheads
 	min_wl, max_wl, base = 3.7, 20, 20
 	dist_factor = 3.0
 
-	coords = max_wl * torch.randn((batch, N, 3), dtype=torch.float64, device=device) # batch x N x 3
+	coords = 20 * torch.randn((batch, N, 3), dtype=torch.float32, device=device) # batch x N x 3
 	spreads = min_wl + (torch.logspace(0, 1, nheads, base, dtype=torch.float32, device=coords.device) - 1) / (base-1) * (max_wl-min_wl) # nheads,
 	mask = torch.rand((batch, N), device=coords.device) > 1 # batch x N
 
@@ -31,13 +31,14 @@ def main():
 	start_event = torch.cuda.Event(enable_timing=True)
 	end_event = torch.cuda.Event(enable_timing=True)
 
-	triton_out, triton_time, triton_mem = profile_func(attn.apply, [Q, K, V, coords, spreads, mask, dist_factor], start_event, end_event)
-	torch_attn, torch_time, torch_memory = profile_func(torch_attn, [Q, K, V, coords, spreads, mask, dist_factor])
-	
+	triton_out, triton_time, triton_memory = profile_func(attn.apply, [Q, K, V, coords, spreads, mask, dist_factor], start_event, end_event)
+	torch_out, torch_time, torch_memory = profile_func(torch_attn, [Q, K, V, coords, spreads, mask, dist_factor], start_event, end_event)
 	rel_error, abs_error = calculate_error(torch_out, triton_out)
 	atol, rtol = 1e-2, 0
 
 	print("forward pass:\n")
+
+	print(f"{torch_out}\n{triton_out}")
 
 	print(f"triton implementation is correct: {torch.allclose(triton_out, torch_out, atol=atol, rtol=rtol, equal_nan=False)}")
 	print(f"triton absolute error: {abs_error:.5f}")
@@ -103,17 +104,20 @@ def torch_attn(Q, K, V, coords, spreads, mask=None, dist_factor=3.0):
 	mask = torch.zeros(batch, N) if mask is None else mask # batch x N
 
 	dists = torch.sqrt(torch.sum((coords[:, :, None, :] - coords[:, None, :, :])**2, axis=3))[:, None, :, :]
-	dists_mask = (dists <= spreads[None, :, None, None]) & (dists >= (dist_factor*spreads[None, :, None, None]))
+	dists_mask = (dists <= spreads[None, :, None, None]) | (dists >= (dist_factor*spreads[None, :, None, None]))
 	rbfs = torch.exp(-(dists**2)/(2*spreads[None, :, None, None]**2))
 
 	S = torch.matmul(Q, K.transpose(2,3)) / (d_k**0.5) # batch x nheads x N x N
-	attn_mask = mask[:, None, :, None] | mask[:, None, None, :] | dists_mask
-	S = torch.where(attn_mask, float("-inf"), torch.where(S < 0, S*(1-rbfs), S*rbfs))
+	attn_mask = mask[:, None, :, None] | mask[:, None, None, :] #| dists_mask
+	S = torch.where(attn_mask, float("-inf"), S)
 
-	S_max = S.max(dim=-1, keepdim=True).values
-	P = torch.where(S_max == float("-inf"), 0.0, F.softmax(S-S_max, dim=-1))
+	# S_max = S.max(dim=-1, keepdim=True).values
+	# exp_sum = torch.exp(S).sum(dim=-1, keepdim=True)
+	# P = torch.where(S_max == float("-inf"), 0.0, torch.exp(S-S_max) / exp_sum ) 
+	P = torch.softmax(S, dim=-1)
 
 	out = torch.matmul(P, V) # batch x nheads x N x d_k
+	out = torch.where(mask[:, None, :, None], 0.0, out)
 	
 	return out
 

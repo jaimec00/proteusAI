@@ -13,9 +13,7 @@ def calculate_error(A, B):
 	return rel_error_l2, abs_error_l2
 
 
-def profile_func(func: Callable, args: list, 
-				start_event: torch.cuda.Event, end_event: torch.cuda.Event,
-				):
+def profile_func(func, args, start_event, end_event):
 
 	torch.cuda.empty_cache() 
 	torch.cuda.reset_peak_memory_stats()
@@ -30,7 +28,7 @@ def profile_func(func: Callable, args: list,
 
 	return out, func_time, func_mem
 
-def profile_bwd(loss, start_event: torch.cuda.Event, end_event: torch.cuda.Event):
+def profile_bwd(loss, start_event, end_event):
 	torch.cuda.empty_cache() 
 	torch.cuda.reset_peak_memory_stats()
 	start_event.record()

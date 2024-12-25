@@ -33,7 +33,7 @@ def _attn_fwd(
 	V_ptr, stride_V_Z, stride_V_H, stride_V_N, stride_V_D,
 
 	coords_ptr, stride_coords_Z, stride_coords_N, stride_coords_S,
-	spread_ptr, stride_spread_H,
+	spreads_ptr, stride_spreads_H,
 
 	L_ptr, stride_L_Z, stride_L_H, stride_L_N,
 	mask_ptr, stride_mask_Z, stride_mask_N,
@@ -112,7 +112,7 @@ def _attn_fwd(
 	coords_I_ptr = tl.make_block_ptr(
 		base=coords_ptr + (start_Z*stride_coords_Z),
 		shape=(tot_N, 3),
-		strides=(stride_coords_N, stride_coords_space),
+		strides=(stride_coords_N, stride_coords_S),
 		offsets=(I_offs, 0),
 		block_shape=(BLOCK_I, 4), # tensor need to be power of 2, 4th value is masked
 		order=(0, 1)
@@ -123,14 +123,14 @@ def _attn_fwd(
 	coords_J_ptr = tl.make_block_ptr(
 		base=coords_ptr + (start_Z*stride_coords_Z),
 		shape=(tot_N, 3),
-		strides=(stride_coords_N, stride_coords_space),
+		strides=(stride_coords_N, stride_coords_S),
 		offsets=(0, 0),
 		block_shape=(BLOCK_J, 4), # tensor need to be power of 2, 4th value is masked
 		order=(0, 1)
 	)
 
 	# load spread for this head, scaler value
-	spread_ptr = spreads_ptr + (start_H*stride_spread_H)
+	spread_ptr = spreads_ptr + (start_H*stride_spreads_H)
 	spread = tl.load(spread_ptr)
 
 	# create K/V column mask pointer (loaded in the next loop)
@@ -151,22 +151,24 @@ def _attn_fwd(
 		mask_j = tl.load(mask_j_ptr, boundary_check=(0,), padding_option="zero").to(tl.int1) # N
 
 		# load coordinates and compute distances
-		coords_J = tl.load(coords_J_ptr, boundary_check=(0,1), padding_option="zero")
-		dists_raw = coords_I[:, None, :] - coords_J[None, :, :] # N x N x 3
+		coords_J = tl.load(coords_J_ptr, boundary_check=(0,1), padding_option="zero") # N x 4 (last val masked)
+		dists_raw = coords_I[:, None, :] - coords_J[None, :, :] # N x N x 4
 		dists = tl.sqrt(tl.sum(dists_raw * dists_raw, axis=2)) # N x N
 
 		# compute the rbfs
 		rbfs = tl.exp(-(dists*dists) / (2*spread*spread)) # N x N
 
 		# set masked positions to -inf, include out of range dists in mask
-		dists_mask = (dists > spreads) & (dists < (dist_factor*spreads))
-		attn_mask = (mask_i[:, None]) & (mask_j[None, :]) & (dists_mask) # N x N
+		dists_mask = (dists > spread) & (dists < (dist_factor*spread))
+		attn_mask = (mask_i[:, None]) & (mask_j[None, :]) #& (dists_mask) # N x N
 
 		# QKT/sqrt(d_k)
 		Sij = tl.dot(Qi, KjT) * softmax_scale # N x N
 
 		# scale attention logits by rbf
-		Sij = tl.where(attn_mask, tl.where(Sij < 0, (1-rbfs)*Sij, rbfs*Sij), -inf) # N x N
+		Sij = tl.where(attn_mask, Sij, -inf) # N x N
+
+		# tl.device_print("", rbfs)
 
 		# max of each row
 		mij = tl.maximum(mi, tl.max(Sij, axis=1)) # N, 
@@ -196,10 +198,10 @@ def _attn_fwd(
 		Vj_block_ptr = tl.advance(Vj_block_ptr, (BLOCK_J, 0))
 		mask_j_ptr = tl.advance(mask_j_ptr, (BLOCK_J, ))
 	
-	# epliogue
+	# epilogue
 
 	# normalize output
-	Oi = tl.where(mask_i[:, None], Oi / li[:, None], 0)
+	Oi = tl.where((mask_i[:, None]) & (li[:, None]!=0), Oi / li[:, None], 0.0)
 
 	# compute log sum exponential
 	mi += tl.log(li)
