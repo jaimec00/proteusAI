@@ -26,53 +26,21 @@ import triton.language as tl
 
 @triton.jit
 def _attn_fwd(
-	O_ptr, # output
-	stride_O_Z,
-	stride_O_H,
-	stride_O_N,
-	stride_O_D,
+	O_ptr, stride_O_Z, stride_O_H, stride_O_N, stride_O_D,
 
-	Q_ptr, # query
-	stride_Q_Z,
-	stride_Q_H,
-	stride_Q_N,
-	stride_Q_D,
-	
-	K_ptr, # key
-	stride_K_Z,
-	stride_K_H,
-	stride_K_N,
-	stride_K_D,
-	
-	V_ptr, # value
-	stride_V_Z,
-	stride_V_H,
-	stride_V_N,
-	stride_V_D,
+	Q_ptr, stride_Q_Z, stride_Q_H, stride_Q_N, stride_Q_D,
+	K_ptr, stride_K_Z, stride_K_H, stride_K_N, stride_K_D,
+	V_ptr, stride_V_Z, stride_V_H, stride_V_N, stride_V_D,
 
-	coords_ptr, # 3d coordinates
-	stride_coords_Z,
-	stride_coords_N,
-	stride_coords_S,
+	coords_ptr, stride_coords_Z, stride_coords_N, stride_coords_S,
+	spread_ptr, stride_spread_H,
 
-	spread_ptr, # head specific spreads
-	stride_spread_H,
+	L_ptr, stride_L_Z, stride_L_H, stride_L_N,
+	mask_ptr, stride_mask_Z, stride_mask_N,
 
-	L_ptr, # log sum exponential
-	stride_L_Z,
-	stride_L_H,
-	stride_L_N,
-
-	mask_ptr, # mask
-	stride_mask_Z,
-	stride_mask_N,
-
-	tot_N: tl.constexpr, # constants
-	tot_Z: tl.constexpr,
-	nheads: tl.constexpr,
-	d_k: tl.constexpr,
-	min_d_k: tl.constexpr, # max(16, d_k) bc tl.dot requires dim>=16
-	softmax_scale: tl.constexpr,
+	tot_N: tl.constexpr, tot_Z: tl.constexpr, nheads: tl.constexpr,
+	d_k: tl.constexpr, min_d_k: tl.constexpr, # max(16, d_k) bc tl.dot requires dim>=16
+	softmax_scale: tl.constexpr, dist_factor: tl.constexpr,
 
 	BLOCK_I: tl.constexpr, # block sizes
 	BLOCK_J: tl.constexpr,
@@ -140,6 +108,31 @@ def _attn_fwd(
 	)
 	mask_i = tl.load(mask_i_ptr, boundary_check=(0,), padding_option="zero").to(tl.int1) # N x d_k
 
+	# load coordinates for I rows
+	coords_I_ptr = tl.make_block_ptr(
+		base=coords_ptr + (start_Z*stride_coords_Z),
+		shape=(tot_N, 3),
+		strides=(stride_coords_N, stride_coords_space),
+		offsets=(I_offs, 0),
+		block_shape=(BLOCK_I, 4), # tensor need to be power of 2, 4th value is masked
+		order=(0, 1)
+	)
+	coords_I = tl.load(coords_I_ptr, boundary_check=(0,1), padding_option="zero") # N x 4
+
+	# initialize coords J ptr, used in for loop
+	coords_J_ptr = tl.make_block_ptr(
+		base=coords_ptr + (start_Z*stride_coords_Z),
+		shape=(tot_N, 3),
+		strides=(stride_coords_N, stride_coords_space),
+		offsets=(0, 0),
+		block_shape=(BLOCK_J, 4), # tensor need to be power of 2, 4th value is masked
+		order=(0, 1)
+	)
+
+	# load spread for this head, scaler value
+	spread_ptr = spreads_ptr + (start_H*stride_spread_H)
+	spread = tl.load(spread_ptr)
+
 	# create K/V column mask pointer (loaded in the next loop)
 	mask_j_ptr = tl.make_block_ptr( # N,
 		base=mask_ptr + (start_Z*stride_mask_Z),
@@ -157,11 +150,24 @@ def _attn_fwd(
 		KjT = tl.load(KjT_block_ptr, boundary_check=(0,1), padding_option="zero") # d_k x N
 		mask_j = tl.load(mask_j_ptr, boundary_check=(0,), padding_option="zero").to(tl.int1) # N
 
+		# set masked positions to -inf
+		coords_J = tl.load(coords_J_ptr, boundary_check=(0,1), padding_option="zero")
+		dists_raw = coords_I[:, None, :] - coords_J[None, :, :] # N x N x 3
+		dists = tl.sqrt(tl.sum(dists_raw * dists_raw, axis=2)) # N x N
+
+		# compute the rbfs
+		rbfs = tl.exp(-(dists*dists) / (2*spread*spread)) # N x N
+
+		# clamp dists for numerical stability, but these values will be masked anyways
+		# each head only focuses on 
+		dists_mask = (dists > spreads) & (dists < (dist_factor*spreads))
+		attn_mask = (mask_i[:, None]) & (mask_j[None, :]) & (dists_mask) # N x N
+
 		# QKT/sqrt(d_k)
 		Sij = tl.dot(Qi, KjT) * softmax_scale # N x N
 
-		# set masked positions to -inf
-		Sij = tl.where(mask_i[:, None] & mask_j[None, :], Sij, -inf) # N x N
+		# scale attention logits by rbf
+		Sij = tl.where(attn_mask, tl.where(Sij < 0, (1-rbfs)*Sij, rbfs*Sij), -inf) # N x N
 
 		# max of each row
 		mij = tl.maximum(mi, tl.max(Sij, axis=1)) # N, 
@@ -227,64 +233,20 @@ def _attn_fwd(
 @triton.jit
 def _attn_bwd(
 
-	Q_ptr,
-	stride_Q_Z,
-	stride_Q_H,
-	stride_Q_N,
-	stride_Q_D,
+	Q_ptr, stride_Q_Z, stride_Q_H, stride_Q_N, stride_Q_D,
+	K_ptr, stride_K_Z, stride_K_H, stride_K_N, stride_K_D,
+	V_ptr, stride_V_Z, stride_V_H, stride_V_N, stride_V_D,
 
-	K_ptr,
-	stride_K_Z,
-	stride_K_H,
-	stride_K_N,
-	stride_K_D,
+	dO_ptr, stride_dO_Z, stride_dO_H, stride_dO_N, stride_dO_D,
+	dQ_ptr, stride_dQ_Z, stride_dQ_H, stride_dQ_N, stride_dQ_D,
+	dK_ptr, stride_dK_Z, stride_dK_H, stride_dK_N, stride_dK_D,
+	dV_ptr, stride_dV_Z, stride_dV_H, stride_dV_N, stride_dV_D,
 
-	V_ptr,
-	stride_V_Z,
-	stride_V_H,
-	stride_V_N,
-	stride_V_D,
+	D_ptr, stride_D_Z, stride_D_H, stride_D_N,
+	L_ptr, stride_L_Z, stride_L_H, stride_L_N,
+	mask_ptr, stride_mask_Z, stride_mask_N,
 
-	dO_ptr,
-	stride_dO_Z,
-	stride_dO_H,
-	stride_dO_N,
-	stride_dO_D,
-
-	dQ_ptr,
-	stride_dQ_Z,
-	stride_dQ_H,
-	stride_dQ_N,
-	stride_dQ_D,
-
-	dK_ptr,
-	stride_dK_Z,
-	stride_dK_H,
-	stride_dK_N,
-	stride_dK_D,
-
-	dV_ptr,
-	stride_dV_Z,
-	stride_dV_H,
-	stride_dV_N,
-	stride_dV_D,
-
-	D_ptr,
-	stride_D_Z,
-	stride_D_H,
-	stride_D_N,
-
-	L_ptr,
-	stride_L_Z,
-	stride_L_H,
-	stride_L_N,
-
-	mask_ptr,
-	stride_mask_Z,
-	stride_mask_N,
-
-	tot_Z: tl.constexpr, tot_N: tl.constexpr, 
-	nheads: tl.constexpr, 
+	tot_Z: tl.constexpr, tot_N: tl.constexpr, nheads: tl.constexpr, 
 	d_k: tl.constexpr, min_d_k: tl.constexpr, softmax_scale: tl.constexpr,
 	BLOCK_I: tl.constexpr, BLOCK_J: tl.constexpr
 ):
@@ -489,7 +451,7 @@ class attn(torch.autograd.Function):
 							spreads, spreads.stride(0), # nhead, 
 							L, L.stride(0), L.stride(1), L.stride(2), # batch x nhead x N
 							mask, mask.stride(0), mask.stride(1), # batch x N
-							N, batch, nheads, d_k, max(d_k, 16), softmax_scale,
+							N, batch, nheads, d_k, max(d_k, 16), softmax_scale, dist_factor,
 							BLOCK_I, BLOCK_J
 						)
 
@@ -539,7 +501,7 @@ class attn(torch.autograd.Function):
 							D, D.stride(0), D.stride(1), D.stride(2),
 							L, L.stride(0), L.stride(1), L.stride(2),
 							mask, mask.stride(0), mask.stride(1),
-							batch, N, nheads, d_k, max(d_k, 16), ctx.softmax_scale,
+							batch, N, nheads, d_k, max(d_k, 16), ctx.softmax_scale, 
 							BLOCK_I, BLOCK_J
 						 )
 

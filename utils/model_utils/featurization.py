@@ -70,22 +70,10 @@ import triton.language as tl
 
 @triton.jit
 def _protein_to_wavefunc_kernel(
-		out_ptr,
-		stride_out_Z,
-		stride_out_N,
-		stride_out_D,
-
-		coords_ptr,
-		stride_coords_Z,
-		stride_coords_N,
-		stride_coords_space,
-
-		wavenumber_ptr, 
-		stride_wavenumber,
-
-		mask_ptr,
-		stride_mask_Z,
-		stride_mask_N,
+		out_ptr, stride_out_Z, stride_out_N, stride_out_D,
+		coords_ptr, stride_coords_Z, stride_coords_N, stride_coords_space,
+		wavenumber_ptr, stride_wavenumber,
+		mask_ptr, stride_mask_Z, stride_mask_N,
 
 		tot_batch: tl.constexpr,
 		tot_N: tl.constexpr,
