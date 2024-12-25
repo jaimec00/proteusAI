@@ -150,7 +150,7 @@ def _attn_fwd(
 		KjT = tl.load(KjT_block_ptr, boundary_check=(0,1), padding_option="zero") # d_k x N
 		mask_j = tl.load(mask_j_ptr, boundary_check=(0,), padding_option="zero").to(tl.int1) # N
 
-		# set masked positions to -inf
+		# load coordinates and compute distances
 		coords_J = tl.load(coords_J_ptr, boundary_check=(0,1), padding_option="zero")
 		dists_raw = coords_I[:, None, :] - coords_J[None, :, :] # N x N x 3
 		dists = tl.sqrt(tl.sum(dists_raw * dists_raw, axis=2)) # N x N
@@ -158,8 +158,7 @@ def _attn_fwd(
 		# compute the rbfs
 		rbfs = tl.exp(-(dists*dists) / (2*spread*spread)) # N x N
 
-		# clamp dists for numerical stability, but these values will be masked anyways
-		# each head only focuses on 
+		# set masked positions to -inf, include out of range dists in mask
 		dists_mask = (dists > spreads) & (dists < (dist_factor*spreads))
 		attn_mask = (mask_i[:, None]) & (mask_j[None, :]) & (dists_mask) # N x N
 
