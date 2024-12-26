@@ -11,7 +11,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
-from utils.model_utils import protein_to_wavefunc
+from utils.model_utils.featurization import protein_to_wavefunc
+from utils.model_utils.gaussian_attn import attn
 
 # ----------------------------------------------------------------------------------------------------------------------
 
@@ -26,15 +27,18 @@ class SpatialEmbedding(nn.Module):
 	serve as a generalization of positional encoding for irregularly spaced tokens in arbitrary dimensions. probably need
 	approximations for larger scale problems, but has potential
 	'''
-	def __init__(self, d_model=512):
+	def __init__(self, d_model=512, min_wl=3.7, max_wl=20, base=20):
 		super(SpatialEmbedding, self).__init__()
 
-		self.d_model = 512
+		self.d_model = d_model
+		self.min_wl = min_wl
+		self.max_wl = max_wl
+		self.base = base
 
 	def forward(self, coords, key_padding_mask):
 
 		# convert to wf features if not already precomputed
-		wavefunc = protein_to_wavefunc(coords, key_padding_mask, self.d_model) # batch x N x 3 --> batch x N x d_model
+		wavefunc = protein_to_wavefunc(coords, self.d_model, self.min_wl, self.max_wl, self.base, key_padding_mask) # batch x N x 3 --> batch x N x d_model
 
 		return wavefunc
 
@@ -44,7 +48,7 @@ class MHA(nn.Module):
 	on each head's spread in the RBF of PW distances 
 	'''
 
-	def __init__(self, d_model=512, nhead=8, dim_feedforward=1024, dropout=0.1):
+	def __init__(self, d_model=512, nhead=8, dim_feedforward=1024, dropout=0.1, min_wl=3.7, max_wl=20, base=20, eps=2e-2):
 		super(MHA, self).__init__()
 
 		self.nhead = nhead
@@ -53,106 +57,29 @@ class MHA(nn.Module):
 		if self.d_model % self.nhead != 0: raise ValueError(f"number of dimensions ({self.d_model}) must be divisible by number of attention heads ({self.nhead})")
 		self.d_k = self.d_model // self.nhead
 
-		self.q_proj = nn.Parameter(torch.randn(1, self.nhead, self.d_model, self.d_k)) # 1 x nhead x d_model x d_k
-		self.k_proj = nn.Parameter(torch.randn(1, self.nhead, self.d_model, self.d_k)) # 1 x nhead x d_model x d_k
-		self.v_proj = nn.Parameter(torch.randn(1, self.nhead, self.d_model, self.d_k)) # 1 x nhead x d_model x d_k
+		self.spreads = min_wl + (max_wl-min_wl)*(torch.logspace(0, 1, self.nhead, base) - 1)/(base-1) # nhead, 
+
+		self.q_proj = nn.Parameter(torch.randn(self.nhead, self.d_model, self.d_k)) # nhead x d_model x d_k
+		self.k_proj = nn.Parameter(torch.randn(self.nhead, self.d_model, self.d_k)) # nhead x d_model x d_k
+		self.v_proj = nn.Parameter(torch.randn(self.nhead, self.d_model, self.d_k)) # nhead x d_model x d_k
 
 		self.out_proj = nn.Linear(d_model, d_model)
-
-	def get_attn(self, q, k, v):
-		'''
-		computes the attention matrix and the value matrix for each head
-		'''
-		
-		# reshape so each head gets its own data
-		q = q.unsqueeze(1).expand(-1, self.nhead, -1, -1) # batch x N x d_model --> batch x nhead x N x d_model
-		k = k.unsqueeze(1).expand(-1, self.nhead, -1, -1) # batch x N x d_model --> batch x nhead x N x d_model
-		v = v.unsqueeze(1).expand(-1, self.nhead, -1, -1) # batch x N x d_model --> batch x nhead x N x d_model
-
-		# project q, k, and v to d_k for each head
-		q = torch.matmul(q, self.q_proj) # batch x nhead x N x d_model @ 1, nhead, d_model, d_k --> batch x nhead x N x d_k
-		k = torch.matmul(k, self.k_proj) # batch x nhead x N x d_model @ 1, nhead, d_model, d_k --> batch x nhead x N x d_k
-		v = torch.matmul(v, self.v_proj) # batch x nhead x N x d_model @ 1, nhead, d_model, d_k --> batch x nhead x N x d_k
-
-		# create the attention tensor
-		attn = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.d_k) # batch x nhead x N x d_k @ batch x nhead x d_k x N --> batch x nhead x N x N
-
-		return attn, v
-
-	def get_dists_and_spreads(self, coords, min_wl=3.7, max_wl=20, base=20, eps=2e-2):
-		'''
-		computes pairwise distances and the spread for each head
-		'''
-		# define the distance tensor and the spreads for each head
-		dists = torch.sqrt(((coords.unsqueeze(1) - coords.unsqueeze(2))**2).sum(dim=-1)) # batch x N x 3 --> batch x N x N
-		dists = dists.unsqueeze(1).expand(-1, self.nhead, -1, -1) # batch x N x N --> batch x nhead x N x N
-		spreads = min_wl + (((torch.logspace(0, 1-eps, steps=self.nhead, base=base) - 1) / (base - 1)) * (max_wl - min_wl)) # nhead,
-		spreads = spreads.to(dists.device)
-		spreads = spreads.unsqueeze(0).unsqueeze(-1).unsqueeze(-1) # nhead, --> 1 x nhead x 1 x 1 
-
-		return dists, spreads
-
-
-	def get_dist_masks(self, dists, spreads):
-		'''
-		creates a clamp mask, used to clamp distances < head_spread to head_spread, and 
-		dist_mask, which clamps large values to 3*head_spread, for numerical stability, since
-		dist masked values will be masked later anyway
-		'''
-		# clamp small distances so not disproportionally important at larger spreads
-		clamp_mask = dists < spreads # batch x nhead x N x N
-		dists = torch.where( # batch x nhead x N x N
-			clamp_mask,
-			dists.clamp(min=spreads), # clamp distances so smallest possible is the spread, independant for each head
-			dists
-		)
-
-		# clamp long distances to ensure numerical instability, will mask anyways later
-		dist_mask = dists > (spreads*3) # batch x nhead x N x N
-		dists = torch.where( # batch x nhead x N x N
-			dist_mask,
-			dists.clamp(max=spreads*3), # clamp distances to spread * 3 to avoid numerical instability,
-			dists
-		)
-
-		return dists, dist_mask
-
-
-	def rbf_scaling(self, attn, dists, spreads):
-		'''
-		scales the attention weights by the RBF computed based on pair-wise distances and head-specific spread
-		'''
-		# compute the rbf, and the inverse for negative logits
-		rbf = torch.exp(-(dists**2 / (2*spreads**2))) # batch x nhead x N x N
-		rbf = torch.where( 	# inverse rbf for negative logits, so close distances with negative logits are more pronounced 
-							# than long distances, even if the attn score is close to zero since exponentiating negative value
-			attn < 0,
-			1/rbf,
-			rbf
-		)
-
-		# apply the rbf scaling to the logits
-		attn = attn * rbf # batch x nhead x N x N
-
-		return attn
 	
-	def forward(self, q, k, v, coords=None, key_padding_mask=None, min_wl=3.7, max_wl=20, base=20, eps=2e-2, use_checkpoint=False):
+	def forward(self, q, k, v, coords, key_padding_mask=None, use_checkpoint=False):
 		'''
 		forward method, wrapper for _forward so can use gradient checkpointing in training
 		'''
 		if use_checkpoint:
 			out = checkpoint(
 				self._forward,
-				q, k, v, coords, key_padding_mask,
-				torch.tensor(min_wl), torch.tensor(max_wl),
-				torch.tensor(base), torch.tensor(eps)
+				q, k, v, coords, key_padding_mask
 			)
 		else:
-			out = self._forward(q, k, v, coords, key_padding_mask, min_wl, max_wl, base, eps)
+			out = self._forward(q, k, v, coords, key_padding_mask)
 
 		return out
 
-	def _forward(self, q, k, v, coords=None, key_padding_mask=None, min_wl=3.7, max_wl=20, base=20, eps=2e-2):
+	def _forward(self, q, k, v, coords, key_padding_mask=None):
 		'''
 		performs scaled dot-product attention weighted by Gaussian RBF 
 		'''
@@ -162,41 +89,17 @@ class MHA(nn.Module):
 		batch, N, d_model = q.shape
 		assert d_model == self.d_model
 
-		for a_name, a in zip("qkv", [q, k, v]):
-			print(f"{a_name}: \n{a}\n{a.shape}")
+		Q = torch.matmul(q.unsqueeze(1), self.q_proj.unsqueeze(0)) # batch x nhead x N x d_k
+		K = torch.matmul(k.unsqueeze(1), self.k_proj.unsqueeze(0)) # batch x nhead x N x d_k
+		V = torch.matmul(v.unsqueeze(1), self.v_proj.unsqueeze(0)) # batch x nhead x N x d_k
 
-		attn, v = self.get_attn(q, k, v)
-		print(f"attn: \n{attn}\n{attn.shape}")
+		out = attn(Q, K, V, coords, self.spreads, key_padding_mask, self.dist_factor)  # batch x nhead x N x d_k
 
-		dists, spreads = self.get_dists_and_spreads(coords, min_wl, max_wl, base, eps)
-		print(f"dists: \n{dists}\n{dists.shape}")
-		print(f"spreads: \n{spreads}\n{spreads.shape}")
-
-		dists, dist_mask = self.get_dist_masks(dists, spreads)
-
-		print(f"dists_mask: \n{dist_mask}\n{dist_mask.shape}")
-		attn = self.rbf_scaling(attn, dists, spreads)
-
-		# mask attention pairs and normalize
-		attn_mask = key_padding_mask.unsqueeze(1).unsqueeze(2) | dist_mask
-		attn = attn.masked_fill(attn_mask, -torch.inf) # batch x nhead x N x N
-		attn = F.softmax(attn, dim=-1) # batch x nhead x N x N
-		print(f"scaled_attn: \n{attn}\n{attn.shape}")
-
-		# multiply attn tensor by v
-		out = torch.matmul(attn, v) # batch x nhead x N x N @ batch x nhead x N x d_k --> batch x nhead x N x d_k
-
-		print(f"qkv: \n{out}\n{out.shape}")
-
-		# reshape to batch x N x d_model
-		out = out.permute(0, 2, 1, 3) # batch x nhead x N x d_k --> batch x N x nhead x d_k
-		print(f"qkv_permute: \n{out}\n{out.shape}")
+		out = out.permute(0,2,3,1) # batch x N x d_k x nhead
 		out = out.reshape(batch, N, self.d_model) # batch x N x d_k x nhead --> batch x N x d_model
-		print(f"qkv_reshape: \n{out}\n{out.shape}")
 
 		# project through final linear layer
 		out = self.out_proj(out) # batch x N x d_model --> batch x N x d_model
-		print(f"qkv_proj: \n{out}\n{out.shape}")
 
 		# return
 		return out # batch x N x d_model
@@ -311,18 +214,19 @@ class proteusAI(nn.Module):
 	proteusAI. 
 
 	converts 3D coords to wavefunction features (wf), and one hot amino acid tensors into aa embeddings. performs masked 
-	cross gaussian self-attention (lots of words) via the ContextModule, with wf as Q and V, and AA embeddings as K. Gaussian weighting is
+	cross gaussian attention (lots of words) via the ContextModule, with wf as Q and V, and AA embeddings as K. Gaussian weighting is
 	done based on pair-wise distance based RBFs. then go through all decoder layers. decoder layer and context module are essentially the same
-	just the q, k, and v matrices vary. these are a stack of multi-head attention layers, with each head operating at a 
-	different scale, by varying the spread of the RBF for that head. after self-attention, do add + norm, FFN, and residual connection. the subspace (d_k) each head operates at is close to the scale of
-	d_k, since each feature in d_k (and d_model, where d_model=d_k*nhead) corresponds to a distinct wavelength (and thus k in Green's function),
-	with low index features corresponding to small wavelengths and large index features to large wavelengths. the final
-	decoder layer output goes through a linear layer converts the d_model feature space to a 21-d feature space (20 AAs + X (unknown AA)). softmax is applied to 
-	get probabilities and sample from the distribution autoregressively (during inference).
+	just the q, k, and v matrices vary. these are a stack of multi-scale gaussian attention layers, with each head operating at a 
+	different scale, by varying the spread of the RBF for that head. after self-attention, do add + norm, FFN, and residual connection. 
+	the subspace (d_k) each head operates at is close to the scale of the spread, since each feature in d_k (and d_model, where d_model=d_k*nhead) 
+	corresponds to a distinct wavelength (and thus k in Green's function), with low index features corresponding to small wavelengths 
+	and large index features to large wavelengths. the final decoder layer output goes through a linear layer that converts the 
+	d_model feature space to a 21-d feature space (20 AAs + X (unknown AA)). softmax is applied to get probabilities and 
+	sample from the distribution autoregressively (during inference).
 
 	'''
 	
-	def __init__(self, N, d_model, n_head, decoder_layers, hidden_linear_dim, dropout, active_decoders=-1, use_probs=False):
+	def __init__(self, N, d_model, n_head, decoder_layers, hidden_linear_dim, dropout, min_wl=3.7, max_wl=20, base=20, active_decoders=-1, use_probs=False):
 		super(proteusAI, self).__init__()
 
 		# configuration
@@ -330,7 +234,7 @@ class proteusAI(nn.Module):
 		self.active_decoders = active_decoders if active_decoders != -1 else decoder_layers
 
 		# wavefunc
-		self.spatial_embedding = SpatialEmbedding(d_model)
+		self.spatial_embedding = SpatialEmbedding(d_model, min_wl, max_wl, base)
 
 		# context
 		self.aa_embedding = nn.Linear(20, d_model)
