@@ -150,6 +150,9 @@ def _attn_fwd(
 		KjT = tl.load(KjT_block_ptr, boundary_check=(0,1), padding_option="zero") # d_k x N
 		mask_j = tl.load(mask_j_ptr, boundary_check=(0,), padding_option="zero").to(tl.int1) # N
 
+		# QKT/sqrt(d_k)
+		Sij = tl.dot(Qi, KjT) * softmax_scale # N x N
+
 		# load coordinates and compute distances
 		coords_J = tl.load(coords_J_ptr, boundary_check=(0,1), padding_option="zero") # N x 4 (last val masked)
 		dists_raw = coords_I[:, None, :] - coords_J[None, :, :] # N x N x 4
@@ -157,17 +160,15 @@ def _attn_fwd(
 
 		# compute the rbfs
 		rbfs = tl.exp(-(dists*dists) / (2*spread*spread)) # N x N
+		rbfs = tl.where(Sij < 0, (1+1e-3)-rbfs, rbfs)
 
 		# set masked positions to -inf, include out of range dists in mask
 		dists_mask = (dists > spread) & (dists < (dist_factor*spread))
 		attn_mask = (mask_i[:, None]) & (mask_j[None, :]) & (dists_mask) # N x N
 
-		# QKT/sqrt(d_k)
-		Sij = tl.dot(Qi, KjT) * softmax_scale # N x N
-
 		# scale attention logits by rbf (subtract 1e-5 for Sij < 0, since diagonals rbf will be 1, 
 		# this would lead to diagonals w/ negative logits always having attn logits of 0)
-		Sij = tl.where(attn_mask, tl.where(Sij < 0, Sij*((1+1e-3)-rbfs), Sij*rbfs), -inf) # N x N
+		Sij = tl.where(attn_mask, Sij*rbfs, -inf) # N x N
 
 		# max of each row
 		mij = tl.maximum(mi, tl.max(Sij, axis=1)) # N, 
@@ -195,10 +196,9 @@ def _attn_fwd(
 		# advance block pointers for columns
 		KjT_block_ptr = tl.advance(KjT_block_ptr, (0, BLOCK_J))
 		Vj_block_ptr = tl.advance(Vj_block_ptr, (BLOCK_J, 0))
-		mask_j_ptr = tl.advance(mask_j_ptr, (BLOCK_J, ))
 		coords_J_ptr = tl.advance(coords_J_ptr, (BLOCK_J, 0))
+		mask_j_ptr = tl.advance(mask_j_ptr, (BLOCK_J, ))
 
-	
 	# epilogue
 
 	# normalize output
@@ -245,10 +245,12 @@ def _attn_bwd(
 
 	D_ptr, stride_D_Z, stride_D_H, stride_D_N,
 	L_ptr, stride_L_Z, stride_L_H, stride_L_N,
+	coords_ptr, stride_coords_Z, stride_coords_N, stride_coords_S,
+	spreads_ptr, stride_spreads_H,
 	mask_ptr, stride_mask_Z, stride_mask_N,
 
 	tot_Z: tl.constexpr, tot_N: tl.constexpr, nheads: tl.constexpr, 
-	d_k: tl.constexpr, min_d_k: tl.constexpr, softmax_scale: tl.constexpr,
+	d_k: tl.constexpr, min_d_k: tl.constexpr, softmax_scale: tl.constexpr, dist_factor: tl.constexpr,
 	BLOCK_I: tl.constexpr, BLOCK_J: tl.constexpr
 ):
 	J_start = tl.program_id(0)
@@ -276,6 +278,19 @@ def _attn_bwd(
 		block_shape=(BLOCK_J, min_d_k),
 		order=(0, 1)
 	)
+
+	coords_j_ptr = tl.make_block_ptr(
+		base=coords_ptr + (start_Z*stride_coords_Z),
+		shape=(tot_N, 3),
+		strides=(stride_coords_N, stride_coords_S),
+		offsets=(J_offs, 0),
+		block_shape=(BLOCK_J, 4),
+		order=(0, 1)		
+	)
+	coords_j = tl.load(coords_j_ptr, boundary_check=(0,1), padding_option="zero")
+
+	spread_ptr = spreads_ptr + (start_H*stride_spreads_H)
+	spread = tl.load(spread_ptr)
 
 	# initialize mask for j columns
 	mask_j_ptr = tl.make_block_ptr( # N 
@@ -337,6 +352,15 @@ def _attn_bwd(
 		order=(0, )
 	)
 
+	coords_i_ptr = tl.make_block_ptr(
+		base=coords_ptr + (start_Z*stride_coords_Z) ,
+		shape=(tot_N, 3),
+		strides=(stride_coords_N, stride_coords_S),
+		offsets=(0, 0),
+		block_shape=(BLOCK_I, 4),
+		order=(0, 1)	
+	)
+
 	# initialize mask for i rows
 	mask_i_ptr = tl.make_block_ptr( # N 
 		base=mask_ptr + (start_Z*stride_mask_Z),
@@ -352,9 +376,20 @@ def _attn_bwd(
 
 		Qi = tl.load(Qi_block_ptr, boundary_check=(0, 1), padding_option="zero")
 		Sij = tl.dot(Qi, KjT) * softmax_scale # N x N
+		
+		# compute rbfs
+		coords_i = tl.load(coords_i_ptr, boundary_check=(0,1), padding_option="zero") # N x 4
+		dists_raw = coords_i[:, None, :] - coords_j[None, :, :] # N x N x 4
+		dists = tl.sqrt(tl.sum(dists_raw * dists_raw, axis=2))
+		dists_mask = (dists>spread) & (dists<(dist_factor*spread))
+		rbfs = tl.exp(-(dists*dists) / (2.0*spread*spread))
+		rbfs = tl.where(Sij < 0, (1+1e-3)-rbfs, rbfs)
 
 		mask_i = tl.load(mask_i_ptr, boundary_check=(0, ), padding_option="zero").to(tl.int1)
-		attn_mask = mask_i[:, None] & mask_j[None, :] # N x N
+		attn_mask = mask_i[:, None] & mask_j[None, :] & dists_mask # N x N
+
+		Sij = tl.where(attn_mask, Sij*rbfs, -inf) # N x N
+		
 		Li = tl.load(Li_block_ptr, boundary_check=(0, ), padding_option="zero")
 		Pij = tl.exp(tl.where(attn_mask, Sij - Li[:, None], -inf)) # N x N
 
@@ -367,19 +402,22 @@ def _attn_bwd(
 		dSij = Pij * (dPij - Di[:, None])
 
 		# will do atomic add instead of loading, as other J in parallel leads to race condition
-		dQi = tl.dot(dSij, tl.permute(KjT, (1,0))) * softmax_scale
+		dQi = tl.dot(dSij*rbfs, tl.permute(KjT, (1,0))) * softmax_scale
 		dQi_mask = mask_i[:, None] & (tl.arange(0,min_d_k)[None, :] < d_k)
-		# tl.device_print("", dQi_mask)
 		tl.atomic_add(dQi_block_ptr, dQi, mask=dQi_mask)
 
-		dKj += tl.where(mask_j[:, None], tl.dot(tl.permute(dSij, (1,0)), Qi), 0.0) * softmax_scale
-
+		dKj += softmax_scale * tl.where(
+										mask_j[:, None], 
+										tl.dot(tl.permute(dSij*rbfs, (1,0)), Qi),
+										0.0
+									)
 		# advance the pointers
 		Qi_block_ptr = tl.advance(Qi_block_ptr, (BLOCK_I, 0))
 		dQi_block_ptr += BLOCK_I*stride_dQ_N
 		dOi_block_ptr = tl.advance(dOi_block_ptr, (BLOCK_I, 0))
 		Li_block_ptr = tl.advance(Li_block_ptr, (BLOCK_I, ))
 		Di_block_ptr = tl.advance(Di_block_ptr, (BLOCK_I, ))
+		coords_i_ptr = tl.advance(coords_i_ptr, (BLOCK_I, 0))
 		mask_i_ptr = tl.advance(mask_i_ptr, (BLOCK_I, ))
 
 	# initialize dK and dV pointers to write output
@@ -501,8 +539,10 @@ class attn(torch.autograd.Function):
 							dV, dV.stride(0), dV.stride(1), dV.stride(2), dV.stride(3),
 							D, D.stride(0), D.stride(1), D.stride(2),
 							L, L.stride(0), L.stride(1), L.stride(2),
+							coords, coords.stride(0), coords.stride(1), coords.stride(2),
+							spreads, spreads.stride(0), 
 							mask, mask.stride(0), mask.stride(1),
-							batch, N, nheads, d_k, max(d_k, 16), ctx.softmax_scale, 
+							batch, N, nheads, d_k, max(d_k, 16), ctx.softmax_scale, ctx.dist_factor,
 							BLOCK_I, BLOCK_J
 						 )
 

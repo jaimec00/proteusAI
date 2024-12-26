@@ -38,7 +38,7 @@ def main():
 
 	print("forward pass:\n")
 
-	print(f"{torch_out}\n{triton_out}")
+	# print(f"{torch_out}\n{triton_out}")
 
 	print(f"triton implementation is correct: {torch.allclose(triton_out, torch_out, atol=atol, rtol=rtol, equal_nan=False)}")
 	print(f"triton absolute error: {abs_error:.5f}")
@@ -49,44 +49,42 @@ def main():
 	print(f"torch memory usage: {torch_memory / (1024 ** 3):.3f} GB")
 	print(f"triton kernel memory usage: {triton_memory / (1024 ** 3):.3f} GB")
 
-	bwd = False
-	if bwd:
-		print("\nbackward pass:\n")
+	print("\nbackward pass:\n")
 
-		# torch
-		torch_time, torch_memory = profile_bwd(torch_out.sum(), start_event, end_event)
-		torch_dQ, torch_dK, torch_dV = [Q.grad.clone(), K.grad.clone(), V.grad.clone()]
+	# torch
+	torch_time, torch_memory = profile_bwd(torch_out.sum(), start_event, end_event)
+	torch_dQ, torch_dK, torch_dV = [Q.grad.clone(), K.grad.clone(), V.grad.clone()]
 
-		Q.grad.zero_()
-		K.grad.zero_()
-		V.grad.zero_()	
+	Q.grad.zero_()
+	K.grad.zero_()
+	V.grad.zero_()	
 
-		# triton
-		triton_time, triton_memory = profile_bwd(triton_out.sum())
-		triton_dQ, triton_dK, triton_dV = [Q.grad.clone(), K.grad.clone(), V.grad.clone()]
+	# triton
+	triton_time, triton_memory = profile_bwd(triton_out.sum(), start_event, end_event)
+	triton_dQ, triton_dK, triton_dV = [Q.grad.clone(), K.grad.clone(), V.grad.clone()]
 
-		dQ_rel_error, dQ_abs_error = calculate_error(torch_dQ, triton_dQ)
-		print(f"dQ is correct: {torch.allclose(triton_dQ, torch_dQ, atol=atol, rtol=rtol, equal_nan=False)}")
-		print(f"triton dQ absolute error: {dQ_abs_error:.5f}")
-		print(f"triton dQ relative error: {dQ_rel_error:.5f}")
-		print(f"triton dQ percent error: {dQ_rel_error*100:.5f}%\n")
+	dQ_rel_error, dQ_abs_error = calculate_error(torch_dQ, triton_dQ)
+	print(f"dQ is correct: {torch.allclose(triton_dQ, torch_dQ, atol=atol, rtol=rtol, equal_nan=False)}")
+	print(f"triton dQ absolute error: {dQ_abs_error:.5f}")
+	print(f"triton dQ relative error: {dQ_rel_error:.5f}")
+	print(f"triton dQ percent error: {dQ_rel_error*100:.5f}%\n")
 
-		dK_rel_error, dK_abs_error = calculate_error(torch_dK, triton_dK)
-		print(f"dK is correct: {torch.allclose(triton_dK, torch_dK, atol=atol, rtol=rtol, equal_nan=False)}")
-		print(f"triton dK absolute error: {dK_abs_error:.5f}")
-		print(f"triton dK relative error: {dK_rel_error:.5f}")
-		print(f"triton dK percent error: {dK_rel_error*100:.5f}%\n")
+	dK_rel_error, dK_abs_error = calculate_error(torch_dK, triton_dK)
+	print(f"dK is correct: {torch.allclose(triton_dK, torch_dK, atol=atol, rtol=rtol, equal_nan=False)}")
+	print(f"triton dK absolute error: {dK_abs_error:.5f}")
+	print(f"triton dK relative error: {dK_rel_error:.5f}")
+	print(f"triton dK percent error: {dK_rel_error*100:.5f}%\n")
 
-		dV_rel_error, dV_abs_error = calculate_error(torch_dV, triton_dV)
-		print(f"dV is correct: {torch.allclose(triton_dV, torch_dV, atol=atol, rtol=rtol, equal_nan=False)}")
-		print(f"triton dV absolute error: {dV_abs_error:.5f}")
-		print(f"triton dV relative error: {dV_rel_error:.5f}")
-		print(f"triton dV percent error: {dV_rel_error*100:.5f}%\n")
+	dV_rel_error, dV_abs_error = calculate_error(torch_dV, triton_dV)
+	print(f"dV is correct: {torch.allclose(triton_dV, torch_dV, atol=atol, rtol=rtol, equal_nan=False)}")
+	print(f"triton dV absolute error: {dV_abs_error:.5f}")
+	print(f"triton dV relative error: {dV_rel_error:.5f}")
+	print(f"triton dV percent error: {dV_rel_error*100:.5f}%\n")
 
-		print(f"torch time: {torch_time:.3f} ms")
-		print(f"triton time: {triton_time:.3f} ms")
-		print(f"torch memory usage: {torch_memory / (1024 ** 3):.3f} GB")
-		print(f"triton kernel memory usage: {triton_memory / (1024 ** 3):.3f} GB")
+	print(f"torch time: {torch_time:.3f} ms")
+	print(f"triton time: {triton_time:.3f} ms")
+	print(f"torch memory usage: {torch_memory / (1024 ** 3):.3f} GB")
+	print(f"triton kernel memory usage: {triton_memory / (1024 ** 3):.3f} GB")
 
 
 def torch_attn(Q, K, V, coords, spreads, mask=None, dist_factor=3.0):
@@ -103,16 +101,19 @@ def torch_attn(Q, K, V, coords, spreads, mask=None, dist_factor=3.0):
 	assert torch.all(spreads != 0), f"spreads must be a tensor of non-zero floats, not {spreads}"
 	mask = torch.zeros(batch, N) if mask is None else mask # batch x N
 
+	S = torch.matmul(Q, K.transpose(2,3)) / (d_k**0.5) # batch x nheads x N x N
+
 	dists = torch.sqrt(torch.sum((coords[:, :, None, :] - coords[:, None, :, :])**2, axis=3))[:, None, :, :]
 	dists_mask = (dists <= spreads[None, :, None, None]) | (dists >= (dist_factor*spreads[None, :, None, None]))
 	rbfs = torch.exp(-(dists**2)/(2*spreads[None, :, None, None]**2))
+	rbfs = torch.where(S<0, (1+1e-3)-rbfs, rbfs)
 
-	S = torch.matmul(Q, K.transpose(2,3)) / (d_k**0.5) # batch x nheads x N x N
 	attn_mask = mask[:, None, :, None] | mask[:, None, None, :] | dists_mask
-	S = torch.where(attn_mask, float("-inf"), torch.where(S<0, S*((1+1e-3)-rbfs), S*rbfs))
+	S = torch.where(attn_mask, float("-inf"), S*rbfs)
 
 	S_max = S.max(dim=-1, keepdim=True).values
 	P = torch.where(S_max == float("-inf"), 0.0, F.softmax(S-S_max, dim=-1) ) 
+	# P = torch.softmax(S, dim=-1)
 
 	out = torch.matmul(P, V) # batch x nheads x N x d_k
 	
