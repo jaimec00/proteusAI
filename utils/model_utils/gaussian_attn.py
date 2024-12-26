@@ -1,18 +1,22 @@
 # ----------------------------------------------------------------------------------------------------------------------
 '''
 author:			jaime cardenas
-title:			attn.py
+title:			gaussian_attn.py
 description:	multi-scale gaussian flash attention kernel written in triton. 
 				kernel based on:
 					FlashAttention2 paper: https://arxiv.org/abs/2307.08691
 					Triton Implementation: https://github.com/triton-lang/triton/blob/main/python/tutorials/06-fused-attention.py
+				Also credits to Umar Jamil (@umarjamilai) for giving a fantastic exlanation and demo:
+					YouTube Demo: https://www.youtube.com/watch?v=zy8ChVd_oTM
 				
 				Performs Flash attention, as described in the paper, but includes scaling of attention logits using RBF
 				functions based on euclidean distances of alpha carbon pairs. each head uses a distinct spread to compute
 				the RBFs, where the spread corresponds to (roughly) the average wavelength of the feature space it is 
-				operating on. wavelength, in this context, refers to the wavelength used to compute the wave function 
-				features for a particular feature index, see utils/model_utils/featurization.py). 
-				Forward and backward passes are fully implemented, only need to add dropout to each to finish
+				operating on. small spread heads focus on local interactions, and large spread heads focus on global interactions. 
+				wavelength, in this context, refers to the wavelength used to compute the wave function features for a 
+				particular feature index, see utils/model_utils/featurization.py). 
+				Forward and backward passes are fully implemented, only need to add dropout with RNG seed to each,
+				and add optimizations for speed to finish
 '''
 # ----------------------------------------------------------------------------------------------------------------------
 
@@ -44,26 +48,26 @@ def _attn_fwd(
 	start_I = tl.program_id(0)
 
 	# get the batch and head combo used for this block
-	start_ZH = tl.program_id(1)
-	start_Z = (start_ZH // nheads).to(tl.int64)
-	start_H = (start_ZH % nheads).to(tl.int64)
+	offs_ZH = tl.program_id(1)
+	offs_Z = (offs_ZH // nheads).to(tl.int64)
+	offs_H = (offs_ZH % nheads).to(tl.int64)
 
 	# calculate offset of this block
-	I_offs = (start_I.to(tl.int64)*BLOCK_I).to(tl.int32)
+	offs_I = (start_I.to(tl.int64)*BLOCK_I).to(tl.int32)
 
 	# create Q, K, and V block pointers
 	Qi_block_ptr = tl.make_block_ptr( # N x d_k
-		base=Q_ptr + (start_Z*stride_Q_Z) + (start_H*stride_Q_H),
+		base=Q_ptr + (offs_Z*stride_Q_Z) + (offs_H*stride_Q_H),
 		shape=(tot_N, d_k),
 		strides=(stride_Q_N, stride_Q_D),
-		offsets=(I_offs, 0),
+		offsets=(offs_I, 0),
 		block_shape=(BLOCK_I, min_d_k),
 		order=(0, 1)
 	)
 
 	# transpose k when loading directly by flipping N and D,
 	KjT_block_ptr = tl.make_block_ptr( # d_k x N
-		base=K_ptr + (start_Z*stride_K_Z) + (start_H*stride_K_H),
+		base=K_ptr + (offs_Z*stride_K_Z) + (offs_H*stride_K_H),
 		shape=(d_k, tot_N),
 		strides=(stride_K_D, stride_K_N),
 		offsets=(0, 0),
@@ -72,7 +76,7 @@ def _attn_fwd(
 	)
 
 	Vj_block_ptr = tl.make_block_ptr( # N x d_k
-		base=V_ptr + (start_Z*stride_V_Z) + (start_H*stride_V_H),
+		base=V_ptr + (offs_Z*stride_V_Z) + (offs_H*stride_V_H),
 		shape=(tot_N, d_k),
 		strides=(stride_V_N, stride_V_D),
 		offsets=(0, 0),
@@ -91,10 +95,10 @@ def _attn_fwd(
 
 	# create mask pointer for Q/O rows and load
 	mask_i_ptr = tl.make_block_ptr( # N,
-		base=mask_ptr + (start_Z*stride_mask_Z),
+		base=mask_ptr + (offs_Z*stride_mask_Z),
 		shape=(tot_N, ),
 		strides=(stride_mask_N, ),
-		offsets=(I_offs, ),
+		offsets=(offs_I, ),
 		block_shape=(BLOCK_I, ),
 		order=(0, )
 	)
@@ -102,10 +106,10 @@ def _attn_fwd(
 
 	# load coordinates for I rows
 	coords_I_ptr = tl.make_block_ptr(
-		base=coords_ptr + (start_Z*stride_coords_Z),
+		base=coords_ptr + (offs_Z*stride_coords_Z),
 		shape=(tot_N, 3),
 		strides=(stride_coords_N, stride_coords_S),
-		offsets=(I_offs, 0),
+		offsets=(offs_I, 0),
 		block_shape=(BLOCK_I, 4), # tensor need to be power of 2, 4th value is masked (x,y,z,mask)
 		order=(0, 1)
 	)
@@ -113,7 +117,7 @@ def _attn_fwd(
 
 	# initialize coords J ptr, loaded in for loop
 	coords_J_ptr = tl.make_block_ptr(
-		base=coords_ptr + (start_Z*stride_coords_Z),
+		base=coords_ptr + (offs_Z*stride_coords_Z),
 		shape=(tot_N, 3),
 		strides=(stride_coords_N, stride_coords_S),
 		offsets=(0, 0),
@@ -122,18 +126,18 @@ def _attn_fwd(
 	)
 
 	# load spread for this head, scaler value
-	spread_ptr = spreads_ptr + (start_H*stride_spreads_H)
+	spread_ptr = spreads_ptr + (offs_H*stride_spreads_H)
 	spread = tl.load(spread_ptr)
 
 	# diagonals will have a distance of zero, so to be included in the attn mechanism, 
 	# the minimum distance must be zero, but only for the first head, so the first 
 	# head operates on the range (0.0, dist_factor*spread), while the other heads operate on
 	# the range (spread, dist_factor*spread). 
-	min_dist = spread - spread*((start_H == 0).to(tl.int32))
+	min_dist = spread - spread*((offs_H == 0).to(tl.int32))
 
 	# create K/V column mask pointer (loaded in the next loop)
 	mask_j_ptr = tl.make_block_ptr( # N,
-		base=mask_ptr + (start_Z*stride_mask_Z),
+		base=mask_ptr + (offs_Z*stride_mask_Z),
 		shape=(tot_N, ),
 		strides=(stride_mask_N, ),
 		offsets=(0, ),
@@ -212,20 +216,20 @@ def _attn_fwd(
 
 	# create output block pointer
 	Oi_block_ptr = tl.make_block_ptr( # N x d_k
-		base=O_ptr + (start_Z*stride_O_Z) + (start_H*stride_O_H),
+		base=O_ptr + (offs_Z*stride_O_Z) + (offs_H*stride_O_H),
 		shape=(tot_N, d_k),
 		strides=(stride_O_N, stride_O_D),
-		offsets=(I_offs, 0),
+		offsets=(offs_I, 0),
 		block_shape=(BLOCK_I, min_d_k),
 		order=(0, 1)
 	)
 
 	# create log sum exp pointer
 	Li_block_ptr = tl.make_block_ptr( # N,
-		base=L_ptr + (start_Z*stride_L_Z) + (start_H*stride_L_H),
+		base=L_ptr + (offs_Z*stride_L_Z) + (offs_H*stride_L_H),
 		shape=(tot_N, ),
 		strides=(stride_L_N, ),
-		offsets=(I_offs, ),
+		offsets=(offs_I, ),
 		block_shape=(BLOCK_I, ),
 		order=(0, )
 	)
@@ -255,58 +259,58 @@ def _attn_bwd(
 	BLOCK_I: tl.constexpr, BLOCK_J: tl.constexpr
 ):
 	# get the column offset that this block will work with
-	J_start = tl.program_id(0)
-	J_offs = J_start * BLOCK_J
+	start_J = tl.program_id(0)
+	offs_J = start_J * BLOCK_J
 
 	# get batch head combo that this block will work with
-	start_ZH = tl.program_id(1)
-	start_Z = start_ZH // nheads
-	start_H = start_ZH % nheads
+	offs_ZH = tl.program_id(1)
+	offs_Z = offs_ZH // nheads
+	offs_H = offs_ZH % nheads
 
 	# prep pointers (KjT and Vj stay in SRAM throughout)
 	KjT_ptr = tl.make_block_ptr( # d_k x N (transpose on load)
-		base=K_ptr + (start_Z*stride_K_Z) + (start_H*stride_K_H),
+		base=K_ptr + (offs_Z*stride_K_Z) + (offs_H*stride_K_H),
 		shape=(d_k, tot_N),
 		strides=(stride_K_D, stride_K_N),
-		offsets=(0, J_offs),
+		offsets=(0, offs_J),
 		block_shape=(min_d_k, BLOCK_J),
 		order=(0, 1)
 	)
 
 	Vj_ptr = tl.make_block_ptr( # N x d_k
-		base=V_ptr + (start_Z*stride_V_Z) + (start_H*stride_V_H),
+		base=V_ptr + (offs_Z*stride_V_Z) + (offs_H*stride_V_H),
 		shape=(tot_N, d_k),
 		strides=(stride_V_N, stride_V_D),
-		offsets=(J_offs, 0),
+		offsets=(offs_J, 0),
 		block_shape=(BLOCK_J, min_d_k),
 		order=(0, 1)
 	)
 
 	# load coordinates for J columns
 	coords_j_ptr = tl.make_block_ptr(
-		base=coords_ptr + (start_Z*stride_coords_Z),
+		base=coords_ptr + (offs_Z*stride_coords_Z),
 		shape=(tot_N, 3),
 		strides=(stride_coords_N, stride_coords_S),
-		offsets=(J_offs, 0),
+		offsets=(offs_J, 0),
 		block_shape=(BLOCK_J, 4),
 		order=(0, 1)		
 	)
 	coords_j = tl.load(coords_j_ptr, boundary_check=(0,1), padding_option="zero")
 
 	# load the spread assigned to this block (based on the head it was assigned)
-	spread_ptr = spreads_ptr + (start_H*stride_spreads_H)
+	spread_ptr = spreads_ptr + (offs_H*stride_spreads_H)
 	spread = tl.load(spread_ptr)
 
 	# minimum distance should be zero for the first head, so tokens can attend to
 	# themselves (since distances for self = 0)
-	min_dist = spread - spread*((start_H==0).to(tl.int32))
+	min_dist = spread - spread*((offs_H==0).to(tl.int32))
 
 	# initialize mask for j columns
 	mask_j_ptr = tl.make_block_ptr( # N 
-		base=mask_ptr + (start_Z*stride_mask_Z),
+		base=mask_ptr + (offs_Z*stride_mask_Z),
 		shape=(tot_N, ),
 		strides=(stride_mask_N, ),
-		offsets=(J_offs, ),
+		offsets=(offs_J, ),
 		block_shape=(BLOCK_J, ),
 		order=(0, )
 	)
@@ -322,7 +326,7 @@ def _attn_bwd(
 
 	# initialize pointers for Qi, dQi, dOi, Li, and Di. only loaded within loop
 	Qi_block_ptr = tl.make_block_ptr( # N x d_k
-		base=Q_ptr + (start_Z*stride_Q_Z) + (start_H*stride_Q_H),
+		base=Q_ptr + (offs_Z*stride_Q_Z) + (offs_H*stride_Q_H),
 		shape=(tot_N, d_k),
 		strides=(stride_Q_N, stride_Q_D),
 		offsets=(0, 0),
@@ -331,11 +335,11 @@ def _attn_bwd(
 	)
 
 	# perform atomic adds on dQi, which don't support block pointers, so do manual indexing
-	dQi_start_ptr = dQ_ptr + (start_Z*stride_dQ_Z) + (start_H*stride_dQ_H)
+	dQi_start_ptr = dQ_ptr + (offs_Z*stride_dQ_Z) + (offs_H*stride_dQ_H)
 	dQi_block_ptr = dQi_start_ptr + (tl.arange(0,BLOCK_I)[:, None]*stride_dQ_N) + (tl.arange(0,min_d_k)[None, :]*stride_dQ_D)
 
 	dOi_block_ptr = tl.make_block_ptr( # N x d_k
-		base=dO_ptr + (start_Z*stride_dO_Z) + (start_H*stride_dO_H),
+		base=dO_ptr + (offs_Z*stride_dO_Z) + (offs_H*stride_dO_H),
 		shape=(tot_N, d_k),
 		strides=(stride_dO_N, stride_dO_D),
 		offsets=(0, 0),
@@ -344,7 +348,7 @@ def _attn_bwd(
 	)
 
 	Li_block_ptr = tl.make_block_ptr( # N
-		base=L_ptr + (start_Z*stride_L_Z) + (start_H*stride_L_H),
+		base=L_ptr + (offs_Z*stride_L_Z) + (offs_H*stride_L_H),
 		shape=(tot_N, ),
 		strides=(stride_L_N, ),
 		offsets=(0, ),
@@ -353,7 +357,7 @@ def _attn_bwd(
 	)
 
 	Di_block_ptr = tl.make_block_ptr( # N
-		base=D_ptr + (start_Z*stride_D_Z) + (start_H*stride_D_H),
+		base=D_ptr + (offs_Z*stride_D_Z) + (offs_H*stride_D_H),
 		shape=(tot_N, ),
 		strides=(stride_D_N, ),
 		offsets=(0, ),
@@ -362,7 +366,7 @@ def _attn_bwd(
 	)
 
 	coords_i_ptr = tl.make_block_ptr(
-		base=coords_ptr + (start_Z*stride_coords_Z) ,
+		base=coords_ptr + (offs_Z*stride_coords_Z) ,
 		shape=(tot_N, 3),
 		strides=(stride_coords_N, stride_coords_S),
 		offsets=(0, 0),
@@ -372,7 +376,7 @@ def _attn_bwd(
 
 	# initialize mask for i rows
 	mask_i_ptr = tl.make_block_ptr( # N 
-		base=mask_ptr + (start_Z*stride_mask_Z),
+		base=mask_ptr + (offs_Z*stride_mask_Z),
 		shape=(tot_N, ),
 		strides=(stride_mask_N, ),
 		offsets=(0, ),
@@ -398,7 +402,7 @@ def _attn_bwd(
 		# compute rbfs
 		rbfs = tl.exp(-(dists*dists) / (2.0*spread*spread))
 
-		# for negative logits, small should be scaled to be less negative than for far distances
+		# for negative logits, small dists should be scaled to be less negative than for far distances
 		rbfs = tl.where(Sij < 0, (1+1e-3)-rbfs, rbfs)
 
 		# mask out attention that is not relevant to this head
@@ -450,19 +454,19 @@ def _attn_bwd(
 
 	# initialize dK and dV pointers to write output
 	dKj_block_ptr = tl.make_block_ptr( # N x d_k
-		base=dK_ptr + (start_Z*stride_dK_Z) + (start_H*stride_dK_H),
+		base=dK_ptr + (offs_Z*stride_dK_Z) + (offs_H*stride_dK_H),
 		shape=(tot_N, d_k),
 		strides=(stride_dK_N, stride_dK_D),
-		offsets=(J_offs, 0),
+		offsets=(offs_J, 0),
 		block_shape=(BLOCK_J, min_d_k),
 		order=(0, 1)
 	)
 
 	dVj_block_ptr = tl.make_block_ptr( # N x d_k
-		base=dV_ptr + (start_Z*stride_dV_Z) + (start_H*stride_dV_H),
+		base=dV_ptr + (offs_Z*stride_dV_Z) + (offs_H*stride_dV_H),
 		shape=(tot_N, d_k),
 		strides=(stride_V_N, stride_V_D),
-		offsets=(J_offs, 0),
+		offsets=(offs_J, 0),
 		block_shape=(BLOCK_J, min_d_k),
 		order=(0, 1)
 	)
