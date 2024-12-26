@@ -3,7 +3,7 @@
 author: 		jaime cardenas
 title:  		attn.py
 description:	multi-scale gaussian flash attention kernel written in triton. 
-				(in development, currently just flash_attention2)
+				(in development, currently only forward pass is implemented, bwd is just flashattention2 bwd)
 				kernel based on:
 					FlashAttention2 paper: https://arxiv.org/abs/2307.08691
 					Triton Implementation: https://github.com/triton-lang/triton/blob/main/python/tutorials/06-fused-attention.py
@@ -160,15 +160,14 @@ def _attn_fwd(
 
 		# set masked positions to -inf, include out of range dists in mask
 		dists_mask = (dists > spread) & (dists < (dist_factor*spread))
-		attn_mask = (mask_i[:, None]) & (mask_j[None, :]) #& (dists_mask) # N x N
+		attn_mask = (mask_i[:, None]) & (mask_j[None, :]) & (dists_mask) # N x N
 
 		# QKT/sqrt(d_k)
 		Sij = tl.dot(Qi, KjT) * softmax_scale # N x N
 
-		# scale attention logits by rbf
-		Sij = tl.where(attn_mask, dists, -inf) # N x N
-
-		# tl.device_print("", rbfs)
+		# scale attention logits by rbf (subtract 1e-5 for Sij < 0, since diagonals rbf will be 1, 
+		# this would lead to diagonals w/ negative logits always having attn logits of 0)
+		Sij = tl.where(attn_mask, tl.where(Sij < 0, Sij*((1+1e-3)-rbfs), Sij*rbfs), -inf) # N x N
 
 		# max of each row
 		mij = tl.maximum(mi, tl.max(Sij, axis=1)) # N, 
@@ -197,15 +196,16 @@ def _attn_fwd(
 		KjT_block_ptr = tl.advance(KjT_block_ptr, (0, BLOCK_J))
 		Vj_block_ptr = tl.advance(Vj_block_ptr, (BLOCK_J, 0))
 		mask_j_ptr = tl.advance(mask_j_ptr, (BLOCK_J, ))
+		coords_J_ptr = tl.advance(coords_J_ptr, (BLOCK_J, 0))
+
 	
 	# epilogue
 
 	# normalize output
-	Oi = tl.where((mask_i[:, None]) & (li[:, None]!=0), Oi / li[:, None], 0.0)
+	Oi = tl.where(li[:, None]!=0, Oi / li[:, None], 0.0)
 
 	# compute log sum exponential
 	mi += tl.log(li)
-	mi = tl.where(mask_i, mi, -inf)
 
 	# create output block pointer
 	Oi_block_ptr = tl.make_block_ptr( # N x d_k
