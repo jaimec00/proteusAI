@@ -110,7 +110,7 @@ def torch_attn(Q, K, V, coords, spreads, mask=None, dist_factor=3.0):
 	S = torch.matmul(Q, K.transpose(2,3)) / (d_k**0.5) # batch x nheads x N x N
 
 	dists = torch.sqrt(torch.sum((coords[:, :, None, :] - coords[:, None, :, :])**2, axis=3))[:, None, :, :]
-	dists_mask = (dists < torch.where(spreads==spread.min(), 0.0, spreads)[None, :, None, None]) | (dists > (dist_factor*spreads[None, :, None, None]))
+	dists_mask = (dists < torch.where(spreads==spreads.min(), 0.0, spreads)[None, :, None, None]) | (dists > (dist_factor*spreads[None, :, None, None]))
 	rbfs = torch.exp(-(dists**2)/(2*spreads[None, :, None, None]**2))
 	rbfs = torch.where(S<0, (1+1e-3)-rbfs, rbfs)
 
