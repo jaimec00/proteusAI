@@ -28,22 +28,22 @@ def main():
 	torch.cuda.synchronize()  
 	start_event = torch.cuda.Event(enable_timing=True)
 	end_event = torch.cuda.Event(enable_timing=True)
+	atol, rtol = 1e-2, 0
 
 	print("forward pass:\n")
 
 	params = [Q, K, V, coords, spreads, mask, dist_factor]
-	test_fwd(torch_attn, attn, params, start_event, end_event)
+	test_fwd(torch_attn, attn, params, start_event, end_event, atol, rtol)
 
 	print("\nbackward pass:\n")
 
 	test_bwd(torch_out.sum(), triton_out.sum(), Q, K, V, atol, rtol)
 
-def test_fwd(torch_attn, attn, params, start_event, end_event):
+def test_fwd(torch_attn, attn, params, start_event, end_event, atol, rtol):
 
 	triton_out, triton_time, triton_memory = profile_func(attn.apply, params, start_event, end_event)
 	torch_out, torch_time, torch_memory = profile_func(torch_attn, params, start_event, end_event)
 	rel_error, abs_error = calculate_error(torch_out, triton_out)
-	atol, rtol = 1e-2, 0
 
 	# print(f"{torch_out}\n{triton_out}")
 
