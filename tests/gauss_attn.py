@@ -10,11 +10,11 @@ def main():
 	torch.manual_seed(37)
 	device = torch.device("cuda")
 
-	batch, nheads, N, d_model = 1, 4, 100, 64
+	batch, nheads, N, d_model = 1, 8, 10000, 512
 	assert d_model%2==0 and d_model%nheads==0
 	d_k = d_model // nheads
 	min_wl, max_wl, base = 3.7, 20, 20
-	dist_factor = 3.0
+	dist_factor = 2**0.5
 
 	coords = 20 * torch.randn((batch, N, 3), dtype=torch.float32, device=device) # batch x N x 3
 	spreads = min_wl + (torch.logspace(0, 1, nheads, base, dtype=torch.float32, device=coords.device) - 1) / (base-1) * (max_wl-min_wl) # nheads,
@@ -107,6 +107,8 @@ def torch_attn(Q, K, V, coords, spreads, mask=None, dist_factor=3.0):
 	dists_mask = (dists <= spreads[None, :, None, None]) | (dists >= (dist_factor*spreads[None, :, None, None]))
 	rbfs = torch.exp(-(dists**2)/(2*spreads[None, :, None, None]**2))
 	rbfs = torch.where(S<0, (1+1e-3)-rbfs, rbfs)
+
+	print(dists_mask.sum(dim=-1).sum(dim=-1)/(N**2))
 
 	attn_mask = mask[:, None, :, None] | mask[:, None, None, :] | dists_mask
 	S = torch.where(attn_mask, float("-inf"), S*rbfs)

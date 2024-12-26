@@ -3,7 +3,6 @@
 author: 		jaime cardenas
 title:  		attn.py
 description:	multi-scale gaussian flash attention kernel written in triton. 
-				(in development, currently only forward pass is implemented, bwd is just flashattention2 bwd)
 				kernel based on:
 					FlashAttention2 paper: https://arxiv.org/abs/2307.08691
 					Triton Implementation: https://github.com/triton-lang/triton/blob/main/python/tutorials/06-fused-attention.py
@@ -13,10 +12,6 @@ description:	multi-scale gaussian flash attention kernel written in triton.
 				the RBFs, where the spread corresponds to (roughly) the average wavelength of the feature space it is 
 				operating on. wavelength, in this context, refers to the wavelength used to compute the wave function 
 				features for a particular feature index, see utils/model_utils/featurization.py). 
-
-				will include a forward and backward pass, currently implementing vanilla FlashAttention2 and make sure 
-				it is functioning before adding the gaussian scaling
-
 '''
 # ----------------------------------------------------------------------------------------------------------------------
 
@@ -304,8 +299,8 @@ def _attn_bwd(
 	mask_j = tl.load(mask_j_ptr, boundary_check=(0, ), padding_option="zero").to(tl.int1)
 
 	# initialize dKj and dVj
-	dKj = tl.zeros((BLOCK_J, d_k), dtype=tl.float32)
-	dVj = tl.zeros((BLOCK_J, d_k), dtype=tl.float32)
+	dKj = tl.zeros((BLOCK_J, min_d_k), dtype=tl.float32)
+	dVj = tl.zeros((BLOCK_J, min_d_k), dtype=tl.float32)
 
 	# load KjT and Vj
 	KjT = tl.load(KjT_ptr, boundary_check=(0, 1), padding_option="zero")
@@ -372,7 +367,7 @@ def _attn_bwd(
 	)
 
 	inf = float("inf") # convenience
-	for i in tl.range(0, triton.cdiv(tot_N, BLOCK_J), 1):
+	for i in tl.range(0, triton.cdiv(tot_N, BLOCK_I), 1):
 
 		Qi = tl.load(Qi_block_ptr, boundary_check=(0, 1), padding_option="zero")
 		Sij = tl.dot(Qi, KjT) * softmax_scale # N x N
@@ -399,16 +394,16 @@ def _attn_bwd(
 		dPij = tl.dot(dOi, tl.permute(Vj, (1,0)))
 
 		Di = tl.load(Di_block_ptr, boundary_check=(0, ), padding_option="zero")
-		dSij = Pij * (dPij - Di[:, None])
+		dSij = rbfs * Pij * (dPij - Di[:, None])
 
-		# will do atomic add instead of loading, as other J in parallel leads to race condition
-		dQi = tl.dot(dSij*rbfs, tl.permute(KjT, (1,0))) * softmax_scale
+		# will do atomic add instead of loading, as other J operating on same I in parallel leads to race condition
+		dQi = tl.dot(dSij, tl.permute(KjT, (1,0))) * softmax_scale
 		dQi_mask = mask_i[:, None] & (tl.arange(0,min_d_k)[None, :] < d_k)
 		tl.atomic_add(dQi_block_ptr, dQi, mask=dQi_mask)
 
 		dKj += softmax_scale * tl.where(
 										mask_j[:, None], 
-										tl.dot(tl.permute(dSij*rbfs, (1,0)), Qi),
+										tl.dot(tl.permute(dSij, (1,0)), Qi),
 										0.0
 									)
 		# advance the pointers
