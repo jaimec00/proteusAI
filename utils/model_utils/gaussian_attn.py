@@ -131,8 +131,8 @@ def _attn_fwd(
 
 	# diagonals will have a distance of zero, so to be included in the attn mechanism, 
 	# the minimum distance must be zero, but only for the first head, so the first 
-	# head operates on the range (0.0, dist_factor*spread), while the other heads operate on
-	# the range (spread, dist_factor*spread). 
+	# head operates on the range (0.0, dist_factor*spread_heah), while the other heads operate on
+	# the range (spread_head, dist_factor*spread_head). 
 	min_dist = spread - spread*((offs_H == 0).to(tl.int32))
 
 	# create K/V column mask pointer (loaded in the next loop)
