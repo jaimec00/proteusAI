@@ -7,36 +7,43 @@ from utils.model_utils.gaussian_attn import attn
 
 def main():
 
+	# setup
 	torch.manual_seed(37)
 	device = torch.device("cuda")
 
+	# prepare inputs
 	batch, nheads, N, d_model = 1, 8, 10000, 512
 	assert d_model%2==0 and d_model%nheads==0
 	d_k = d_model // nheads
 	min_wl, max_wl, base = 3.7, 20, 20
 	dist_factor = 2**0.5
-
 	coords = 20 * torch.randn((batch, N, 3), dtype=torch.float32, device=device) # batch x N x 3
 	spreads = min_wl + (torch.logspace(0, 1, nheads, base, dtype=torch.float32, device=coords.device) - 1) / (base-1) * (max_wl-min_wl) # nheads,
 	mask = torch.rand((batch, N), device=coords.device) > 1 # batch x N
-
-	# getting numerical instability with exponential computations, so will apply 
-	# layer norm after projections in real model, but for now just initialize a 
-	# normal distribution to test
 	Q = torch.normal(mean=0, std=1, size=(batch, nheads, N, d_k), device=device, dtype=torch.float32, requires_grad=True) # batch x nhead x N x d_k 
 	K = torch.normal(mean=0, std=1, size=(batch, nheads, N, d_k), device=device, dtype=torch.float32, requires_grad=True) # batch x nhead x N x d_k 
 	V = torch.normal(mean=0, std=1, size=(batch, nheads, N, d_k), device=device, dtype=torch.float32, requires_grad=True) # batch x nhead x N x d_k 
 
+	# prepare for recording mem and time
 	torch.cuda.synchronize()  
 	start_event = torch.cuda.Event(enable_timing=True)
 	end_event = torch.cuda.Event(enable_timing=True)
 
-	triton_out, triton_time, triton_memory = profile_func(attn.apply, [Q, K, V, coords, spreads, mask, dist_factor], start_event, end_event)
-	torch_out, torch_time, torch_memory = profile_func(torch_attn, [Q, K, V, coords, spreads, mask, dist_factor], start_event, end_event)
+	print("forward pass:\n")
+
+	params = [Q, K, V, coords, spreads, mask, dist_factor]
+	test_fwd(torch_attn, attn, params, start_event, end_event)
+
+	print("\nbackward pass:\n")
+
+	test_bwd(torch_out.sum(), triton_out.sum(), Q, K, V, atol, rtol)
+
+def test_fwd(torch_attn, attn, params, start_event, end_event):
+
+	triton_out, triton_time, triton_memory = profile_func(attn.apply, params, start_event, end_event)
+	torch_out, torch_time, torch_memory = profile_func(torch_attn, params, start_event, end_event)
 	rel_error, abs_error = calculate_error(torch_out, triton_out)
 	atol, rtol = 1e-2, 0
-
-	print("forward pass:\n")
 
 	# print(f"{torch_out}\n{triton_out}")
 
@@ -49,10 +56,9 @@ def main():
 	print(f"torch memory usage: {torch_memory / (1024 ** 3):.3f} GB")
 	print(f"triton kernel memory usage: {triton_memory / (1024 ** 3):.3f} GB")
 
-	print("\nbackward pass:\n")
-
+def test_bwd(torch_loss, triton_loss, Q, K, V, atol, rtol):
 	# torch
-	torch_time, torch_memory = profile_bwd(torch_out.sum(), start_event, end_event)
+	torch_time, torch_memory = profile_bwd(torch_loss, start_event, end_event)
 	torch_dQ, torch_dK, torch_dV = [Q.grad.clone(), K.grad.clone(), V.grad.clone()]
 
 	Q.grad.zero_()
@@ -60,7 +66,7 @@ def main():
 	V.grad.zero_()	
 
 	# triton
-	triton_time, triton_memory = profile_bwd(triton_out.sum(), start_event, end_event)
+	triton_time, triton_memory = profile_bwd(triton_loss, start_event, end_event)
 	triton_dQ, triton_dK, triton_dV = [Q.grad.clone(), K.grad.clone(), V.grad.clone()]
 
 	dQ_rel_error, dQ_abs_error = calculate_error(torch_dQ, triton_dQ)
@@ -104,7 +110,7 @@ def torch_attn(Q, K, V, coords, spreads, mask=None, dist_factor=3.0):
 	S = torch.matmul(Q, K.transpose(2,3)) / (d_k**0.5) # batch x nheads x N x N
 
 	dists = torch.sqrt(torch.sum((coords[:, :, None, :] - coords[:, None, :, :])**2, axis=3))[:, None, :, :]
-	dists_mask = (dists <= spreads[None, :, None, None]) | (dists >= (dist_factor*spreads[None, :, None, None]))
+	dists_mask = (dists < torch.where(spreads==spread.min(), 0.0, spreads)[None, :, None, None]) | (dists > (dist_factor*spreads[None, :, None, None]))
 	rbfs = torch.exp(-(dists**2)/(2*spreads[None, :, None, None]**2))
 	rbfs = torch.where(S<0, (1+1e-3)-rbfs, rbfs)
 

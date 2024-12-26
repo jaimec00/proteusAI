@@ -127,6 +127,11 @@ def _attn_fwd(
 	# load spread for this head, scaler value
 	spread_ptr = spreads_ptr + (start_H*stride_spreads_H)
 	spread = tl.load(spread_ptr)
+	# diagonals will have a distance of zero, so to be included in the attn mechanism, 
+	# the minimum distance must be zero, but only for the first head, so the first 
+	# head operates on the range 0.0 to dist_factor*spread, while the other heads operate on
+	# the range spread to dist_factor*spread. 
+	min_dist = spread - spread*((start_H == 0).to(tl.int32))
 
 	# create K/V column mask pointer (loaded in the next loop)
 	mask_j_ptr = tl.make_block_ptr( # N,
@@ -158,7 +163,7 @@ def _attn_fwd(
 		rbfs = tl.where(Sij < 0, (1+1e-3)-rbfs, rbfs)
 
 		# set masked positions to -inf, include out of range dists in mask
-		dists_mask = (dists > spread) & (dists < (dist_factor*spread))
+		dists_mask = (dists >= min_spread) & (dists <= (dist_factor*spread))
 		attn_mask = (mask_i[:, None]) & (mask_j[None, :]) & (dists_mask) # N x N
 
 		# scale attention logits by rbf (subtract 1e-5 for Sij < 0, since diagonals rbf will be 1, 
@@ -286,6 +291,7 @@ def _attn_bwd(
 
 	spread_ptr = spreads_ptr + (start_H*stride_spreads_H)
 	spread = tl.load(spread_ptr)
+	min_dist = spread - spread*((start_H==0).to(tl.int32))
 
 	# initialize mask for j columns
 	mask_j_ptr = tl.make_block_ptr( # N 
@@ -376,7 +382,7 @@ def _attn_bwd(
 		coords_i = tl.load(coords_i_ptr, boundary_check=(0,1), padding_option="zero") # N x 4
 		dists_raw = coords_i[:, None, :] - coords_j[None, :, :] # N x N x 4
 		dists = tl.sqrt(tl.sum(dists_raw * dists_raw, axis=2))
-		dists_mask = (dists>spread) & (dists<(dist_factor*spread))
+		dists_mask = (dists>=min_dist) & (dists<=(dist_factor*spread))
 		rbfs = tl.exp(-(dists*dists) / (2.0*spread*spread))
 		rbfs = tl.where(Sij < 0, (1+1e-3)-rbfs, rbfs)
 
