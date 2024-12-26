@@ -48,7 +48,7 @@ class MHA(nn.Module):
 	on each head's spread in the RBF of PW distances 
 	'''
 
-	def __init__(self, d_model=512, nhead=8, dim_feedforward=1024, dropout=0.1, min_wl=3.7, max_wl=20, base=20, eps=2e-2):
+	def __init__(self, d_model=512, nhead=8, dim_feedforward=1024, dropout=0.1, min_wl=3.7, max_wl=20, base=20, dist_factor=2**0.5, eps=2e-2):
 		super(MHA, self).__init__()
 
 		self.nhead = nhead
@@ -58,6 +58,7 @@ class MHA(nn.Module):
 		self.d_k = self.d_model // self.nhead
 
 		self.spreads = min_wl + (max_wl-min_wl)*(torch.logspace(0, 1, self.nhead, base) - 1)/(base-1) # nhead, 
+		self.dist_factor = dist_factor 
 
 		self.q_proj = nn.Parameter(torch.randn(self.nhead, self.d_model, self.d_k)) # nhead x d_model x d_k
 		self.k_proj = nn.Parameter(torch.randn(self.nhead, self.d_model, self.d_k)) # nhead x d_model x d_k
@@ -109,11 +110,12 @@ class Decoder(nn.Module):
 	decoder module, contains self-attention, normalization, dropout, feed-forward network, and residual connections
 	'''
 
-	def __init__(self, d_model=512, nhead=8, dim_feedforward=1024, dropout=0.1):
+	def __init__(self, d_model=512, nhead=8, dim_feedforward=1024, dropout=0.1, min_wl=3.7, max_wl=20, base=20, dist_factor=2**0.5, eps=2e-2):
 		super(Decoder, self).__init__()
 
 		# Self-attention layers
-		self.self_attn = MHA(d_model, nhead, dim_feedforward=dim_feedforward, dropout=dropout)
+		self.self_attn = MHA(d_model, nhead, dim_feedforward=dim_feedforward, dropout=dropout, 
+							min_wl=min_wl, max_wl=max_wl, base=base, dist_factor=dist_factor, eps=eps)
 
 		# Separate normalization layers
 		self.norm = nn.LayerNorm(d_model)
@@ -178,8 +180,8 @@ class ContextModule(Decoder):
 	batch have no context (all masked) but the rest only have some, avoids 
 	numerical instability
 	'''
-	def __init__(self, d_model=512, nhead=8, dim_feedforward=1024, dropout=0.1):
-		super(ContextModule, self).__init__(d_model, nhead, dim_feedforward, dropout)
+	def __init__(self, d_model=512, nhead=8, dim_feedforward=1024, dropout=0.1, min_wl=3.7, max_wl=20, base=20, dist_factor=2**0.5, eps=2e-2):
+		super(ContextModule, self).__init__(d_model, nhead, dim_feedforward, dropout, min_wl, max_wl, base, dist_factor, eps)
 
 								                    # vvvvvvvvvv repetive, as can do single mask, but just for clarity
 	def forward(self, wavefunc, coords, aa_context, aa_context_mask=None, key_padding_mask=None, use_checkpoint=False):
@@ -226,7 +228,7 @@ class proteusAI(nn.Module):
 
 	'''
 	
-	def __init__(self, N, d_model, n_head, decoder_layers, hidden_linear_dim, dropout, min_wl=3.7, max_wl=20, base=20, active_decoders=-1, use_probs=False):
+	def __init__(self, N, d_model, n_head, decoder_layers, hidden_linear_dim, dropout, min_wl=3.7, max_wl=20, base=20, dist_factor=2**0.5, eps=2e-2, active_decoders=-1, use_probs=False):
 		super(proteusAI, self).__init__()
 
 		# configuration
@@ -238,10 +240,10 @@ class proteusAI(nn.Module):
 
 		# context
 		self.aa_embedding = nn.Linear(20, d_model)
-		self.context_module = ContextModule(d_model, n_head, hidden_linear_dim, dropout)
+		self.context_module = ContextModule(d_model, n_head, hidden_linear_dim, dropout, min_wl, max_wl, base, dist_factor, eps)
 
 		# decoder
-		self.decoders = nn.ModuleList([Decoder(d_model, n_head, hidden_linear_dim, dropout) for _ in range(decoder_layers)])
+		self.decoders = nn.ModuleList([Decoder(d_model, n_head, hidden_linear_dim, dropout, min_wl, max_wl, base, dist_factor, eps) for _ in range(decoder_layers)])
 
 		# map to aa probs
 		self.linear = nn.Linear(d_model, 20)
