@@ -15,8 +15,12 @@ description:	multi-scale gaussian flash attention kernel written in triton.
 				operating on. small spread heads focus on local interactions, and large spread heads focus on global interactions. 
 				wavelength, in this context, refers to the wavelength used to compute the wave function features for a 
 				particular feature index, see utils/model_utils/featurization.py). 
-				Forward and backward passes are fully implemented, only need to add dropout with RNG seed to each,
-				and add optimizations for speed to finish
+
+				Forward and backward passes are fully implemented, only need to:
+					add dropout with RNG seed to each,
+					add optimizations for speed to finish
+					update masking logic to be compatible with Context Module (cross-attention), where ALL valid
+					Q should query all valid K that HAVE context, will probably need base mask (Q mask) and context mask (K mask)
 '''
 # ----------------------------------------------------------------------------------------------------------------------
 
