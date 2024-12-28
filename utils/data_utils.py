@@ -285,7 +285,7 @@ class DataCleaner():
 			for biounit in biounits:
 
 				# filter out ligand chains from biounit
-				biounit_chains = [chain for chain in biounit if chain in chains.values]
+				biounit_chains = [chain for chain in biounit if f"{pdbid}_{chain}" in chains.values]
 
 				# get the biounit coordinates, labels, and chain masks
 				bu_coords, bu_labels, bu_chain_masks = self.get_biounit_tensors(pdbid, biounit_chains)
