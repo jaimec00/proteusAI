@@ -170,7 +170,7 @@ def _attn_fwd(
 		rbfs = tl.where(Sij < 0, (1+eps)-rbfs, rbfs) # N x N
 
 		# set masked positions to -inf, include out of range dists in mask
-		dists_mask = (dists >= min_spread) & (dists <= (dist_factor*spread)) # N x N
+		dists_mask = (dists >= min_dist) & (dists <= (dist_factor*spread)) # N x N
 		attn_mask = (mask_i[:, None]) & (mask_j[None, :]) & (dists_mask) # N x N
 
 		# scale attention logits by rbfs and mask invalid pairs
@@ -508,8 +508,8 @@ class attn(torch.autograd.Function):
 		spreads = spreads.contiguous()
 
 		# define block sizes (minimum of 16, as tl.dot needs all dimensions to be >=16)
-		BLOCK_I = 32
-		BLOCK_J = 32
+		BLOCK_I = 32 if d_k <= 64 else 16
+		BLOCK_J = 32 if d_k <= 64 else 16
 		
 		# define the grid
 		grid = lambda args: (   triton.cdiv(args["tot_N"], args["BLOCK_I"]), 
@@ -563,8 +563,8 @@ class attn(torch.autograd.Function):
 		mask.contiguous()
 
 		# define block sizes
-		BLOCK_I = 32
-		BLOCK_J = 32
+		BLOCK_I = 32 if d_k <= 64 else 16
+		BLOCK_J = 32 if d_k <= 64 else 16
 
 		# initialize dQ, dK, and dV
 		dQ = torch.zeros_like(Q).contiguous()
@@ -597,5 +597,5 @@ class attn(torch.autograd.Function):
 						 )
 
 		# return the gradients
-		return dQ, dK, dV, None, None, None, None
+		return dQ, dK, dV, None, None, None, None, None, None
 
