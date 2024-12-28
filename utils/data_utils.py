@@ -25,7 +25,7 @@ import argparse
 import gc
 
 from utils.io_utils import Output
-from utils.model_utils import protein_to_wavefunc
+from utils.model_utils.featurization import protein_to_wavefunc
 
 # ----------------------------------------------------------------------------------------------------------------------
 
@@ -204,7 +204,7 @@ class DataCleaner():
 		self.pdb_path = self.data_path / pdb_path
 
 		self.output = Output(new_data_path)
-		
+			
 		# read which clusters are for validation and for testing
 		with    open( self.data_path / val_clusters_path, 	"r") as v, \
 				open( self.data_path / test_clusters_path,	"r") as t:
@@ -523,7 +523,6 @@ if __name__ == "__main__":
 	parser.add_argument("--min_wl", default=3.7, type=float, help="minimum wavelength to use for wave functions")
 	parser.add_argument("--max_wl", default=20.0, type=float, help="maximum wavelength to use for wave functions")
 	parser.add_argument("--base", default=20, type=int, help="base to use to samples wavelengths")
-	parser.add_argument("--max_splits", default=1, type=int, help="maximum number of splits to do in case where sequence length is too long. will split along wavelength dimension")
 	parser.add_argument("--test", default=True, type=bool, help="number of devices to parallelize the computations on")
 
 	args = parser.parse_args()

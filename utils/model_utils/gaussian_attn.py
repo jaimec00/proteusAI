@@ -18,6 +18,7 @@ description:	multi-scale gaussian flash attention kernel written in triton.
 
 				Forward and backward passes are fully implemented, only need to:
 					add dropout with RNG seed to each,
+						will possibly not add this, as the attention is highly localized
 					add optimizations for speed to finish
 '''
 # ----------------------------------------------------------------------------------------------------------------------
