@@ -19,8 +19,6 @@ description:	multi-scale gaussian flash attention kernel written in triton.
 				Forward and backward passes are fully implemented, only need to:
 					add dropout with RNG seed to each,
 					add optimizations for speed to finish
-					update masking logic to be compatible with Context Module (cross-attention), where ALL valid
-					Q should query all valid K that HAVE context, will probably need base mask (Q mask) and context mask (K mask)
 '''
 # ----------------------------------------------------------------------------------------------------------------------
 
@@ -38,10 +36,11 @@ def _attn_fwd(
 	spreads_ptr, stride_spreads_H,
 	L_ptr, stride_L_Z, stride_L_H, stride_L_N,
 	mask_ptr, stride_mask_Z, stride_mask_N,
+	context_mask_ptr, stride_context_mask_Z, stride_context_mask_N,
 
 	tot_N: tl.constexpr, tot_Z: tl.constexpr, nheads: tl.constexpr,
 	d_k: tl.constexpr, min_d_k: tl.constexpr, # max(16, d_k) bc tl.dot requires dim>=16
-	softmax_scale: tl.constexpr, dist_factor: tl.constexpr,
+	softmax_scale: tl.constexpr, dist_factor: tl.constexpr, eps:tl.constexpr,
 
 	BLOCK_I: tl.constexpr, # block sizes
 	BLOCK_J: tl.constexpr,
@@ -141,9 +140,9 @@ def _attn_fwd(
 
 	# create K/V column mask pointer (loaded in the next loop)
 	mask_j_ptr = tl.make_block_ptr( # N,
-		base=mask_ptr + (offs_Z*stride_mask_Z),
+		base=context_mask_ptr + (offs_Z*stride_context_mask_Z),
 		shape=(tot_N, ),
-		strides=(stride_mask_N, ),
+		strides=(stride_context_mask_N, ),
 		offsets=(0, ),
 		block_shape=(BLOCK_J, ),
 		order=(0, )
@@ -168,7 +167,7 @@ def _attn_fwd(
 		rbfs = tl.exp(-(dists*dists) / (2*spread*spread)) # N x N
 
 		# negative logits with close distances should be less negative
-		rbfs = tl.where(Sij < 0, (1+1e-3)-rbfs, rbfs) # N x N
+		rbfs = tl.where(Sij < 0, (1+eps)-rbfs, rbfs) # N x N
 
 		# set masked positions to -inf, include out of range dists in mask
 		dists_mask = (dists >= min_spread) & (dists <= (dist_factor*spread)) # N x N
@@ -256,9 +255,10 @@ def _attn_bwd(
 	coords_ptr, stride_coords_Z, stride_coords_N, stride_coords_S,
 	spreads_ptr, stride_spreads_H,
 	mask_ptr, stride_mask_Z, stride_mask_N,
+	context_mask_ptr, stride_context_mask_Z, stride_context_mask_N,
 
 	tot_Z: tl.constexpr, tot_N: tl.constexpr, nheads: tl.constexpr, 
-	d_k: tl.constexpr, min_d_k: tl.constexpr, softmax_scale: tl.constexpr, dist_factor: tl.constexpr,
+	d_k: tl.constexpr, min_d_k: tl.constexpr, softmax_scale: tl.constexpr, dist_factor: tl.constexpr, eps:tl.constexpr,
 
 	BLOCK_I: tl.constexpr, BLOCK_J: tl.constexpr
 ):
@@ -311,9 +311,9 @@ def _attn_bwd(
 
 	# initialize mask for j columns
 	mask_j_ptr = tl.make_block_ptr( # N 
-		base=mask_ptr + (offs_Z*stride_mask_Z),
+		base=context_mask_ptr + (offs_Z*stride_context_mask_Z),
 		shape=(tot_N, ),
-		strides=(stride_mask_N, ),
+		strides=(stride_context_mask_N, ),
 		offsets=(offs_J, ),
 		block_shape=(BLOCK_J, ),
 		order=(0, )
@@ -407,7 +407,7 @@ def _attn_bwd(
 		rbfs = tl.exp(-(dists*dists) / (2.0*spread*spread))
 
 		# for negative logits, small dists should be scaled to be less negative than for far distances
-		rbfs = tl.where(Sij < 0, (1+1e-3)-rbfs, rbfs)
+		rbfs = tl.where(Sij < 0, (1+eps)-rbfs, rbfs)
 
 		# mask out attention that is not relevant to this head
 		mask_i = tl.load(mask_i_ptr, boundary_check=(0, ), padding_option="zero").to(tl.int1)
@@ -482,7 +482,7 @@ def _attn_bwd(
 class attn(torch.autograd.Function):
 
 	@staticmethod
-	def forward(ctx, Q, K, V, coords, spreads, mask=None, dist_factor=3.0):
+	def forward(ctx, Q, K, V, coords, spreads, mask=None, context_mask=None, dist_factor=3.0, eps=1e-2):
 		
 		# checks
 		assert (Q.shape == K.shape) and (K.shape == V.shape), f"Q, K, and V projection shapes must match, but got {Q.shape=}, {K.shape=}, {V.shape=}"
@@ -496,6 +496,7 @@ class attn(torch.autograd.Function):
 
 		# initialize mask, output, and logsumexp tensors
 		mask = (torch.ones(batch, N, device=Q.device) if mask is None else ~mask).contiguous() # batch x N
+		context_mask = (mask if context_mask is None else ~context_mask).contiguous() # batch x N
 		out = torch.zeros(batch, nheads, N, d_k, device=Q.device).contiguous() # batch x N x d_model
 		L = torch.zeros(batch, nheads, N, device=Q.device).contiguous() # batch x nheads x N
 
@@ -525,14 +526,16 @@ class attn(torch.autograd.Function):
 							spreads, spreads.stride(0), # nhead, 
 							L, L.stride(0), L.stride(1), L.stride(2), # batch x nhead x N
 							mask, mask.stride(0), mask.stride(1), # batch x N
-							N, batch, nheads, d_k, max(d_k, 16), softmax_scale, dist_factor,
+							context_mask, context_mask.stride(0), context_mask.stride(1),
+							N, batch, nheads, d_k, max(d_k, 16), softmax_scale, dist_factor, eps,
 							BLOCK_I, BLOCK_J
 						)
 
 		# for backwards pass
-		ctx.save_for_backward(Q, K, V, out, L, coords, spreads, mask)
+		ctx.save_for_backward(Q, K, V, out, L, coords, spreads, mask, context_mask)
 		ctx.softmax_scale = softmax_scale
 		ctx.dist_factor = dist_factor
+		ctx.eps = eps
 
 		return out
 
@@ -540,7 +543,7 @@ class attn(torch.autograd.Function):
 	def backward(ctx, dO):
 
 		# load saved tensors
-		Q, K, V, O, L, coords, spreads, mask = ctx.saved_tensors
+		Q, K, V, O, L, coords, spreads, mask, context_mask = ctx.saved_tensors
 
 		# compute D for dS calculation
 		D = torch.sum(O*dO, dim=3) # Z x H x N x D -> Z x H x N
@@ -588,7 +591,8 @@ class attn(torch.autograd.Function):
 							coords, coords.stride(0), coords.stride(1), coords.stride(2),
 							spreads, spreads.stride(0), 
 							mask, mask.stride(0), mask.stride(1),
-							batch, N, nheads, d_k, max(d_k, 16), ctx.softmax_scale, ctx.dist_factor,
+							context_mask, context_mask.stride(0), context_mask.stride(1),
+							batch, N, nheads, d_k, max(d_k, 16), ctx.softmax_scale, ctx.dist_factor, ctx.eps,
 							BLOCK_I, BLOCK_J
 						 )
 

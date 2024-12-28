@@ -48,7 +48,7 @@ class MHA(nn.Module):
 	on each head's spread in the RBF of PW distances 
 	'''
 
-	def __init__(self, d_model=512, nhead=8, dim_feedforward=1024, dropout=0.1, min_wl=3.7, max_wl=20, base=20, dist_factor=2**0.5, eps=2e-2):
+	def __init__(self, d_model=512, nhead=8, dim_feedforward=1024, dropout=0.1, min_wl=3.7, max_wl=20, base=20, dist_factor=2**0.5, eps=1e-2):
 		super(MHA, self).__init__()
 
 		self.nhead = nhead
@@ -59,6 +59,7 @@ class MHA(nn.Module):
 
 		self.spreads = min_wl + (max_wl-min_wl)*(torch.logspace(0, 1, self.nhead, base) - 1)/(base-1) # nhead, 
 		self.dist_factor = dist_factor 
+		self.eps = eps
 
 		self.q_proj = nn.Parameter(torch.randn(self.nhead, self.d_model, self.d_k)) # nhead x d_model x d_k
 		self.k_proj = nn.Parameter(torch.randn(self.nhead, self.d_model, self.d_k)) # nhead x d_model x d_k
@@ -66,21 +67,21 @@ class MHA(nn.Module):
 
 		self.out_proj = nn.Linear(d_model, d_model)
 	
-	def forward(self, q, k, v, coords, key_padding_mask=None, use_checkpoint=False):
+	def forward(self, q, k, v, coords, key_padding_mask=None, context_mask=None, use_checkpoint=False):
 		'''
 		forward method, wrapper for _forward so can use gradient checkpointing in training
 		'''
 		if use_checkpoint:
 			out = checkpoint(
 				self._forward,
-				q, k, v, coords, key_padding_mask
+				q, k, v, coords, key_padding_mask, context_mask
 			)
 		else:
-			out = self._forward(q, k, v, coords, key_padding_mask)
+			out = self._forward(q, k, v, coords, key_padding_mask, context_mask)
 
 		return out
 
-	def _forward(self, q, k, v, coords, key_padding_mask=None):
+	def _forward(self, q, k, v, coords, key_padding_mask=None, context_mask=None):
 		'''
 		performs scaled dot-product attention weighted by Gaussian RBF 
 		'''
@@ -94,7 +95,7 @@ class MHA(nn.Module):
 		K = torch.matmul(k.unsqueeze(1), self.k_proj.unsqueeze(0)) # batch x nhead x N x d_k
 		V = torch.matmul(v.unsqueeze(1), self.v_proj.unsqueeze(0)) # batch x nhead x N x d_k
 
-		out = attn(Q, K, V, coords, self.spreads, key_padding_mask, self.dist_factor)  # batch x nhead x N x d_k
+		out = attn(Q, K, V, coords, self.spreads, key_padding_mask, context_mask, self.dist_factor, self.eps)  # batch x nhead x N x d_k
 
 		out = out.permute(0,2,3,1) # batch x N x d_k x nhead
 		out = out.reshape(batch, N, self.d_model) # batch x N x d_k x nhead --> batch x N x d_model
@@ -110,7 +111,7 @@ class Decoder(nn.Module):
 	decoder module, contains self-attention, normalization, dropout, feed-forward network, and residual connections
 	'''
 
-	def __init__(self, d_model=512, nhead=8, dim_feedforward=1024, dropout=0.1, min_wl=3.7, max_wl=20, base=20, dist_factor=2**0.5, eps=2e-2):
+	def __init__(self, d_model=512, nhead=8, dim_feedforward=1024, dropout=0.1, min_wl=3.7, max_wl=20, base=20, dist_factor=2**0.5, eps=1e-2):
 		super(Decoder, self).__init__()
 
 		# Self-attention layers
@@ -144,12 +145,13 @@ class Decoder(nn.Module):
 			for param in module.parameters():
 				param.requires_grad = requires_grad
 
-	def forward(self, wavefunc, coords, key_padding_mask=None, use_checkpoint=False):
+	def forward(self, wavefunc, coords, key_padding_mask=None, context_mask=None, use_checkpoint=False):
 
 		# full self-attention
 		wavefunc2 = self.self_attn(wavefunc, wavefunc, wavefunc,
 						coords=coords,
 						key_padding_mask=key_padding_mask,
+						context_mask=key_padding_mask,
 						use_checkpoint=use_checkpoint
 						)
 
@@ -180,7 +182,7 @@ class ContextModule(Decoder):
 	batch have no context (all masked) but the rest only have some, avoids 
 	numerical instability
 	'''
-	def __init__(self, d_model=512, nhead=8, dim_feedforward=1024, dropout=0.1, min_wl=3.7, max_wl=20, base=20, dist_factor=2**0.5, eps=2e-2):
+	def __init__(self, d_model=512, nhead=8, dim_feedforward=1024, dropout=0.1, min_wl=3.7, max_wl=20, base=20, dist_factor=2**0.5, eps=1e-2):
 		super(ContextModule, self).__init__(d_model, nhead, dim_feedforward, dropout, min_wl, max_wl, base, dist_factor, eps)
 
 								                    # vvvvvvvvvv repetive, as can do single mask, but just for clarity
@@ -189,7 +191,8 @@ class ContextModule(Decoder):
 		# masked attention; update Ca envs based on predicted positions env with AA context
 		context_wavefunc2 = self.self_attn(wavefunc, aa_context, wavefunc,
 							coords=coords,
-							key_padding_mask=(aa_context_mask | key_padding_mask),
+							key_padding_mask=key_padding_mask,
+							context_mask=(aa_context_mask | key_padding_mask),
 							use_checkpoint=use_checkpoint)
 
 		# residual connection with dropout
@@ -228,7 +231,7 @@ class proteusAI(nn.Module):
 
 	'''
 	
-	def __init__(self, N, d_model, n_head, decoder_layers, hidden_linear_dim, dropout, min_wl=3.7, max_wl=20, base=20, dist_factor=2**0.5, eps=2e-2, active_decoders=-1, use_probs=False):
+	def __init__(self, N, d_model, n_head, decoder_layers, hidden_linear_dim, dropout, min_wl=3.7, max_wl=20, base=20, dist_factor=2**0.5, eps=1e-2, active_decoders=-1, use_probs=False):
 		super(proteusAI, self).__init__()
 
 		# configuration
