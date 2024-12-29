@@ -570,8 +570,8 @@ if __name__ == "__main__":
 
 	parser.add_argument("--clean_pdbs", default=True, type=bool, help="whether to clean the pdbs")
 
-	parser.add_argument("--data_path", default=Path("/share/wangyy/hjc2538/proteusAI/pdb_2021aug02"), type=Path, help="path where decompressed the PMPNN dataset")
-	parser.add_argument("--new_data_path", default=Path("/share/wangyy/hjc2538/proteusAI/pdb_2021aug02_filtered_ncaa"), type=Path, help="path to write the filtered dataset")
+	parser.add_argument("--data_path", default=Path("/gpfs_backup/wangyy_data/protAI/pmpnn_data/pdb_2021aug02"), type=Path, help="path where decompressed the PMPNN dataset")
+	parser.add_argument("--new_data_path", default=Path("/share/wangyy/hjc2538/proteusAI/pdb_2021aug02_filtered"), type=Path, help="path to write the filtered dataset")
 	parser.add_argument("--pdb_path", default=Path("pdb"), type=Path, help="path where pdbs are located, in the data_path parent directory")
 	parser.add_argument("--all_clusters_path", default=Path("list.csv"), type=Path, help="path where cluster csv is located within data_path")
 	parser.add_argument("--val_clusters_path", default=Path("valid_clusters.txt"), type=Path, help="path where valid clusters text file is located within data_path")
