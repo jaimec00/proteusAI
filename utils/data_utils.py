@@ -15,9 +15,10 @@ from torch.utils.data import DataLoader
 from Bio.Data.IUPACData import protein_letters_3to1
 from Bio.PDB import PDBParser
 
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor
 from collections import defaultdict
 from pathlib import Path
+import multiprocessing as mp
 from tqdm import tqdm
 import pandas as pd
 import numpy as np
@@ -257,13 +258,16 @@ class DataCleaner():
 
 			# start a process for each gpu and have it compute the biounits for each pdb
 			results = []
-			with ThreadPoolExecutor(max_workers=num_gpus) as executor:
+			mp.set_start_method('spawn', force=True)
+			with ProcessPoolExecutor(max_workers=num_gpus) as executor:
 				futures = [
 					executor.submit(self.compute_biounits, pdb_chunks[i], devices[i])
 					for i in range(num_gpus)
 				]
 				for future in futures:
 					results.append(future.result())
+
+			print(results)
 
 	def compute_biounits(self, pdbs_chunk, device):
 
@@ -289,6 +293,8 @@ class DataCleaner():
 
 				# get the biounit coordinates, labels, and chain masks
 				bu_coords, bu_labels, bu_chain_masks = self.get_biounit_tensors(pdbid, biounit_chains)
+				bu_coords = bu_coords.to(device)
+				bu_labels = bu_labels.to(device)
 
 				if None in [bu_coords, bu_labels, bu_chain_masks]:
 					continue
@@ -312,25 +318,35 @@ class DataCleaner():
 			# concatenate all the biounits for featurization
 			if not coords: continue
 			coords, mask = self.pad_tensors(coords)
+			print(coords.device, mask.device, device)
 
 			# get features for each biounit
-			features = protein_to_wavefunc(coords, self.d_model, self.min_wl, self.max_wl, self.base, mask=mask)
 
+			try:
+				features = protein_to_wavefunc(coords, self.d_model, self.min_wl, self.max_wl, self.base, mask=mask)
+			except ValueError:
+				print(coords)
+			features.to(torch.float32)
+
+			pdb_path = self.output.out_path / Path(f"{self.min_wl}_{self.max_wl}_{self.base}") / Path(f"pdb/{pdbid[1:3]}") 
+			pdb_path.mkdir(parents=True, exist_ok=True)
+
+			# loop through each batch and unpad coords and features
 			for i in range(features.size(0)): 
 
 				biounit_data = {
-					"coords": coords[~mask[i, :, None]].view(-1, 3),
-					"features": features[~mask[i, :, None]].view(-1, self.d_model),
-					"labels": labels[i],
-					"chain_idxs": chain_masks[i] # [start, end(exclusive)]
+					"coords": coords[i, ~mask[i], :], # N x 3
+					"features": features[i, ~mask[i], :], # N x d_model
+					"labels": labels[i], # N,
+					"chain_idxs": chain_masks[i] # {CHAINID: [start, end(exclusive)]}
 				}
-
-				biounit_path = self.output.out_path / Path(f"pdb/{pdbid[1:3]}") / Path(f"{pdbid}_{i}.pt")
+													# min_wl_max_wl_base
+				biounit_path = pdb_path/ Path(f"{pdbid}_{i}.pt")
 				torch.save(biounit_data, biounit_path)
 
 				for chain in chain_masks[i]:
-					chain_biounits["CHAINID"].append(f"{pdbid}_{chain}")
-					chain_biounits["BIOUNIT"].append(f"{pdbid}_{i}")
+					chunk_biounits["CHAINID"].append(f"{pdbid}_{chain}")
+					chunk_biounits["BIOUNIT"].append(f"{pdbid}_{i}")
 
 		chunk_biounits = pd.DataFrame(chunk_biounits)
 
@@ -339,10 +355,18 @@ class DataCleaner():
 	def pad_tensors(self, coords):
 
 		max_len = max(sample.size(0) for sample in coords)
-		masks = torch.stack([torch.cat(torch.zeros(sample.size(0)), torch.ones(max_len - sample.size(0)), dtype=torch.bool) for sample in coords], dim=0)
-		coords = torch.stack([torch.cat(sample, torch.zeros(max_len - sample.size(0), sample.size(1))) for sample in coords], dim=0)
+		masks = torch.stack([torch.cat( 
+										(torch.zeros(sample.size(0), dtype=torch.bool, device=sample.device), 
+										torch.ones(max_len - sample.size(0), dtype=torch.bool, device=sample.device))
+										) for sample in coords
+							], dim=0)
+		coords = torch.stack([torch.cat(
+										(sample, 
+										torch.zeros(max_len - sample.size(0), sample.size(1), device=sample.device))
+										) for sample in coords
+							], dim=0)
 
-		return coords, mask
+		return coords, masks
 
 	def get_pdb_biounits(self, pdbid):
 		

@@ -193,7 +193,13 @@ def _protein_to_wavefunc_kernel(
 		wavenumber_block_ptr = tl.advance(wavenumber_block_ptr, (BLOCK_D, ))
 		out_ptr += 2*BLOCK_D * stride_out_D
 
-class protein_to_wavefunc(torch.autograd.Function):
+def protein_to_wavefunc(coords, d_model, min_wl, max_wl, base, mask=None):
+	'''wrapper to call protein_to_wavefunc w/ kwargs'''
+
+	return _protein_to_wavefunc.apply(coords, d_model, min_wl, max_wl, base, mask)
+
+
+class _protein_to_wavefunc(torch.autograd.Function):
 
 	@staticmethod # might make wavelengths learnable and make a backward pass, but focusing on MHA kernel first
 	def forward(ctx, coords, d_model, min_wl, max_wl, base, mask=None):
@@ -262,7 +268,7 @@ class protein_to_wavefunc(torch.autograd.Function):
 										)
 
 		# normalize each feature by the maximum absolute value in the sample
-		out.div_(out.abs().max(dim=1, keepdim=True).values)
+		# out.div_(out.abs().max(dim=1, keepdim=True).values)
 
 		return out
 
