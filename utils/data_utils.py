@@ -16,13 +16,16 @@ from Bio.Data.IUPACData import protein_letters_3to1
 from Bio.PDB import PDBParser
 
 from concurrent.futures import ProcessPoolExecutor
+from multiprocessing import Manager
 from collections import defaultdict
-from pathlib import Path
 import multiprocessing as mp
+from threading import Thread
+from pathlib import Path
 from tqdm import tqdm
 import pandas as pd
 import numpy as np
 import argparse
+import time
 import gc
 
 from utils.io_utils import Output
@@ -84,9 +87,6 @@ class DataHolder(Dataset):
 		elif data_type == "test":	
 			self.test_data = Data(self.data_path, self.test_pdbs, self.num_test, self.max_size)
 			self.test_data_loader = DataLoader(self.test_data, self.batch_size, shuffle=True)
-
-	def unit_test(self):
-		pass
 		
 class Data(Dataset):
 	def __init__(self, data_path, clusters_df, num_samples=None, max_size=10000, device="cpu"):
@@ -258,18 +258,44 @@ class DataCleaner():
 
 			# start a process for each gpu and have it compute the biounits for each pdb
 			results = []
-			mp.set_start_method('spawn', force=True)
-			with ProcessPoolExecutor(max_workers=num_gpus) as executor:
-				futures = [
-					executor.submit(self.compute_biounits, pdb_chunks[i], devices[i])
-					for i in range(num_gpus)
-				]
-				for future in futures:
-					results.append(future.result())
 
-			print(results)
+			# use manager to share progress between processes
+			with Manager() as manager:
 
-	def compute_biounits(self, pdbs_chunk, device):
+				# shared dict for progress
+				progress = manager.dict({i: 0 for i in range(num_gpus)})
+
+				# progress bar
+				with tqdm(total=len(all_pdbs)) as pbar:
+
+					# function to monitor progress
+					def monitor_progress():
+						# Continuously update tqdm progress bar
+						while sum(progress.values()) < len(all_pdbs):
+							pbar.n = sum(progress.values())
+							pbar.refresh()
+							time.sleep(0.1)
+
+					# start progress monitoring thread
+					montor_thread = Thread(target=monitor_progress, daemon=True)
+					montor_thread.start()
+
+					# spawn processes
+					mp.set_start_method('spawn', force=True)
+
+					# run the process for each gpu
+					with ProcessPoolExecutor(max_workers=num_gpus) as executor:
+						futures = [
+							executor.submit(self.compute_biounits, pdb_chunks[i], devices[i], progress, i)
+							for i in range(num_gpus)
+						]
+						# gather the results
+						for future in futures:
+							results.append(future.result())
+
+					print(results)
+
+	def compute_biounits(self, pdbs_chunk, device, progress, process):
 
 		# get chain ids for each pdb
 		pdbs_chunk = self.cluster_info.loc[self.cluster_info.PDB.isin(pdbs_chunk), :]
@@ -279,6 +305,9 @@ class DataCleaner():
 
 		# loop through each pdb entry 
 		for _, pdbid in pdbs_chunk.PDB.items():
+
+			# update process progress
+			progress[process] += 1
 
 			# get pdbid, and load the corresponding pdb (not the chain, yet)
 			biounits = self.get_pdb_biounits(pdbid)
@@ -304,7 +333,6 @@ class DataCleaner():
 
 					# list of coords/labels/masks of the biounit's chains
 					bu_coords, bu_labels, bu_chain_masks = self.split_biounit(bu_coords, bu_labels, bu_chain_masks)
-
 					# remove chains that are too long anyway
 					coords.extend([chain_coords for chain_coords in bu_coords if chain_coords.size(0) < self.max_tokens])
 					labels.extend([chain_labels for chain_labels in bu_labels if chain_labels.size(0) < self.max_tokens])
@@ -318,14 +346,9 @@ class DataCleaner():
 			# concatenate all the biounits for featurization
 			if not coords: continue
 			coords, mask = self.pad_tensors(coords)
-			print(coords.device, mask.device, device)
 
 			# get features for each biounit
-
-			try:
-				features = protein_to_wavefunc(coords, self.d_model, self.min_wl, self.max_wl, self.base, mask=mask)
-			except ValueError:
-				print(coords)
+			features = protein_to_wavefunc(coords, self.d_model, self.min_wl, self.max_wl, self.base, mask=mask)
 			features.to(torch.float32)
 
 			pdb_path = self.output.out_path / Path(f"{self.min_wl}_{self.max_wl}_{self.base}") / Path(f"pdb/{pdbid[1:3]}") 
