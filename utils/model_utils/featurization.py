@@ -248,8 +248,8 @@ class _protein_to_wavefunc(torch.autograd.Function):
 
 		# total block size should be less than number of threads per block (approx. 1024)
 		BLOCK_NJ = min(1024, triton.next_power_of_2(N))
-		BLOCK_NI = triton.cdiv(1024, BLOCK_NJ)
-		BLOCK_D = 1
+		BLOCK_NI = min(triton.cdiv(1024, BLOCK_NJ), triton.next_power_of_2(N))
+		BLOCK_D = triton.cdiv(BLOCK_NI * BLOCK_NJ, 1024)
 		# BLOCK_NI x BLOCK_NJ <= 1024
 
 		# define the grid
