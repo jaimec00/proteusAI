@@ -367,7 +367,6 @@ class DataCleaner():
 
 			# get features for each biounit
 			features = protein_to_wavefunc(coords, self.d_model, self.min_wl, self.max_wl, self.base, mask=mask)
-			features = features.to(torch.float32)
 
 			pdb_path = self.output.out_path / Path(f"{self.min_wl}_{self.max_wl}_{self.base}") / Path(f"pdb/{pdbid[1:3]}") 
 			pdb_path.mkdir(parents=True, exist_ok=True)

@@ -1,15 +1,15 @@
 #!/bin/bash
 
-#BSUB -n 8
+#BSUB -n 2
 #BSUB -W 1:00
 #BSUB -R "rusage[mem=32GB]"
 #BSUB -q gpu
 ##BSUB -R "select[l40 || a100 || h100]"
-#BSUB -R "span[ptile=8]"
+#BSUB -R "span[ptile=2]"
 #BSUB -R "select[l40 || a10 || a30]"
 ##BSUB -R "select[a10 || a30]"
 ##BSUB -gpu "num=2:mode=shared:mps=yes"
-#BSUB -gpu "num=8:mode=exclusive_process"
+#BSUB -gpu "num=2:mode=exclusive_process"
 #BSUB -o out.%J
 #BSUB -e err.%J
 #BSUB -J protAI_cleanpdbs
