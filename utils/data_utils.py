@@ -204,6 +204,7 @@ class DataCleaner():
 		self.data_path = data_path
 		self.pdb_path = self.data_path / pdb_path
 
+		# define output path
 		self.output = Output(new_data_path)
 			
 		# read which clusters are for validation and for testing
@@ -222,12 +223,14 @@ class DataCleaner():
 		if not include_ncaa:
 			self.cluster_info = self.cluster_info.loc[~self.cluster_info.SEQUENCE.str.contains("X", na=False), :]
 
-		# initialize BIOUNIT list. Not sure if multiple biounits per chain, but will check afterwards
+		# initialize BIOUNIT and PDB columns
 		self.cluster_info["BIOUNIT"] = None
 		self.cluster_info["PDB"] = self.cluster_info.CHAINID.apply(lambda x: x.split("_")[0])
 
 		# maximum sequence length
 		self.max_tokens = max_tokens
+
+		# featurization params
 		self.d_model = d_model
 		self.min_wl = min_wl
 		self.max_wl = max_wl
@@ -243,8 +246,6 @@ class DataCleaner():
 		self.seq_lengths = []
 		self.max_seq_len = 0
 
-		self.gpu = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
 	def get_pmpnn_pdbs(self):
 		
 		# no gradients
@@ -256,7 +257,8 @@ class DataCleaner():
 			all_pdbs = self.cluster_info.PDB.drop_duplicates()
 			pdb_chunks = np.array_split(all_pdbs, num_gpus)
 
-			# start a process for each gpu and have it compute the biounits for each pdb
+			# start a process for each gpu and have it compute the biounits for each pdb and featurize.
+			# store each processes's results (dataframe that maps chainid to biounit) in list
 			results = []
 
 			# use manager to share progress between processes
@@ -270,7 +272,8 @@ class DataCleaner():
 
 					# function to monitor progress
 					def monitor_progress():
-						# Continuously update tqdm progress bar
+						
+						# continuously update tqdm progress bar
 						while sum(progress.values()) < len(all_pdbs):
 							pbar.n = sum(progress.values())
 							pbar.refresh()
@@ -280,7 +283,7 @@ class DataCleaner():
 					montor_thread = Thread(target=monitor_progress, daemon=True)
 					montor_thread.start()
 
-					# spawn processes
+					# set processes to spawn
 					mp.set_start_method('spawn', force=True)
 
 					# run the process for each gpu
@@ -293,8 +296,22 @@ class DataCleaner():
 						for future in futures:
 							results.append(future.result())
 
-					print(results)
+			# now deal with the results
 
+			# concat each process df together
+			results = pd.concat(results, axis=0).drop_duplicates()
+
+			# assign biounits for relevant chains in the total df
+			# Create a mapping from results
+			mapping = dict(zip(results.CHAINID, results.BIOUNIT))
+
+			# Map values where matches are found
+			self.cluster_info['BIOUNIT'] = self.cluster_info['CHAINID'].map(mapping).combine_first(self.cluster_info['BIOUNIT'])
+
+			# remove any chains whose BIOUNIT entry is None
+			self.cluster_info = self.cluster_info.dropna(subset="BIOUNIT").reset_index()
+			print(self.cluster_info)
+					
 	def compute_biounits(self, pdbs_chunk, device, progress, process):
 
 		# get chain ids for each pdb
@@ -309,9 +326,17 @@ class DataCleaner():
 			# update process progress
 			progress[process] += 1
 
-			# get pdbid, and load the corresponding pdb (not the chain, yet)
+			# get the biounits for this pdb
 			biounits = self.get_pdb_biounits(pdbid)
 			chains = pdbs_chunk.loc[pdbs_chunk.PDB.eq(pdbid), "CHAINID"]
+
+			# # find chains that are not included in the biounits, 
+			# # so they make up their own single chain biounit
+			# biounits_flat = [f"{pdbid}_{chain}" for biounit in biounits for chain in biounit]
+			# single_chains = chains.loc[~chains.isin(biounits_flat)].tolist()
+
+			# print(single_chains)
+			# biounits.extend([[chain.split("_")[1]] for chain in single_chains])
 
 			# loop through each biounit
 			coords, labels, chain_masks = [], [], []
@@ -348,13 +373,14 @@ class DataCleaner():
 			coords, mask = self.pad_tensors(coords)
 
 			# get features for each biounit
+			print(coords.shape)
 			features = protein_to_wavefunc(coords, self.d_model, self.min_wl, self.max_wl, self.base, mask=mask)
-			features.to(torch.float32)
+			features = features.to(torch.float32)
 
 			pdb_path = self.output.out_path / Path(f"{self.min_wl}_{self.max_wl}_{self.base}") / Path(f"pdb/{pdbid[1:3]}") 
 			pdb_path.mkdir(parents=True, exist_ok=True)
 
-			# loop through each batch and unpad coords and features
+			# loop through each sample along batch dim and unpad coords and features
 			for i in range(features.size(0)): 
 
 				biounit_data = {
@@ -364,7 +390,7 @@ class DataCleaner():
 					"chain_idxs": chain_masks[i] # {CHAINID: [start, end(exclusive)]}
 				}
 													# min_wl_max_wl_base
-				biounit_path = pdb_path/ Path(f"{pdbid}_{i}.pt")
+				biounit_path = pdb_path / Path(f"{pdbid}_{i}.pt")
 				torch.save(biounit_data, biounit_path)
 
 				for chain in chain_masks[i]:
@@ -476,9 +502,6 @@ class DataCleaner():
 			return None
 
 		return pdb
-
-	def unit_test(self):
-		pass
 
 # ----------------------------------------------------------------------------------------------------------------------
 
