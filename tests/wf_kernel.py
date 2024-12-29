@@ -15,7 +15,7 @@ def main():
 
 	batch, N, d_model = 1, 10000, 512
 	min_wl, max_wl, base = 3.7, 20, 20
-	coords = max_wl * torch.randn((batch, N, 3), dtype=torch.float64, device=device)
+	coords = max_wl * torch.randn((batch, N, 3), dtype=torch.float32, device=device)
 	mask = (torch.rand((batch, N), device=device) > 1)
 
 	torch.cuda.synchronize()  # Ensure no ongoing GPU operations
@@ -25,7 +25,7 @@ def main():
 	torch.cuda.empty_cache()  # Clear the cache for consistent results
 	torch.cuda.reset_peak_memory_stats()
 	start_event.record()
-	triton_out = protein_to_wavefunc.apply(coords, d_model, min_wl, max_wl, base, mask)
+	triton_out = protein_to_wavefunc(coords, d_model, min_wl, max_wl, base, mask=mask)
 	end_event.record()
 	torch.cuda.synchronize()  # Wait for all GPU work to finish
 	triton_time = start_event.elapsed_time(end_event)  # Time in milliseconds
@@ -34,7 +34,7 @@ def main():
 	torch.cuda.empty_cache()  # Clear the cache for consistent results
 	torch.cuda.reset_peak_memory_stats()
 	start_event.record()
-	torch_out = protein_to_wavefunc_torch(coords, d_model, min_wl, max_wl, base, mask, 32).to(torch.float64)
+	torch_out = protein_to_wavefunc_torch(coords, d_model, min_wl, max_wl, base, mask, 32).to(torch.float32)
 	# torch_out = triton_out
 	end_event.record()
 	torch.cuda.synchronize()  # Wait for all GPU work to finish

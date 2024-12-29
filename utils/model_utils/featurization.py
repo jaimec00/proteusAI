@@ -233,18 +233,18 @@ class _protein_to_wavefunc(torch.autograd.Function):
 		
 		# prepare data
 		batch, N, space = coords.shape # input dimensions
-		coords = coords.to(torch.float64).contiguous() # double-precision and contiguous
+		coords = coords.to(torch.float32).contiguous() #   contiguous
 
 		# prepare the wavenumber values
 		num_wl = int(d_model//2) # define the number of wave functions to compute
-		wavelengths = (min_wl + (torch.logspace(0, 1, num_wl, base=base, device=coords.device, dtype=torch.float64) - 1) / (base - 1) * (max_wl - min_wl))
+		wavelengths = (min_wl + (torch.logspace(0, 1, num_wl, base=base, device=coords.device, dtype=torch.float32) - 1) / (base - 1) * (max_wl - min_wl))
 		wavenumbers = (2 * torch.pi / wavelengths).contiguous()
 
 		# prepare the mask, triton uses true as compute
 		mask = (~mask if mask is not None else torch.ones(batch, N, dtype=torch.bool, device=coords.device)).contiguous()
 		
 		# prepare output
-		out = torch.zeros(batch, N, d_model, dtype=torch.float64, device=coords.device).contiguous()
+		out = torch.zeros(batch, N, d_model, dtype=torch.float32, device=coords.device).contiguous()
 
 		# total block size should be less than number of threads per block (approx. 1024)
 		BLOCK_NJ = min(1024, triton.next_power_of_2(N))

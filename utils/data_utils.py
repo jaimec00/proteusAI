@@ -309,9 +309,10 @@ class DataCleaner():
 			self.cluster_info['BIOUNIT'] = self.cluster_info['CHAINID'].map(mapping).combine_first(self.cluster_info['BIOUNIT'])
 
 			# remove any chains whose BIOUNIT entry is None
-			self.cluster_info = self.cluster_info.dropna(subset="BIOUNIT").reset_index()
-			print(self.cluster_info)
+			self.cluster_info = self.cluster_info.dropna(subset="BIOUNIT").reset_index(drop=True)
 					
+			self.output.write_new_clusters(self.cluster_info, self.val_clusters, self.test_clusters)
+			
 	def compute_biounits(self, pdbs_chunk, device, progress, process):
 
 		# get chain ids for each pdb
@@ -329,14 +330,6 @@ class DataCleaner():
 			# get the biounits for this pdb
 			biounits = self.get_pdb_biounits(pdbid)
 			chains = pdbs_chunk.loc[pdbs_chunk.PDB.eq(pdbid), "CHAINID"]
-
-			# # find chains that are not included in the biounits, 
-			# # so they make up their own single chain biounit
-			# biounits_flat = [f"{pdbid}_{chain}" for biounit in biounits for chain in biounit]
-			# single_chains = chains.loc[~chains.isin(biounits_flat)].tolist()
-
-			# print(single_chains)
-			# biounits.extend([[chain.split("_")[1]] for chain in single_chains])
 
 			# loop through each biounit
 			coords, labels, chain_masks = [], [], []
@@ -373,7 +366,6 @@ class DataCleaner():
 			coords, mask = self.pad_tensors(coords)
 
 			# get features for each biounit
-			print(coords.shape)
 			features = protein_to_wavefunc(coords, self.d_model, self.min_wl, self.max_wl, self.base, mask=mask)
 			features = features.to(torch.float32)
 
@@ -593,7 +585,7 @@ if __name__ == "__main__":
 	parser.add_argument("--min_wl", default=3.7, type=float, help="minimum wavelength to use for wave functions")
 	parser.add_argument("--max_wl", default=20.0, type=float, help="maximum wavelength to use for wave functions")
 	parser.add_argument("--base", default=20, type=int, help="base to use to samples wavelengths")
-	parser.add_argument("--test", default=True, type=bool, help="number of devices to parallelize the computations on")
+	parser.add_argument("--test", default=False, type=bool, help="test the cleaner or run")
 
 	args = parser.parse_args()
 
