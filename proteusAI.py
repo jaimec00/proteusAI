@@ -256,14 +256,14 @@ class proteusAI(nn.Module):
 		self.wavfunc_norm = nn.LayerNorm(d_model)
 
 		# context
-		self.aa_embedding = nn.Linear(20, d_model)
+		self.aa_embedding = nn.Linear(21, d_model)
 		self.context_module = ContextModule(d_model, n_head, hidden_linear_dim, dropout, min_wl, max_wl, base, min_rbf, max_rbf)
 
 		# decoder
 		self.decoders = nn.ModuleList([Decoder(d_model, n_head, hidden_linear_dim, dropout, min_wl, max_wl, base, min_rbf, max_rbf) for _ in range(decoder_layers)])
 
 		# map to aa probs
-		self.linear = nn.Linear(d_model, 20)
+		self.linear = nn.Linear(d_model, 21)
 
 	def add_decoder(self, new_decoders=1):
 		'''

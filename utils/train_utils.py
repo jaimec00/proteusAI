@@ -51,7 +51,9 @@ class TrainingRun():
 
 	def __init__(self, args):
 
-		self.hyper_parameters = HyperParameters(args.input_atoms, args.d_model, 
+		self.hyper_parameters = HyperParameters(args.input_atoms, args.d_model,
+												args.min_wl, args.max_wl, args.base,
+												args.min_rbf, args.max_rbf, 
 												args.num_heads, args.decoder_layers, 
 												args.hidden_linear_dim, args.temperature, 
 												args.max_tokens, args.use_model )
@@ -125,6 +127,11 @@ class TrainingRun():
 								self.hyper_parameters.decoder_layers,
 								self.hyper_parameters.hidden_linear_dim,
 								self.training_parameters.dropout,
+								self.hyper_parameters.min_wl,
+								self.hyper_parameters.max_wl,
+								self.hyper_parameters.base,
+								self.hyper_parameters.min_rbf,
+								self.hyper_parameters.max_rbf,
 								active_decoders=-1**(not self.training_parameters.expand_decoders), # -1 for no expansion (use all), 1 for expansion (start with one)
 								use_probs=self.training_parameters.use_probs
 							)
@@ -230,10 +237,10 @@ class TrainingRun():
 			input_perturbations = self.get_test_perturbations()
 
 			# loop through validation batches
-			for feature_batch, coords_batch, label_batch, chain_mask, key_padding_mask in self.data.val_data_loader:
+			for feature_batch, label_batch, coords_batch, chain_mask, key_padding_mask in self.data.val_data_loader:
 
 
-				batch = Batch(feature_batch, coords_batch, label_batch, chain_mask, key_padding_mask, use_probs=self.training_parameters.use_probs, use_amp=False, auto_regressive=False)
+				batch = Batch(feature_batch, label_batch, coords_batch, chain_mask, key_padding_mask, use_probs=self.training_parameters.use_probs, use_amp=False, auto_regressive=False)
 				input_perturbations.apply_perturbations(batch)
 				batch.batch_forward(self.model, self.loss_function, self.gpu)
 
@@ -261,7 +268,7 @@ class TrainingRun():
 			input_perturbations = self.get_test_perturbations()
 
 			# loop through testing batches
-			for feature_batch, coords_batch, label_batch, chain_mask, key_padding_mask in self.data.test_data_loader:
+			for feature_batch, label_batch, coords_batch, chain_mask, key_padding_mask in self.data.test_data_loader:
 				batch = Batch(feature_batch, coords_batch, label_batch, chain_mask, key_padding_mask, use_probs=self.training_parameters.use_probs, use_amp=False, auto_regressive=self.training_parameters.auto_regressive, temp=self.hyper_parameters.temperature)
 				input_perturbations.apply_perturbations(batch)
 				batch.batch_forward(self.model, self.loss_function, self.gpu)
@@ -337,9 +344,9 @@ class Epoch():
 
 		# loop through batches
 		epoch_pbar = tqdm(total=len(self.training_run_parent.data.train_data_loader), desc="epoch_progress", unit="step")
-		for b_idx, (feature_batch, coords_batch, label_batch, chain_mask, key_padding_mask) in enumerate(self.training_run_parent.data.train_data_loader):
+		for b_idx, (feature_batch, label_batch, coords_batch, chain_mask, key_padding_mask) in enumerate(self.training_run_parent.data.train_data_loader):
 			
-			batch = Batch(feature_batch, coords_batch, label_batch, chain_mask, key_padding_mask, b_idx=b_idx, epoch=self, use_probs=self.training_run_parent.training_parameters.use_probs)
+			batch = Batch(feature_batch, label_batch, coords_batch, chain_mask, key_padding_mask, b_idx=b_idx, epoch=self, use_probs=self.training_run_parent.training_parameters.use_probs)
 			batch.batch_learn()
 			# normalize by number of valid tokens if computing sum, else it is already normalized
 			self.gather_batch_losses(batch, normalize=self.training_run_parent.loss_function.reduction=="sum")
@@ -395,7 +402,7 @@ class Epoch():
 
 
 class Batch():
-	def __init__(self, features, coords, labels, chain_mask, key_padding_mask, 
+	def __init__(self, features, labels, coords, chain_mask, key_padding_mask, 
 					b_idx=None, epoch=None, use_probs=False, 
 					use_amp=True, auto_regressive=False, temp=0.1):
 
@@ -405,9 +412,9 @@ class Batch():
 		self.chain_mask = chain_mask 
 		self.use_probs = use_probs
 		if self.use_probs:
-			self.predictions = torch.full(self.labels.shape, 1/20).unsqueeze(-1).expand(-1,-1,20)
+			self.predictions = torch.full(self.labels.shape, 1/21).unsqueeze(-1).expand(-1,-1,21)
 		else:
-			self.predictions = torch.zeros(self.labels.shape).unsqueeze(-1).expand(-1,-1,20)
+			self.predictions = torch.zeros(self.labels.shape).unsqueeze(-1).expand(-1,-1,21)
 
 		self.key_padding_mask = key_padding_mask
 		self.onehot_mask = torch.zeros(self.key_padding_mask.shape, dtype=torch.bool)

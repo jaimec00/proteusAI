@@ -1,6 +1,11 @@
 # Configuration for training the model
 input_atoms: 0  # whether to train the model using only alphacarbons (0) or full backbone (1)
-d_model: 128  # dimensionality of input embeddings
+d_model: 512  # dimensionality of input embeddings
+min_wl: 3.7  # minimum wl to use in wavelength sampling
+max_wl: 20.0  # maximum wl to use in wavelength sampling
+base: 20.0  # base to use in wavelength sampling
+min_rbf: 0.1  # minimum rbf scaling factor in gaussian mha
+max_rbf: 0.9  # maximum rbf scaling factor in gaussian mha
 num_heads: 4  # number of attention heads to perform the training with
 decoder_layers: 4 # number of decoder layers
 hidden_linear_dim: 256  # intermediate dimensions of decoder feed forward layer

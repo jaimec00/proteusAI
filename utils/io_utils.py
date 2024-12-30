@@ -92,6 +92,11 @@ class Output():
 		model hyper-parameters:
 			model parameters: {training_parameters.num_params}
 			d_model: {hyper_parameters.d_model}
+			min_wl: {hyper_parameters.min_wl} 
+			max_wl: {hyper_parameters.max_wl} 
+			base: {hyper_parameters.base} 
+			min_rbf: {hyper_parameters.min_rbf} 
+			max_rbf: {hyper_parameters.max_rbf} 
 			number of decoders: {hyper_parameters.decoder_layers}
 			number of attention heads: {hyper_parameters.num_heads}
 			temperature: {hyper_parameters.temperature}
@@ -107,7 +112,6 @@ class Output():
 			epochs: {training_parameters.epochs}
 			phase I: {round(training_parameters.epochs * training_parameters.phase_split)} epochs
 			phase II: {round(training_parameters.epochs - (training_parameters.epochs * training_parameters.phase_split))} epochs
-
 
 			learning rate: {training_parameters.learning_step}
 			learning rate plateu scaling factor: {training_parameters.lr_scale}

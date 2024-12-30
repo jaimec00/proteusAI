@@ -52,6 +52,11 @@ def init_args():
 	# model 
 	parser.add_argument("--input_atoms", default=0, type=int, choices=[0,1,2], help="whether to train the model using only alphacarbons (0) or full backbone (1)")
 	parser.add_argument("--d_model", default=512, type=int, help="dimensionality of input embeddings")
+	parser.add_argument("--min_wl", default=3.7, type=float, help="minimum wavelength to use in wavelength sampling")
+	parser.add_argument("--max_wl", default=20.0, type=float, help="maximum wavelength to use in wavelength sampling")
+	parser.add_argument("--base", default=20.0, type=float, help="base to use in wavelength sampling")
+	parser.add_argument("--min_rbf", default=0.1, type=float, help="minimum rbf scaling to apply in gaussian mha")
+	parser.add_argument("--max_rbf", default=0.9, type=float, help="maximum rbf scaling to apply in gaussian mha")
 	parser.add_argument("--num_heads", default=4, type=int, help="number of attention heads to perform the training with")
 	parser.add_argument("--decoder_layers", default=3, type=int, help="number of decoder layers")
 	parser.add_argument("--hidden_linear_dim", default=1024, type=int, help="intermediate dimensions of decoder feed forward layer")

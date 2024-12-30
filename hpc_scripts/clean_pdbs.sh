@@ -17,10 +17,11 @@ module load cuda/12.1
 conda activate protAI_env
 nvidia-smi
 
+# define triton cache dir so dont run out of space in home
 export TRITON_HOME="/share/wangyy/hjc2538/proteusAI"
 export TRITON_CACHE_DIR="/share/wangyy/hjc2538/proteusAI/.triton/cache"
 
-
+# so can import from base dir
 export PYTHONPATH="/home/hjc2538/ondemand/data/sys/myjobs/projects/proteusAI"
 
 python -u utils/data_utils.py

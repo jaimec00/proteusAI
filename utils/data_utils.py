@@ -303,7 +303,6 @@ class DataCleaner():
 					def monitor_progress():
 						
 						# continuously update tqdm progress bar
-						# while (sum(progress.values()) < len(all_pdbs)):
 						os.environ["WF_DONE"] = "0"
 						while os.environ.get("WF_DONE") != "1":
 							pbar.n = sum(progress.values())

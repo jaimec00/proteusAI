@@ -277,9 +277,14 @@ class InputPerturbations():
 
 class HyperParameters():
 
-	def __init__(self, input_atoms, d_model, num_heads, decoder_layers, hidden_linear_dim, temperature, max_tokens, use_model):
+	def __init__(self, input_atoms, d_model, min_wl, max_wl, base, min_rbf, max_rbf, num_heads, decoder_layers, hidden_linear_dim, temperature, max_tokens, use_model):
 		self.input_atoms = input_atoms
 		self.d_model = d_model
+		self.min_wl = min_wl
+		self.max_wl = max_wl
+		self.base = base
+		self.min_rbf = min_rbf
+		self.max_rbf = max_rbf 
 		self.num_heads = num_heads
 		self.decoder_layers = decoder_layers
 		self.hidden_linear_dim = hidden_linear_dim
