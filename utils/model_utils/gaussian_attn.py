@@ -35,13 +35,15 @@ def _attn_fwd(
 	V_ptr, stride_V_Z, stride_V_H, stride_V_N, stride_V_D,
 	coords_ptr, stride_coords_Z, stride_coords_N, stride_coords_S,
 	spreads_ptr, stride_spreads_H,
+	min_dists_ptr, stride_min_dists_H,
+	max_dists_ptr, stride_max_dists_H,
 	L_ptr, stride_L_Z, stride_L_H, stride_L_N,
 	mask_ptr, stride_mask_Z, stride_mask_N,
 	context_mask_ptr, stride_context_mask_Z, stride_context_mask_N,
 
 	tot_N: tl.constexpr, tot_Z: tl.constexpr, nheads: tl.constexpr,
 	d_k: tl.constexpr, min_d_k: tl.constexpr, # max(16, d_k) bc tl.dot requires dim>=16
-	softmax_scale: tl.constexpr, dist_factor: tl.constexpr, eps:tl.constexpr,
+	softmax_scale: tl.constexpr, eps:tl.constexpr,
 
 	BLOCK_I: tl.constexpr, # block sizes
 	BLOCK_J: tl.constexpr,
@@ -132,12 +134,10 @@ def _attn_fwd(
 	# load spread for this head, scaler value
 	spread_ptr = spreads_ptr + (offs_H*stride_spreads_H)
 	spread = tl.load(spread_ptr)
-
-	# diagonals will have a distance of zero, so to be included in the attn mechanism, 
-	# the minimum distance must be zero, but only for the first head, so the first 
-	# head operates on the range (0.0, dist_factor*spread_heah), while the other heads operate on
-	# the range (spread_head, dist_factor*spread_head). 
-	min_dist = spread - spread*((offs_H == 0).to(tl.int32))
+	min_dist_ptr = min_dists_ptr + (offs_H*stride_min_dists_H)
+	min_dist = tl.load(min_dist_ptr)
+	max_dist_ptr = max_dists_ptr + (offs_H*stride_max_dists_H)
+	max_dist = tl.load(max_dist_ptr)
 
 	# create K/V column mask pointer (loaded in the next loop)
 	mask_j_ptr = tl.make_block_ptr( # N,
@@ -167,11 +167,20 @@ def _attn_fwd(
 		# compute the rbfs
 		rbfs = tl.exp(-(dists*dists) / (2*spread*spread)) # N x N
 
+		# clamp distances less than min dist to 1. min dist is the distance 
+		# calculated to get an rbf of e.g. 0.9. higher rbfs would result in numerical 
+		# instability with exp, so just make those 1 (no scaling)
+		clamp_mask = dists < min_dist
+		rbfs = tl.where(clamp_mask, 1.0, rbfs)
+
 		# negative logits with close distances should be less negative
+		# eps = min_rbf, so maximum rbf (1) would result in logits of min_rbf
+		# minimum rbf (0.1) would result in logits of 1 (no scaling)
+		# this achieves the goal of inverting the rbf for negative logits
 		rbfs = tl.where(Sij < 0, (1+eps)-rbfs, rbfs) # N x N
 
 		# set masked positions to -inf, include out of range dists in mask
-		dists_mask = (dists >= min_dist) & (dists <= (dist_factor*spread)) # N x N
+		dists_mask = dists < max_dist 
 		attn_mask = (mask_i[:, None]) & (mask_j[None, :]) & (dists_mask) # N x N
 
 		# scale attention logits by rbfs and mask invalid pairs
@@ -255,11 +264,13 @@ def _attn_bwd(
 	L_ptr, stride_L_Z, stride_L_H, stride_L_N,
 	coords_ptr, stride_coords_Z, stride_coords_N, stride_coords_S,
 	spreads_ptr, stride_spreads_H,
+	min_dists_ptr, stride_min_dists_H,
+	max_dists_ptr, stride_max_dists_H,
 	mask_ptr, stride_mask_Z, stride_mask_N,
 	context_mask_ptr, stride_context_mask_Z, stride_context_mask_N,
 
 	tot_Z: tl.constexpr, tot_N: tl.constexpr, nheads: tl.constexpr, 
-	d_k: tl.constexpr, min_d_k: tl.constexpr, softmax_scale: tl.constexpr, dist_factor: tl.constexpr, eps:tl.constexpr,
+	d_k: tl.constexpr, min_d_k: tl.constexpr, softmax_scale: tl.constexpr, eps:tl.constexpr,
 
 	BLOCK_I: tl.constexpr, BLOCK_J: tl.constexpr
 ):
@@ -305,11 +316,11 @@ def _attn_bwd(
 	# load the spread assigned to this block (based on the head it was assigned)
 	spread_ptr = spreads_ptr + (offs_H*stride_spreads_H)
 	spread = tl.load(spread_ptr)
-
-	# minimum distance should be zero for the first head, so tokens can attend to
-	# themselves (since distances for self = 0)
-	min_dist = spread - spread*((offs_H==0).to(tl.int32))
-
+	min_dist_ptr = min_dists_ptr + (offs_H*stride_min_dists_H)
+	min_dist = tl.load(min_dist_ptr)
+	max_dist_ptr = max_dists_ptr + (offs_H*stride_max_dists_H)
+	max_dist = tl.load(max_dist_ptr)
+	
 	# initialize mask for j columns
 	mask_j_ptr = tl.make_block_ptr( # N 
 		base=context_mask_ptr + (offs_Z*stride_context_mask_Z),
@@ -401,11 +412,16 @@ def _attn_bwd(
 		dists_raw = coords_i[:, None, :] - coords_j[None, :, :] # N x N x 4
 		dists = tl.sqrt(tl.sum(dists_raw * dists_raw, axis=2)) # N x N 
 
-		# mask out distances that are not relevant to this head
-		dists_mask = (dists>=min_dist) & (dists<=(dist_factor*spread))
-
 		# compute rbfs
 		rbfs = tl.exp(-(dists*dists) / (2.0*spread*spread))
+
+		# clamp small distances to 1 (no scaling, unless negative, see 2 code 
+		# blocks below). only far distances are masked
+		clamp_mask = dists < min_dist
+		rbfs = tl.where(clamp_mask, 1.0, rbfs)
+
+		# mask out distances that are not relevant to this head
+		dists_mask = dists <= max_dist
 
 		# for negative logits, small dists should be scaled to be less negative than for far distances
 		rbfs = tl.where(Sij < 0, (1+eps)-rbfs, rbfs)
@@ -480,10 +496,14 @@ def _attn_bwd(
 	tl.store(dKj_block_ptr, dKj, boundary_check=(0,1))
 	tl.store(dVj_block_ptr, dVj, boundary_check=(0,1))
 
-class attn(torch.autograd.Function):
+def attn(Q, K, V, coords, spreads, mask=None, context_mask=None, min_rbf=0.1, max_rbf=0.9):
+
+	return _attn.apply(Q, K, V, coords, spreads, mask, context_mask, min_rbf, max_rbf)
+
+class _attn(torch.autograd.Function):
 
 	@staticmethod
-	def forward(ctx, Q, K, V, coords, spreads, mask=None, context_mask=None, dist_factor=3.0, eps=1e-2):
+	def forward(ctx, Q, K, V, coords, spreads, mask=None, context_mask=None, min_rbf=0.1, max_rbf=0.9:
 		
 		# checks
 		assert (Q.shape == K.shape) and (K.shape == V.shape), f"Q, K, and V projection shapes must match, but got {Q.shape=}, {K.shape=}, {V.shape=}"
@@ -508,6 +528,9 @@ class attn(torch.autograd.Function):
 		coords = coords.contiguous()
 		spreads = spreads.contiguous()
 
+		min_dists = torch.sqrt(2*spreads**2*math.log(1/max_rbf))
+		max_dists = torch.sqrt(2*spreads**2*math.log(1/min_rbf))
+
 		# define block sizes (minimum of 16, as tl.dot needs all dimensions to be >=16)
 		BLOCK_I = 32 if d_k <= 64 else 16
 		BLOCK_J = 32 if d_k <= 64 else 16
@@ -525,18 +548,20 @@ class attn(torch.autograd.Function):
 							V, V.stride(0), V.stride(1), V.stride(2), V.stride(3), # batch x nhead x N x d_k
 							coords, coords.stride(0), coords.stride(1), coords.stride(2), # batch x N x 3
 							spreads, spreads.stride(0), # nhead, 
+							min_dists, min_dists.stride(0), # nhead, 
+							max_dists, max_dists.stride(0), # nhead, 
 							L, L.stride(0), L.stride(1), L.stride(2), # batch x nhead x N
 							mask, mask.stride(0), mask.stride(1), # batch x N
 							context_mask, context_mask.stride(0), context_mask.stride(1),
-							N, batch, nheads, d_k, max(d_k, 16), softmax_scale, dist_factor, eps,
+							N, batch, nheads, d_k, max(d_k, 16), softmax_scale, min_rbf,
 							BLOCK_I, BLOCK_J
 						)
 
 		# for backwards pass
 		ctx.save_for_backward(Q, K, V, out, L, coords, spreads, mask, context_mask)
 		ctx.softmax_scale = softmax_scale
-		ctx.dist_factor = dist_factor
-		ctx.eps = eps
+		ctx.min_rbf = min_rbf
+		ctx.max_rbf = max_rbf
 
 		return out
 
@@ -548,6 +573,10 @@ class attn(torch.autograd.Function):
 
 		# compute D for dS calculation
 		D = torch.sum(O*dO, dim=3) # Z x H x N x D -> Z x H x N
+
+		# re-compute min and max distances
+		min_dists = torch.sqrt(2*spreads**2*math.log(1/ctx.max_rbf)).contiguous()
+		max_dists = torch.sqrt(2*spreads**2*math.log(1/ctx.min_rbf)).contiguous()
 
 		# checks
 		assert Q.stride() == K.stride() == V.stride() == O.stride()
@@ -591,9 +620,11 @@ class attn(torch.autograd.Function):
 							L, L.stride(0), L.stride(1), L.stride(2),
 							coords, coords.stride(0), coords.stride(1), coords.stride(2),
 							spreads, spreads.stride(0), 
+							min_dists, min_dists.stride(0), 
+							max_dists, max_dists.stride(0), 
 							mask, mask.stride(0), mask.stride(1),
 							context_mask, context_mask.stride(0), context_mask.stride(1),
-							batch, N, nheads, d_k, max(d_k, 16), ctx.softmax_scale, ctx.dist_factor, ctx.eps,
+							batch, N, nheads, d_k, max(d_k, 16), ctx.softmax_scale, ctx.eps,
 							BLOCK_I, BLOCK_J
 						 )
 

@@ -16,12 +16,12 @@ def main():
 	assert d_model%2==0 and d_model%nheads==0
 	d_k = d_model // nheads
 	min_wl, max_wl, base = 3.7, 20, 20
-	dist_factor = 2**0.5
+	min_rbf, max_rbf = 0.1, 0.9
 
 	coords = 3.7 * torch.normal(mean=0, std=1, size=(batch, N, 1), dtype=torch.float32, device=device).expand(batch, N, 3) # batch x N x 3
 
 	# use real coordinates
-	real = True
+	real = False
 	if real:
 		coords = torch.load("/home/ubuntu/triton/data/pdb_2021aug02_sample/pdb/l3/2l3w_A.pt", weights_only=True, map_location=device)
 		coords = coords["xyz"][:, 1, :]
@@ -40,11 +40,10 @@ def main():
 	start_event = torch.cuda.Event(enable_timing=True)
 	end_event = torch.cuda.Event(enable_timing=True)
 	atol, rtol = 1e-2, 0
-	eps = 0#1e-2
 
 	print("forward pass:\n")
 
-	params = [Q, K, V, coords, spreads, mask, context_mask, dist_factor, eps]
+	params = [Q, K, V, coords, spreads, mask, context_mask, min_rbf, max_rbf]
 	torch_out, triton_out = test_fwd(torch_attn, attn, params, start_event, end_event, atol, rtol)
 
 	print("\nbackward pass:\n")
@@ -53,7 +52,7 @@ def main():
 
 def test_fwd(torch_attn, attn, params, start_event, end_event, atol, rtol):
 
-	triton_out, triton_time, triton_memory = profile_func(attn.apply, params, start_event, end_event)
+	triton_out, triton_time, triton_memory = profile_func(attn, params, start_event, end_event)
 	torch_out, torch_time, torch_memory = profile_func(torch_attn, params, start_event, end_event)
 	rel_error, abs_error = calculate_error(torch_out, triton_out)
 
@@ -107,7 +106,7 @@ def test_bwd(torch_loss, triton_loss, Q, K, V, start_event, end_event, atol, rto
 	print(f"triton kernel memory usage: {triton_memory / (1024 ** 3):.3f} GB")
 
 
-def torch_attn(Q, K, V, coords, spreads, mask=None, context_mask=None, dist_factor=3.0, eps=1e-2):
+def torch_attn(Q, K, V, coords, spreads, mask=None, context_mask=None, min_rbf=0.1, max_rbf=0.9):
 
 	assert (Q.shape == K.shape) and (K.shape == V.shape), f"Q, K, and V projection shapes must match, but got {Q.shape=}, {K.shape=}, {V.shape=}"
 	batch, nheads, N, d_k = Q.shape
@@ -121,6 +120,8 @@ def torch_attn(Q, K, V, coords, spreads, mask=None, context_mask=None, dist_fact
 	assert torch.all(spreads != 0), f"spreads must be a tensor of non-zero floats, not {spreads}"
 	mask = torch.zeros(batch, N) if mask is None else mask # batch x N
 	context_mask = mask if context_mask is None else context_mask # batch x N
+	min_dists = torch.sqrt(2*spreads**2*math.log(1/min_rbf)).contiguous()
+	max_dists = torch.sqrt(2*spreads**2*math.log(1/max_rbf)).contiguous()
 
 	Q = Q.contiguous()
 	K = K.contiguous()
@@ -133,9 +134,10 @@ def torch_attn(Q, K, V, coords, spreads, mask=None, context_mask=None, dist_fact
 	S = torch.matmul(Q, K.transpose(2,3)) / (d_k**0.5) # batch x nheads x N x N
 
 	dists = torch.sqrt(torch.sum((coords[:, :, None, :] - coords[:, None, :, :])**2, axis=3))[:, None, :, :]
-	dists_mask = (dists < torch.where(spreads==spreads.min(), 0.0, spreads)[None, :, None, None]) | (dists > (dist_factor*spreads[None, :, None, None]))
+	dists_mask = dists > (max_dists[None, :, None, None])
 	rbfs = torch.exp(-(dists**2)/(2*spreads[None, :, None, None]**2))
-	rbfs = torch.where(S<0, (1+eps)-rbfs, rbfs)
+	rbfs = torch.where(dists < min_dists[None, :, None, None], 1.0, rbfs) # clamp mins to one
+	rbfs = torch.where(S<0, (1+min_rbf)-rbfs, rbfs)
 
 	print( 1 - (dists_mask.sum(-1).sum(-1)/(N**2)))
 

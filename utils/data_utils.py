@@ -26,7 +26,7 @@ import pandas as pd
 import numpy as np
 import argparse
 import time
-import gc
+import os
 
 from utils.io_utils import Output
 from utils.model_utils.featurization import protein_to_wavefunc
@@ -273,10 +273,13 @@ class DataCleaner():
 					def monitor_progress():
 						
 						# continuously update tqdm progress bar
-						while sum(progress.values()) < len(all_pdbs):
+						# while (sum(progress.values()) < len(all_pdbs)):
+						os.environ["WF_DONE"] = "0"
+						while os.environ.get("WF_DONE") != "1":
 							pbar.n = sum(progress.values())
 							pbar.refresh()
 							time.sleep(0.1)
+
 
 					# start progress monitoring thread
 					montor_thread = Thread(target=monitor_progress, daemon=True)
@@ -294,6 +297,8 @@ class DataCleaner():
 						# gather the results
 						for future in futures:
 							results.append(future.result())
+
+					os.environ["WF_DONE"] = "1"
 
 			# now deal with the results
 
@@ -408,7 +413,7 @@ class DataCleaner():
 			pdbid = biounit_path.name.split("_")[0]
 			for chain in chain_masks[i]:
 				chunk_biounits["CHAINID"].append(f"{pdbid}_{chain}")
-				chunk_biounits["BIOUNIT"].append(biounit_path.name)
+				chunk_biounits["BIOUNIT"].append(biounit_path.name.rstrip(".pt"))
 			
 	def pad_tensors(self, coords):
 
@@ -589,7 +594,7 @@ if __name__ == "__main__":
 	parser.add_argument("--clean_pdbs", default=True, type=bool, help="whether to clean the pdbs")
 
 	parser.add_argument("--data_path", default=Path("/gpfs_backup/wangyy_data/protAI/pmpnn_data/pdb_2021aug02"), type=Path, help="path where decompressed the PMPNN dataset")
-	parser.add_argument("--new_data_path", default=Path("/share/wangyy/hjc2538/proteusAI/pdb_2021aug02_filtered"), type=Path, help="path to write the filtered dataset")
+	parser.add_argument("--new_data_path", default=Path("/share/wangyy/hjc2538/proteusAI/pdb_2021aug02_filtered_2"), type=Path, help="path to write the filtered dataset")
 	parser.add_argument("--pdb_path", default=Path("pdb"), type=Path, help="path where pdbs are located, in the data_path parent directory")
 	parser.add_argument("--all_clusters_path", default=Path("list.csv"), type=Path, help="path where cluster csv is located within data_path")
 	parser.add_argument("--val_clusters_path", default=Path("valid_clusters.txt"), type=Path, help="path where valid clusters text file is located within data_path")
