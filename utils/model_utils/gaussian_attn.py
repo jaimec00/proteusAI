@@ -23,6 +23,7 @@ description:	multi-scale gaussian flash attention kernel written in triton.
 '''
 # ----------------------------------------------------------------------------------------------------------------------
 
+import math
 import torch
 import triton
 import triton.language as tl
@@ -528,8 +529,8 @@ class _attn(torch.autograd.Function):
 		coords = coords.contiguous()
 		spreads = spreads.contiguous()
 
-		min_dists = torch.sqrt(2*spreads**2*math.log(1/max_rbf))
-		max_dists = torch.sqrt(2*spreads**2*math.log(1/min_rbf))
+		min_dists = torch.sqrt(2*(spreads**2)*math.log(1/max_rbf))
+		max_dists = torch.sqrt(2*(spreads**2)*math.log(1/min_rbf))
 
 		# define block sizes (minimum of 16, as tl.dot needs all dimensions to be >=16)
 		BLOCK_I = 32 if d_k <= 64 else 16
@@ -575,8 +576,8 @@ class _attn(torch.autograd.Function):
 		D = torch.sum(O*dO, dim=3) # Z x H x N x D -> Z x H x N
 
 		# re-compute min and max distances
-		min_dists = torch.sqrt(2*spreads**2*math.log(1/ctx.max_rbf)).contiguous()
-		max_dists = torch.sqrt(2*spreads**2*math.log(1/ctx.min_rbf)).contiguous()
+		min_dists = torch.sqrt(2*(spreads**2)*math.log(1/ctx.max_rbf)).contiguous()
+		max_dists = torch.sqrt(2*(spreads**2)*math.log(1/ctx.min_rbf)).contiguous()
 
 		# checks
 		assert Q.stride() == K.stride() == V.stride() == O.stride()
