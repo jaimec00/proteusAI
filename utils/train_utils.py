@@ -60,7 +60,7 @@ class TrainingRun():
 		
 		self.training_parameters = TrainingParameters(  args.epochs, args.batch_size, 
 														args.accumulation_steps, args.learning_step, 
-														args.dropout, args.label_smoothing, 
+														args.dropout, args.label_smoothing, args.include_ncaa,
 														args.loss_type, args.lr_scale, args.lr_patience,
 														args.phase_split, args.expand_decoders, args.training_type )
 		
@@ -133,7 +133,8 @@ class TrainingRun():
 								self.hyper_parameters.min_rbf,
 								self.hyper_parameters.max_rbf,
 								active_decoders=-1**(not self.training_parameters.expand_decoders), # -1 for no expansion (use all), 1 for expansion (start with one)
-								use_probs=self.training_parameters.use_probs
+								use_probs=self.training_parameters.use_probs,
+								include_ncaa=self.training_parameters.include_ncaa
 							)
 		self.model.to(self.gpu)
 
@@ -346,7 +347,7 @@ class Epoch():
 		epoch_pbar = tqdm(total=len(self.training_run_parent.data.train_data_loader), desc="epoch_progress", unit="step")
 		for b_idx, (feature_batch, label_batch, coords_batch, chain_mask, key_padding_mask) in enumerate(self.training_run_parent.data.train_data_loader):
 			
-			batch = Batch(feature_batch, label_batch, coords_batch, chain_mask, key_padding_mask, b_idx=b_idx, epoch=self, use_probs=self.training_run_parent.training_parameters.use_probs)
+			batch = Batch(feature_batch, label_batch, coords_batch, chain_mask, key_padding_mask, b_idx=b_idx, epoch=self, use_probs=self.training_run_parent.training_parameters.use_probs, include_ncaa=self.training_run_parent.training_parameters.include_ncaa)
 			batch.batch_learn()
 			# normalize by number of valid tokens if computing sum, else it is already normalized
 			self.gather_batch_losses(batch, normalize=self.training_run_parent.loss_function.reduction=="sum")
@@ -404,17 +405,18 @@ class Epoch():
 class Batch():
 	def __init__(self, features, labels, coords, chain_mask, key_padding_mask, 
 					b_idx=None, epoch=None, use_probs=False, 
-					use_amp=True, auto_regressive=False, temp=0.1):
+					use_amp=True, auto_regressive=False, temp=0.1, include_ncaa=False):
 
 		self.features = features
 		self.labels = labels
 		self.coords = coords 
 		self.chain_mask = chain_mask 
 		self.use_probs = use_probs
+		num_aas = 20 if not include_ncaa else 21
 		if self.use_probs:
-			self.predictions = torch.full(self.labels.shape, 1/21).unsqueeze(-1).expand(-1,-1,21)
+			self.predictions = torch.full(self.labels.shape, 1/num_ass).unsqueeze(-1).expand(-1,-1,num_aas)
 		else:
-			self.predictions = torch.zeros(self.labels.shape).unsqueeze(-1).expand(-1,-1,21)
+			self.predictions = torch.zeros(self.labels.shape).unsqueeze(-1).expand(-1,-1,num_aas)
 
 		self.key_padding_mask = key_padding_mask
 		self.onehot_mask = torch.zeros(self.key_padding_mask.shape, dtype=torch.bool)

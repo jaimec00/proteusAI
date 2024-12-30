@@ -514,7 +514,7 @@ class _attn(torch.autograd.Function):
 		assert d_model % 2 == 0, f"d_model must be divisible by 2, not {d_model=}"
 		assert coords.dim() == 3 and coords.size(2) == 3, f"coordinates must be of shape (batch, N, 3), not {coords.shape}" 
 		assert spreads.size(0) == nheads, f"number of spreads must be equal to nheads, not {spreads.size(0)=} and {nheads=}"
-		assert torch.all(spreads != 0), f"spreads must be a tensor of non-zero floats, not {spreads}"
+		assert torch.all(spreads > 0), f"spreads must be a tensor of positive, non-zero floats, not {spreads}"
 
 		# initialize mask, output, and logsumexp tensors
 		mask = (torch.ones(batch, N, device=Q.device) if mask is None else ~mask).contiguous() # batch x N

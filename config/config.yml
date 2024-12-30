@@ -1,5 +1,4 @@
 # Configuration for training the model
-input_atoms: 0  # whether to train the model using only alphacarbons (0) or full backbone (1)
 d_model: 512  # dimensionality of input embeddings
 min_wl: 3.7  # minimum wl to use in wavelength sampling
 max_wl: 20.0  # maximum wl to use in wavelength sampling
@@ -11,6 +10,7 @@ decoder_layers: 4 # number of decoder layers
 hidden_linear_dim: 256  # intermediate dimensions of decoder feed forward layer
 temperature: 0.1  # temperature for autoregressive inference (for testing)
 max_tokens: 10000  # maximum number of tokens
+include_ncaa: False # whether to include non-canonical amino acids in loss calculation
 
 # Training configuration
 num_train: 128  # number of training samples to use; -1 means all available

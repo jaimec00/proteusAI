@@ -89,7 +89,7 @@ class DataHolder(Dataset):
 			self.test_data_loader = DataLoader(self.test_data, self.batch_size, shuffle=True)
 		
 class Data(Dataset):
-	def __init__(self, data_path, clusters_df, num_samples=None, max_size=10000, feature_path="3.7_20.0_20", device="cpu"):
+	def __init__(self, data_path, clusters_df, num_samples=None, max_size=10000, feature_path="3.7_20.0_20", include_ncaa=False, device="cpu"):
 		self.pdb_path = data_path / Path("pdb") / Path(feature_path)
 		self.max_size = max_size
 		self.device = device
@@ -145,6 +145,8 @@ class Data(Dataset):
 			pdb_data = torch.load(pdb_path, weights_only=True, map_location=self.device)
 			pdb_features = pdb_data["features"]
 			pdb_labels = pdb_data["labels"]
+			if not include_ncaa: # mask out ncaa
+				pdb_labels = torch.where(pdb_labels==20, -1, pdb_labels)	
 			pdb_coords = pdb_data["coords"]
 			pdb_chain_idxs = pdb_data["chain_idxs"]
 

@@ -2,7 +2,7 @@
 '''
 author: 		jaime cardenas
 title:  		proteusAI.py
-description:	predicts the amino acid sequence of a a protein, based on 
+description:	predicts the amino acid sequence of a protein, based on 
 				alpha carbon coordinates
 '''
 # ----------------------------------------------------------------------------------------------------------------------
@@ -23,9 +23,9 @@ class SpatialEmbedding(nn.Module):
 	to the superposed wavefunction at a particular wavelength. each wavefunction output creates two features, a real part and 
 	an imaginary part. Thus, d_model / 2 wave functions, each with a corresponding wavelength, are generated to create
 	d_model features for each Ca 
-	need to precompute these for training, but very manageable for inference to compute on the fly
-	serve as a generalization of positional encoding for irregularly spaced tokens in arbitrary dimensions. probably need
-	approximations for larger scale problems, but has potential
+	need to precompute these for training, but very manageable for inference to compute on the fly, especially with 
+	optimized triton kernel
+	serve as a generalization of positional encoding for irregularly spaced tokens in arbitrary dimensions. 
 	'''
 	def __init__(self, d_model=512, min_wl=3.7, max_wl=20, base=20):
 		super(SpatialEmbedding, self).__init__()
@@ -107,7 +107,7 @@ class MHA(nn.Module):
 		V = self.v_layernorm(V)
 
 		# perform attention
-		out = attn(Q, K, V, coords, self.spreads, key_padding_mask, context_mask, self.min_rbf, self.max_rbf)  # batch x nhead x N x d_k
+		out = attn(Q, K, V, coords, self.spreads, mask=key_padding_mask, context_mask=context_mask, min_rbf=self.min_rbf, max_rbf=self.max_rbf)  # batch x nhead x N x d_k
 
 		out = out.permute(0,2,3,1) # batch x N x d_k x nhead
 		out = out.reshape(batch, N, self.d_model) # batch x N x d_k x nhead --> batch x N x d_model
@@ -156,7 +156,7 @@ class Decoder(nn.Module):
 			for param in module.parameters():
 				param.requires_grad = requires_grad
 
-	def forward(self, wavefunc, coords, key_padding_mask=None, context_mask=None, use_checkpoint=False):
+	def forward(self, wavefunc, coords, key_padding_mask=None, use_checkpoint=False):
 
 		# full self-attention
 		wavefunc2 = self.self_attn(wavefunc, wavefunc, wavefunc,
@@ -237,12 +237,16 @@ class proteusAI(nn.Module):
 	the subspace (d_k) each head operates at is close to the scale of the spread, since each feature in d_k (and d_model, where d_model=d_k*nhead) 
 	corresponds to a distinct wavelength (and thus k in Green's function), with low index features corresponding to small wavelengths 
 	and large index features to large wavelengths. the final decoder layer output goes through a linear layer that converts the 
-	d_model feature space to a 21-d feature space (20 AAs + X (unknown AA)). softmax is applied to get probabilities and 
+	d_model feature space to a 20-d feature space (20 AAs). softmax is applied to get probabilities and 
 	sample from the distribution autoregressively (during inference).
 
 	'''
 	
-	def __init__(self, N, d_model, n_head, decoder_layers, hidden_linear_dim, dropout, min_wl=3.7, max_wl=20, base=20, min_rbf=0.1, max_rbf=0.9, active_decoders=-1, use_probs=False):
+	def __init__(self, 	N, d_model, n_head, decoder_layers, hidden_linear_dim, dropout, 
+						min_wl=3.7, max_wl=20, base=20, min_rbf=0.1, max_rbf=0.9, 
+						active_decoders=-1, use_probs=False, include_ncaa=False
+					):
+
 		super(proteusAI, self).__init__()
 
 		# configuration
@@ -256,14 +260,15 @@ class proteusAI(nn.Module):
 		self.wavfunc_norm = nn.LayerNorm(d_model)
 
 		# context
-		self.aa_embedding = nn.Linear(21, d_model)
+		num_aas = 20 if not include_ncaa else 21
+		self.aa_embedding = nn.Linear(num_aas, d_model)
 		self.context_module = ContextModule(d_model, n_head, hidden_linear_dim, dropout, min_wl, max_wl, base, min_rbf, max_rbf)
 
 		# decoder
 		self.decoders = nn.ModuleList([Decoder(d_model, n_head, hidden_linear_dim, dropout, min_wl, max_wl, base, min_rbf, max_rbf) for _ in range(decoder_layers)])
 
 		# map to aa probs
-		self.linear = nn.Linear(d_model, 21)
+		self.linear = nn.Linear(d_model, num_aas)
 
 	def add_decoder(self, new_decoders=1):
 		'''
@@ -314,17 +319,17 @@ class proteusAI(nn.Module):
 
 		return seq_probs
 
-	def auto_regressive(self, wavefunc, aa_onehot, key_padding_mask=None, distance_weights=None, temp=0.1):
+	def auto_regressive(self, wavefunc, coords, aa_onehot, key_padding_mask=None, temp=0.1):
 
 		# auto regressively sample AAs at most confident position
 		for position in range(aa_onehot.size(1)):
 
 			# add context, unless first iteration, in which case context was already added in forward method
 			if position > 0:
-				wavefunc = self.contextualize(wavefunc, aa_onehot, key_padding_mask, distance_weights)
+				wavefunc = self.contextualize(wavefunc, coords, aa_onehot, key_padding_mask)
 
 			# decode the wavefunction
-			seq_probs = self.decode(wavefunc, key_padding_mask, distance_weights) # batch x N x 512 --> batch x N X 20 
+			seq_probs = self.decode(wavefunc, coords, key_padding_mask) # batch x N x 512 --> batch x N X 20 
 			
 			# convert to probability distribution
 			seq_probs = F.softmax(seq_probs, dim=-1) # batch x N x 20
@@ -355,7 +360,6 @@ class proteusAI(nn.Module):
 
 		# get the probability distributions of the most confident positions
 		prob_distributions = torch.gather(seq_probs, dim=1, index=most_confident_idx).squeeze(1)  # batch x 20
-		# prob_distributions = prob_distributions.masked_fill(predicted_positions_mask, 0.0) # mask out complete positions
 		
 		# Apply temperature scaling to most confident positions
 		scaled_logits = torch.log(prob_distributions + 1e-5) / temp # batch x 20
@@ -391,11 +395,11 @@ class proteusAI(nn.Module):
 		# contextualize environment with AAs if any sequence has context
 		has_context = (aa_onehot.any(dim=-1) & (~key_padding_mask)).any() # 1,
 		if has_context:
-			wavefunc = self.contextualize(wavefunc, aa_onehot, coords, key_padding_mask) # batch x N x d_model
+			wavefunc = self.contextualize(wavefunc, coords, aa_onehot, key_padding_mask) # batch x N x d_model
 
 		# note auto-regression breaks the computational chain, do not implement during training
 		if auto_regressive:
-			seq_probs = self.auto_regressive(wavefunc, aa_onehot, coords, key_padding_mask, temp=temp) # batch x N x 20 (returns one-hot tensor)
+			seq_probs = self.auto_regressive(wavefunc, coords, aa_onehot, key_padding_mask, temp=temp) # batch x N x 20 (returns one-hot tensor)
 		else: 
 			seq_probs = self.decode(wavefunc, coords, key_padding_mask) # batch x N x 20 (returns aa probability logits)
 

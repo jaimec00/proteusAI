@@ -50,7 +50,6 @@ def init_args():
 	# hyper parameters
 	
 	# model 
-	parser.add_argument("--input_atoms", default=0, type=int, choices=[0,1,2], help="whether to train the model using only alphacarbons (0) or full backbone (1)")
 	parser.add_argument("--d_model", default=512, type=int, help="dimensionality of input embeddings")
 	parser.add_argument("--min_wl", default=3.7, type=float, help="minimum wavelength to use in wavelength sampling")
 	parser.add_argument("--max_wl", default=20.0, type=float, help="maximum wavelength to use in wavelength sampling")
@@ -62,6 +61,7 @@ def init_args():
 	parser.add_argument("--hidden_linear_dim", default=1024, type=int, help="intermediate dimensions of decoder feed forward layer")
 	parser.add_argument("--temperature", default=0.01, type=float, help="temperature for autoregressive inference (for testing)")
 	parser.add_argument("--max_tokens", default=512, type=int, help="maximum number of tokens")
+	parser.add_argument("--include_ncaa", default=False, type=bool, help="if False, masks out non-canonical AA, else X is a valid prediction")
 	
 	# training
 	parser.add_argument("--num_train", default=-1, type=int, help="number of training samples to use; -1 means all available")
