@@ -1,15 +1,12 @@
 #!/bin/bash
 
-#BSUB -n 2
-#BSUB -W 1:00
-#BSUB -R "rusage[mem=32GB]"
+#BSUB -n 3
+#BSUB -W 5:00
+#BSUB -R "rusage[mem=64GB]"
 #BSUB -q gpu
-##BSUB -R "select[l40 || a100 || h100]"
-#BSUB -R "span[ptile=2]"
-#BSUB -R "select[l40 || a10 || a30]"
-##BSUB -R "select[a10 || a30]"
-##BSUB -gpu "num=2:mode=shared:mps=yes"
-#BSUB -gpu "num=2:mode=exclusive_process"
+#BSUB -R "span[ptile=3]"
+#BSUB -R "select[l40 || a10 || a30 || a100 || h100]"
+#BSUB -gpu "num=3:mode=exclusive_process"
 #BSUB -o out.%J
 #BSUB -e err.%J
 #BSUB -J protAI_cleanpdbs
@@ -20,8 +17,10 @@ module load cuda/12.1
 conda activate protAI_env
 nvidia-smi
 
-#export CUDA_VISIBLE_DEVICES=0
-# export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+export TRITON_HOME="/share/wangyy/hjc2538/proteusAI"
+export TRITON_CACHE_DIR="/share/wangyy/hjc2538/proteusAI/.triton/cache"
+
+
 export PYTHONPATH="/home/hjc2538/ondemand/data/sys/myjobs/projects/proteusAI"
 
 python -u utils/data_utils.py

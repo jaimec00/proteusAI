@@ -321,6 +321,10 @@ class DataCleaner():
 		chunk_biounits = {"CHAINID": [], "BIOUNIT": []}
 
 		# loop through each pdb entry 
+		coords, labels, chain_masks, paths = [], [], [], []
+		all_pdbs_path = self.output.out_path / Path(f"{self.min_wl}_{self.max_wl}_{self.base}")
+		batch_size = 256
+
 		for _, pdbid in pdbs_chunk.PDB.items():
 
 			# update process progress
@@ -330,70 +334,89 @@ class DataCleaner():
 			biounits = self.get_pdb_biounits(pdbid)
 			chains = pdbs_chunk.loc[pdbs_chunk.PDB.eq(pdbid), "CHAINID"]
 
+			pdb_path = all_pdbs_path / Path(f"pdb/{pdbid[1:3]}") 
+
 			# loop through each biounit
-			coords, labels, chain_masks = [], [], []
-			for biounit in biounits:
+			for idx, biounit in enumerate(biounits):
 
 				# filter out ligand chains from biounit
 				biounit_chains = [chain for chain in biounit if f"{pdbid}_{chain}" in chains.values]
 
 				# get the biounit coordinates, labels, and chain masks
 				bu_coords, bu_labels, bu_chain_masks = self.get_biounit_tensors(pdbid, biounit_chains)
+				if None in [bu_coords, bu_labels, bu_chain_masks]:
+					continue
+				
 				bu_coords = bu_coords.to(device)
 				bu_labels = bu_labels.to(device)
 
-				if None in [bu_coords, bu_labels, bu_chain_masks]:
-					continue
-
-				# if too big, split the biounit into its corresponding chains
+				# if too big, split the biounit into its corresponding chains, returns empty list if the chains themselves are too big
 				if bu_labels.size(0) > self.max_tokens:
 
 					# list of coords/labels/masks of the biounit's chains
 					bu_coords, bu_labels, bu_chain_masks = self.split_biounit(bu_coords, bu_labels, bu_chain_masks)
 					# remove chains that are too long anyway
-					coords.extend([chain_coords for chain_coords in bu_coords if chain_coords.size(0) < self.max_tokens])
-					labels.extend([chain_labels for chain_labels in bu_labels if chain_labels.size(0) < self.max_tokens])
-					chain_masks.extend([chain_masks for chain_masks, chain_labels in zip(bu_chain_masks, bu_labels) if chain_labels.size(0) < self.max_tokens])
+					coords.extend(bu_coords)
+					labels.extend(bu_labels)
+					chain_masks.extend(bu_chain_masks)
+					paths.extend([pdb_path / Path(f"{pdbid}_{idx}.{i}.pt") for i in range(len(bu_labels))])
 
 				else:
 					coords.append(bu_coords)
 					labels.append(bu_labels)
 					chain_masks.append(bu_chain_masks)
-			
-			# concatenate all the biounits for featurization
-			if not coords: continue
-			coords, mask = self.pad_tensors(coords)
+					paths.append(pdb_path / Path(f"{pdbid}_{idx}.pt"))
 
-			# get features for each biounit
-			features = protein_to_wavefunc(coords, self.d_model, self.min_wl, self.max_wl, self.base, mask=mask)
+				if len(coords) >= batch_size:
 
-			pdb_path = self.output.out_path / Path(f"{self.min_wl}_{self.max_wl}_{self.base}") / Path(f"pdb/{pdbid[1:3]}") 
-			pdb_path.mkdir(parents=True, exist_ok=True)
+					self.write_files(coords, labels, chain_masks, paths, chunk_biounits)
 
-			# loop through each sample along batch dim and unpad coords and features
-			for i in range(features.size(0)): 
+					coords, labels, chain_masks, paths = [], [], [], []
 
-				biounit_data = {
-					"coords": coords[i, ~mask[i], :], # N x 3
-					"features": features[i, ~mask[i], :], # N x d_model
-					"labels": labels[i], # N,
-					"chain_idxs": chain_masks[i] # {CHAINID: [start, end(exclusive)]}
-				}
-
-				biounit_path = pdb_path / Path(f"{pdbid}_{i}.pt")
-				torch.save(biounit_data, biounit_path)
-
-				for chain in chain_masks[i]:
-					chunk_biounits["CHAINID"].append(f"{pdbid}_{chain}")
-					chunk_biounits["BIOUNIT"].append(f"{pdbid}_{i}")
+		# incase the last few do not fit into a neat batch
+		if coords:
+			self.write_files(coords, labels, chain_masks, paths, chunk_biounits)
 
 		chunk_biounits = pd.DataFrame(chunk_biounits)
 
 		return chunk_biounits
 
+
+	def write_files(self, coords, labels, chain_masks, paths, chunk_biounits):
+
+		coords, mask = self.pad_tensors(coords)
+
+		# get features for each biounit
+		features = protein_to_wavefunc(coords, self.d_model, self.min_wl, self.max_wl, self.base, mask=mask)
+
+		# loop through each sample along batch dim and unpad coords and features
+		for i in range(features.size(0)): 
+
+
+			biounit_data = {
+				"coords": coords[i, ~mask[i], :], # N x 3
+				"features": features[i, ~mask[i], :], # N x d_model
+				"labels": labels[i], # N,
+				"chain_idxs": chain_masks[i] # {CHAINID: [start, end(exclusive)]}
+			}
+
+			biounit_path = paths[i]
+			if not biounit_path.parent.exists():
+				biounit_path.parent.mkdir(parents=True, exist_ok=True)
+			torch.save(biounit_data, biounit_path)
+
+			pdbid = biounit_path.name.split("_")[0]
+			for chain in chain_masks[i]:
+				chunk_biounits["CHAINID"].append(f"{pdbid}_{chain}")
+				chunk_biounits["BIOUNIT"].append(biounit_path.name)
+			
 	def pad_tensors(self, coords):
 
 		max_len = max(sample.size(0) for sample in coords)
+		# have a few fixed sizes to increase the likelihood of triton using cache instead of recompiling each time
+		max_lens = [128, 256, 512, 1024, 2048, 4096, 8192, 10000]
+		max_len = next(length for length in max_lens if max_len <= length)
+
 		masks = torch.stack([torch.cat( 
 										(torch.zeros(sample.size(0), dtype=torch.bool, device=sample.device), 
 										torch.ones(max_len - sample.size(0), dtype=torch.bool, device=sample.device))
@@ -458,7 +481,7 @@ class DataCleaner():
 
 		return biounit_coords, biounit_labels, chain_indices
 
-	def split_biounit(self, pdbid, biounit_coords, biounit_labels, chain_indices):
+	def split_biounit(self, biounit_coords, biounit_labels, chain_indices):
 		
 		coords, labels, chain_masks = [], [], []
 		for chain, (start, stop) in chain_indices.items():
@@ -468,11 +491,7 @@ class DataCleaner():
 
 			chain_size = chain_labels.size(0)
 			if chain_size > self.max_tokens:
-				self.output.log.info(f"skipping chain {pdbid}_{chain} of length {chain_size}.")
 				continue
-			elif chain_size > self.max_seq_len:
-				self.max_seq_len = chain_size
-				self.output.log.info(f"new max sequence length: {self.max_seq_len}")
 
 			coords.append(chain_coords)
 			labels.append(chain_labels)
@@ -570,7 +589,7 @@ if __name__ == "__main__":
 	parser.add_argument("--clean_pdbs", default=True, type=bool, help="whether to clean the pdbs")
 
 	parser.add_argument("--data_path", default=Path("/gpfs_backup/wangyy_data/protAI/pmpnn_data/pdb_2021aug02"), type=Path, help="path where decompressed the PMPNN dataset")
-	parser.add_argument("--new_data_path", default=Path("/gpfs_backup/wangyy_data/protAI/pmpnn_data/pdb_2021aug02_filtered"), type=Path, help="path to write the filtered dataset")
+	parser.add_argument("--new_data_path", default=Path("/share/wangyy/hjc2538/proteusAI/pdb_2021aug02_filtered"), type=Path, help="path to write the filtered dataset")
 	parser.add_argument("--pdb_path", default=Path("pdb"), type=Path, help="path where pdbs are located, in the data_path parent directory")
 	parser.add_argument("--all_clusters_path", default=Path("list.csv"), type=Path, help="path where cluster csv is located within data_path")
 	parser.add_argument("--val_clusters_path", default=Path("valid_clusters.txt"), type=Path, help="path where valid clusters text file is located within data_path")
