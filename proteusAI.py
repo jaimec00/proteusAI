@@ -106,8 +106,9 @@ class MHA(nn.Module):
 		K = self.k_layernorm(K)
 		V = self.v_layernorm(V)
 
+
 		# perform attention
-		out = attn(Q, K, V, coords, self.spreads, mask=key_padding_mask, context_mask=context_mask, min_rbf=self.min_rbf, max_rbf=self.max_rbf)  # batch x nhead x N x d_k
+		out = attn(Q, K, V, coords, self.spreads.to(Q.device), mask=key_padding_mask, context_mask=context_mask, min_rbf=self.min_rbf, max_rbf=self.max_rbf)  # batch x nhead x N x d_k
 
 		out = out.permute(0,2,3,1) # batch x N x d_k x nhead
 		out = out.reshape(batch, N, self.d_model) # batch x N x d_k x nhead --> batch x N x d_model
@@ -257,7 +258,7 @@ class proteusAI(nn.Module):
 		self.spatial_embedding = SpatialEmbedding(d_model, min_wl, max_wl, base)
 
 		# wavefunc norm
-		self.wavfunc_norm = nn.LayerNorm(d_model)
+		self.wavefunc_norm = nn.LayerNorm(d_model)
 
 		# context
 		num_aas = 20 if not include_ncaa else 21

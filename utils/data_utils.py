@@ -92,7 +92,7 @@ class DataHolder(Dataset):
 		
 class Data(Dataset):
 	def __init__(self, data_path, clusters_df, num_samples=None, max_size=10000, feature_path="3.7_20.0_20.0", include_ncaa=False, device="cpu"):
-		self.pdb_path = data_path / Path("pdb") / Path(feature_path)
+		self.pdb_path = data_path / Path(feature_path) / Path("pdb")
 		self.include_ncaa = include_ncaa
 		self.max_size = max_size
 		self.device = device
@@ -160,13 +160,13 @@ class Data(Dataset):
 				self.clusters[pdb.at["BIOUNIT"]]["coords"].append(pdb_coords)
 				self.clusters[pdb.at["BIOUNIT"]]["chain_idxs"].append(pdb_chain_idxs)
 		
-				return pdb_features, pdb_labels, pdb_dists, pdb_chain_idxs
+				return pdb_features, pdb_labels, pdb_coords, pdb_chain_idxs
 
 		return None, None, None, None
 
 	def pad_tensors(self, features, labels, coords, chain_masks):
 
-		def pad_and_batch(tensor_list, pad_val="zero"):
+		def pad_and_batch(tensor_list, pad_val="zero", dims=1):
 			if pad_val=="zero":
 				pad = torch.zeros
 				weight = 1
@@ -186,19 +186,24 @@ class Data(Dataset):
 			else:
 				raise ValueError(f"invalid padding option {pad_val=}")
 
+
 			tensor = torch.stack([	torch.cat( 
 											(	sample, 
-												weight*pad(self.max_size - sample.size(0), dtype=sample.dtype, device=sample.device) + bias
+												weight*pad(
+															[self.max_size - sample.size(0)] + [sample.size(i) for i in range(1,dims)], 
+															dtype=sample.dtype, device=sample.device
+														) + bias
 											), dim=0
 										) for sample in tensor_list
 									], dim=0
 								)			
 			return tensor
 
-		features = pad_and_batch(features, pad_val="zero").to(torch.float32)
-		labels = pad_and_batch(labels, pad_val="-one").to(torch.int64)
-		coords = pad_and_batch(coords, pad_val="inf").to(torch.float32)
-		chain_masks = pad_and_batch(chain_masks, pad_val="one").to(torch.bool)
+
+		features = pad_and_batch(features, pad_val="zero", dims=features[0].dim()).to(torch.float32)
+		labels = pad_and_batch(labels, pad_val="-one", dims=labels[0].dim()).to(torch.int64)
+		coords = pad_and_batch(coords, pad_val="inf", dims=coords[0].dim()).to(torch.float32)
+		chain_masks = pad_and_batch(chain_masks, pad_val="one", dims=chain_masks[0].dim()).to(torch.bool)
 		key_padding_mask = (labels==-1).to(torch.bool)
 
 		return features, labels, coords, chain_masks, key_padding_mask 
