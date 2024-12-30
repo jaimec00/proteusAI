@@ -270,7 +270,12 @@ class TrainingRun():
 
 			# loop through testing batches
 			for feature_batch, label_batch, coords_batch, chain_mask, key_padding_mask in self.data.test_data_loader:
-				batch = Batch(feature_batch, coords_batch, label_batch, chain_mask, key_padding_mask, use_probs=self.training_parameters.use_probs, use_amp=False, auto_regressive=self.training_parameters.auto_regressive, temp=self.hyper_parameters.temperature)
+				
+				batch = Batch(feature_batch, label_batch, coords_batch, chain_mask, key_padding_mask, 
+								use_probs=self.training_parameters.use_probs, use_amp=False, 
+								auto_regressive=self.training_parameters.auto_regressive, 
+								temp=self.hyper_parameters.temperature)
+
 				input_perturbations.apply_perturbations(batch)
 				batch.batch_forward(self.model, self.loss_function, self.gpu)
 

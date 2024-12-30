@@ -141,7 +141,7 @@ class Output():
 	
 			using {model.active_decoders} decoders
 
-			decoder weights are {"frozen" if ((not epoch.phase) and (epoch.training_run_parent.training_parameters.training_type=="onehot")) else "frozen"}
+			decoder weights are {"frozen" if ((not epoch.phase) and (epoch.training_run_parent.training_parameters.training_type=="onehot")) else "not frozen"}
 
 			training inputs contain:
 				

@@ -13,12 +13,12 @@ max_tokens: 10000  # maximum number of tokens
 include_ncaa: False # whether to include non-canonical amino acids in loss calculation
 
 # Training configuration
-num_train: 128  # number of training samples to use; -1 means all available
-num_val: 128  # number of validation samples to use; -1 means all available
-num_test: 128  # number of test samples to use; -1 means all available
-epochs: 30  # number of epochs
+num_train: -1  # number of training samples to use; -1 means all available
+num_val: -1  # number of validation samples to use; -1 means all available
+num_test: -1  # number of test samples to use; -1 means all available
+epochs: 20  # number of epochs
 batch_size: 16  # batch size
-accumulation_steps: 1  # grad accumulation; how many batches to process before learning step
+accumulation_steps: 2  # grad accumulation; how many batches to process before learning step
 learning_step: 0.0001  # learning rate
 dropout: 0.1  # percentage of dropout
 label_smoothing: 0.0  # percentage of label smoothing to use on the output labels for loss calculation
