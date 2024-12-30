@@ -71,7 +71,8 @@ class TrainingRun():
 																			args.one_hot_injection_cycle_length,
 																			self.training_parameters.use_onehot, self.training_parameters.use_probs ) 
 		
-		self.data = DataHolder(args.data_path, args.num_train, args.num_val, args.num_test, args.max_tokens)
+		feature_path = f"{args.min_wl}_{args.max_wl}_{args.base}"
+		self.data = DataHolder(args.data_path, args.num_train, args.num_val, args.num_test, args.max_tokens, feature_path)
 		self.output = Output(args.out_path, args.loss_plot, args.seq_plot, args.weights_path, args.write_dot)
 
 		self.train_losses = {

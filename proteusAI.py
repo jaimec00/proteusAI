@@ -46,9 +46,10 @@ class MHA(nn.Module):
 	'''
 	custom MHA module, in order to scale attention weights for each head based 
 	on each head's spread in the RBF of PW distances 
+	see the imported function (supports fwd and bwd) triton implementation
 	'''
 
-	def __init__(self, d_model=512, nhead=8, dim_feedforward=1024, dropout=0.1, min_wl=3.7, max_wl=20, base=20, dist_factor=2**0.5, eps=1e-2):
+	def __init__(self, d_model=512, nhead=8, min_wl=3.7, max_wl=20, base=20, min_rbf=0.1, max_rbf=0.9):
 		super(MHA, self).__init__()
 
 		self.nhead = nhead
@@ -58,12 +59,16 @@ class MHA(nn.Module):
 		self.d_k = self.d_model // self.nhead
 
 		self.spreads = min_wl + (max_wl-min_wl)*(torch.logspace(0, 1, self.nhead, base) - 1)/(base-1) # nhead, 
-		self.dist_factor = dist_factor 
-		self.eps = eps
+		self.min_rbf = min_rbf
+		self.max_rbf = max_rbf
 
 		self.q_proj = nn.Parameter(torch.randn(self.nhead, self.d_model, self.d_k)) # nhead x d_model x d_k
 		self.k_proj = nn.Parameter(torch.randn(self.nhead, self.d_model, self.d_k)) # nhead x d_model x d_k
 		self.v_proj = nn.Parameter(torch.randn(self.nhead, self.d_model, self.d_k)) # nhead x d_model x d_k
+
+		self.q_layernorm = nn.LayerNorm(self.d_k)
+		self.k_layernorm = nn.LayerNorm(self.d_k)
+		self.v_layernorm = nn.LayerNorm(self.d_k)
 
 		self.out_proj = nn.Linear(d_model, d_model)
 	
@@ -91,11 +96,18 @@ class MHA(nn.Module):
 		batch, N, d_model = q.shape
 		assert d_model == self.d_model
 
+		# project the tensors
 		Q = torch.matmul(q.unsqueeze(1), self.q_proj.unsqueeze(0)) # batch x nhead x N x d_k
 		K = torch.matmul(k.unsqueeze(1), self.k_proj.unsqueeze(0)) # batch x nhead x N x d_k
 		V = torch.matmul(v.unsqueeze(1), self.v_proj.unsqueeze(0)) # batch x nhead x N x d_k
 
-		out = attn(Q, K, V, coords, self.spreads, key_padding_mask, context_mask, self.dist_factor, self.eps)  # batch x nhead x N x d_k
+		# apply layer norm after projection to ensure numerical stability
+		Q = self.q_layernorm(Q)
+		K = self.k_layernorm(K)
+		V = self.v_layernorm(V)
+
+		# perform attention
+		out = attn(Q, K, V, coords, self.spreads, key_padding_mask, context_mask, self.min_rbf, self.max_rbf)  # batch x nhead x N x d_k
 
 		out = out.permute(0,2,3,1) # batch x N x d_k x nhead
 		out = out.reshape(batch, N, self.d_model) # batch x N x d_k x nhead --> batch x N x d_model
@@ -111,12 +123,11 @@ class Decoder(nn.Module):
 	decoder module, contains self-attention, normalization, dropout, feed-forward network, and residual connections
 	'''
 
-	def __init__(self, d_model=512, nhead=8, dim_feedforward=1024, dropout=0.1, min_wl=3.7, max_wl=20, base=20, dist_factor=2**0.5, eps=1e-2):
+	def __init__(self, d_model=512, nhead=8, dim_feedforward=1024, dropout=0.1, min_wl=3.7, max_wl=20, base=20, min_rbf=0.1, max_rbf=0.9):
 		super(Decoder, self).__init__()
 
 		# Self-attention layers
-		self.self_attn = MHA(d_model, nhead, dim_feedforward=dim_feedforward, dropout=dropout, 
-							min_wl=min_wl, max_wl=max_wl, base=base, dist_factor=dist_factor, eps=eps)
+		self.self_attn = MHA(d_model, nhead, min_wl=min_wl, max_wl=max_wl, base=base, min_rbf=min_rbf, max_rbf=max_rbf)
 
 		# Separate normalization layers
 		self.norm = nn.LayerNorm(d_model)
@@ -151,7 +162,7 @@ class Decoder(nn.Module):
 		wavefunc2 = self.self_attn(wavefunc, wavefunc, wavefunc,
 						coords=coords,
 						key_padding_mask=key_padding_mask,
-						context_mask=key_padding_mask,
+						context_mask=None,
 						use_checkpoint=use_checkpoint
 						)
 
@@ -182,8 +193,8 @@ class ContextModule(Decoder):
 	batch have no context (all masked) but the rest only have some, avoids 
 	numerical instability
 	'''
-	def __init__(self, d_model=512, nhead=8, dim_feedforward=1024, dropout=0.1, min_wl=3.7, max_wl=20, base=20, dist_factor=2**0.5, eps=1e-2):
-		super(ContextModule, self).__init__(d_model, nhead, dim_feedforward, dropout, min_wl, max_wl, base, dist_factor, eps)
+	def __init__(self, d_model=512, nhead=8, dim_feedforward=1024, dropout=0.1, min_wl=3.7, max_wl=20, base=20, min_rbf=0.1, max_rbf=0.9):
+		super(ContextModule, self).__init__(d_model, nhead, dim_feedforward, dropout, min_wl, max_wl, base, min_rbf, max_rbf)
 
 								                    # vvvvvvvvvv repetive, as can do single mask, but just for clarity
 	def forward(self, wavefunc, coords, aa_context, aa_context_mask=None, key_padding_mask=None, use_checkpoint=False):
@@ -231,7 +242,7 @@ class proteusAI(nn.Module):
 
 	'''
 	
-	def __init__(self, N, d_model, n_head, decoder_layers, hidden_linear_dim, dropout, min_wl=3.7, max_wl=20, base=20, dist_factor=2**0.5, eps=1e-2, active_decoders=-1, use_probs=False):
+	def __init__(self, N, d_model, n_head, decoder_layers, hidden_linear_dim, dropout, min_wl=3.7, max_wl=20, base=20, min_rbf=0.1, max_rbf=0.9, active_decoders=-1, use_probs=False):
 		super(proteusAI, self).__init__()
 
 		# configuration
@@ -241,12 +252,15 @@ class proteusAI(nn.Module):
 		# wavefunc
 		self.spatial_embedding = SpatialEmbedding(d_model, min_wl, max_wl, base)
 
+		# wavefunc norm
+		self.wavfunc_norm = nn.LayerNorm(d_model)
+
 		# context
 		self.aa_embedding = nn.Linear(20, d_model)
-		self.context_module = ContextModule(d_model, n_head, hidden_linear_dim, dropout, min_wl, max_wl, base, dist_factor, eps)
+		self.context_module = ContextModule(d_model, n_head, hidden_linear_dim, dropout, min_wl, max_wl, base, min_rbf, max_rbf)
 
 		# decoder
-		self.decoders = nn.ModuleList([Decoder(d_model, n_head, hidden_linear_dim, dropout, min_wl, max_wl, base, dist_factor, eps) for _ in range(decoder_layers)])
+		self.decoders = nn.ModuleList([Decoder(d_model, n_head, hidden_linear_dim, dropout, min_wl, max_wl, base, min_rbf, max_rbf) for _ in range(decoder_layers)])
 
 		# map to aa probs
 		self.linear = nn.Linear(d_model, 20)
@@ -371,6 +385,8 @@ class proteusAI(nn.Module):
 			wavefunc = self.spatial_embedding(coords, key_padding_mask) # batch x N x 3 --> batch x N x d_model
 		else:
 			wavefunc = features
+
+		wavefunc = self.wavefunc_norm(wavefunc)
 
 		# contextualize environment with AAs if any sequence has context
 		has_context = (aa_onehot.any(dim=-1) & (~key_padding_mask)).any() # 1,

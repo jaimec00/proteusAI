@@ -89,8 +89,8 @@ class DataHolder(Dataset):
 			self.test_data_loader = DataLoader(self.test_data, self.batch_size, shuffle=True)
 		
 class Data(Dataset):
-	def __init__(self, data_path, clusters_df, num_samples=None, max_size=10000, device="cpu"):
-		self.data_path = data_path
+	def __init__(self, data_path, clusters_df, num_samples=None, max_size=10000, feature_path="3.7_20.0_20", device="cpu"):
+		self.pdb_path = data_path / Path("pdb") / Path(feature_path)
 		self.max_size = max_size
 		self.device = device
 		self.clusters_df = clusters_df
@@ -116,7 +116,7 @@ class Data(Dataset):
 			else:
 				pdb_features, pdb_labels, pdb_coords, pdb_chain_idxs = pdb_features[0], pdb_labels[0], pdb_coords[0], pdb_chain_idxs[0]
 
-			# create a chain mask
+			# create a chain mask for loss compuation
 			chain_start_idx, chain_end_idx = pdb_chain_idxs[pdb.at["CHAINID"].split("_")[-1]]
 			pdb_chain_masks = torch.ones(pdb_labels.shape, dtype=torch.bool)
 			pdb_chain_masks[chain_start_idx:chain_end_idx] = False
@@ -126,28 +126,29 @@ class Data(Dataset):
 			coords.append(pdb_coords)
 			chain_masks.append(pdb_chain_masks)
 
+		# pad and stack into batches
+		features, labels, coords, chain_masks, key_padding_mask = self.pad_tensors(features, labels, coords, chain_masks)
 
-		# stack into batches
-		self.features = torch.stack(features, dim=0).to(self.device)
-		self.labels = torch.stack(labels, dim=0).to(self.device)
-		self.coords = torch.stack(coords, dim=0).to(self.device)
-		self.chain_masks = torch.stack(chain_masks, dim=0).to(self.device)
-		self.key_padding_mask = (self.labels == -1).to(self.device)
+		# send to device and have them ready for next epoch
+		self.features = features.to(self.device)
+		self.labels = labels.to(self.device)
+		self.coords = coords.to(self.device)
+		self.chain_masks = chain_masks.to(self.device)
+		self.key_padding_mask =  key_padding_mask.to(self.device)
 
 	def add_data(self, pdb):
 
 		section = Path("".join(pdb.at["CHAINID"].split("_")[0][1:3]))
-		pdb_path = self.data_path / Path("pdb") / section / Path(f"{pdb.at['BIOUNIT']}.pt")
+		pdb_path = self.pdb_path / section / Path(f"{pdb.at['BIOUNIT']}.pt")
 
 		if pdb_path.exists():
 			pdb_data = torch.load(pdb_path, weights_only=True, map_location=self.device)
 			pdb_features = pdb_data["features"]
-			pdb_labels = pdb_data["labels"].long()
+			pdb_labels = pdb_data["labels"]
 			pdb_coords = pdb_data["coords"]
 			pdb_chain_idxs = pdb_data["chain_idxs"]
 
 			if pdb_labels.size(0) <= self.max_size:
-				pdb_features, pdb_labels, pdb_dists = self.pad_tensors(pdb_features, pdb_labels, pdb_dists)
 		
 				self.clusters[pdb.at["BIOUNIT"]]["features"].append(pdb_features)
 				self.clusters[pdb.at["BIOUNIT"]]["labels"].append(pdb_labels)
@@ -158,15 +159,44 @@ class Data(Dataset):
 
 		return None, None, None, None
 
-	def pad_tensors(self, pdb_features, pdb_labels, pdb_dists):
+	def pad_tensors(self, features, labels, coords, chain_masks):
 
-		pdb_features = torch.cat((pdb_features, torch.zeros(self.max_size - pdb_features.size(0), pdb_features.size(1))), dim=0)
-		pdb_labels = torch.cat((pdb_labels, -torch.ones(self.max_size - pdb_labels.size(0))), dim=0)
+		def pad_and_batch(tensor_list, pad_val="zero"):
+			if pad_val=="zero":
+				pad = torch.zeros
+				weight = 1
+				bias = 0
+			elif pad_val=="one":
+				pad = torch.ones
+				weight = 1
+				bias = 0
+			elif pad_val=="-one":
+				pad = torch.ones
+				weight = -1
+				bias = 0
+			elif pad_val=="inf":
+				pad = torch.zeros
+				weight = 1
+				bias = float("inf")
+			else:
+				raise ValueError(f"invalid padding option {pad_val=}")
 
-		pdb_dists_tmp = torch.full((self.max_size, self.max_size), torch.inf)
-		pdb_dists_tmp[:pdb_dists.size(0), :pdb_dists.size(1)] = pdb_dists
+			tensor = torch.stack([	torch.cat( 
+											(	sample, 
+												weight*pad(self.max_size - sample.size(0), dtype=sample.dtype, device=sample.device) + bias
+											), dim=0
+										) for sample in tensor_list
+									], dim=0
+								)			
+			return tensor
 
-		return pdb_features, pdb_labels, pdb_dists_tmp
+		features = pad_and_batch(features, pad_val="zero").to(torch.float32)
+		labels = pad_and_batch(labels, pad_val="-one").to(torch.int64)
+		coords = pad_and_batch(coords, pad_val="inf").to(torch.float32)
+		chain_masks = pad_and_batch(chain_masks, pad_val="one").to(torch.bool)
+		key_padding_mask = (labels==-1).to(torch.bool)
+
+		return features, labels, coords, chain_masks, key_padding_mask 
 
 	def __len__(self):
 		return self.features.size(0)
@@ -175,11 +205,11 @@ class Data(Dataset):
 
 		item = self.features[idx]
 		label = self.labels[idx]
-		dists = self.dists[idx]
+		coords = self.coords[idx]
 		chain_mask = self.chain_masks[idx]
 		key_padding_mask = self.key_padding_mask[idx]
 		
-		return item, label, dists, chain_mask, key_padding_mask
+		return item, label, coords, chain_mask, key_padding_mask
 
 	def unit_test(self):
 		pass
@@ -330,14 +360,17 @@ class DataCleaner():
 		all_pdbs_path = self.output.out_path / Path(f"{self.min_wl}_{self.max_wl}_{self.base}")
 		batch_size = 256
 
-		for _, pdbid in pdbs_chunk.PDB.items():
+		for _, pdbid in pdbs_chunk.PDB.drop_duplicates().items():
 
 			# update process progress
 			progress[process] += 1
 
 			# get the biounits for this pdb
 			biounits = self.get_pdb_biounits(pdbid)
+			biounits_flat = [f"{pdbid}_{chain}" for biounit in biounits for chain in biounit]
 			chains = pdbs_chunk.loc[pdbs_chunk.PDB.eq(pdbid), "CHAINID"]
+			single_chains = chains.loc[chains.isin(biounits_flat)]
+			biounits.extend([chain.split("_")[1] for chain in single_chains])
 
 			pdb_path = all_pdbs_path / Path(f"pdb/{pdbid[1:3]}") 
 
