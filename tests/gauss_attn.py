@@ -16,7 +16,7 @@ def main():
 	assert d_model%2==0 and d_model%nheads==0
 	d_k = d_model // nheads
 	min_wl, max_wl, base = 3.7, 20, 20
-	min_rbf, max_rbf = 0.1, 0.9
+	min_rbf, max_rbf = 0.2, 0.9
 
 	coords = 3.7 * torch.normal(mean=0, std=1, size=(batch, N, 1), dtype=torch.float32, device=device).expand(batch, N, 3) # batch x N x 3
 
@@ -120,8 +120,8 @@ def torch_attn(Q, K, V, coords, spreads, mask=None, context_mask=None, min_rbf=0
 	assert torch.all(spreads != 0), f"spreads must be a tensor of non-zero floats, not {spreads}"
 	mask = torch.zeros(batch, N) if mask is None else mask # batch x N
 	context_mask = mask if context_mask is None else context_mask # batch x N
-	min_dists = torch.sqrt(2*spreads**2*math.log(1/min_rbf)).contiguous()
-	max_dists = torch.sqrt(2*spreads**2*math.log(1/max_rbf)).contiguous()
+	min_dists = torch.sqrt(2*(spreads**2)*math.log(1/max_rbf)).contiguous()
+	max_dists = torch.sqrt(2*(spreads**2)*math.log(1/min_rbf)).contiguous()
 
 	Q = Q.contiguous()
 	K = K.contiguous()
@@ -135,8 +135,8 @@ def torch_attn(Q, K, V, coords, spreads, mask=None, context_mask=None, min_rbf=0
 
 	dists = torch.sqrt(torch.sum((coords[:, :, None, :] - coords[:, None, :, :])**2, axis=3))[:, None, :, :]
 	dists_mask = dists > (max_dists[None, :, None, None])
-	rbfs = torch.exp(-(dists**2)/(2*spreads[None, :, None, None]**2))
-	rbfs = torch.where(dists < min_dists[None, :, None, None], 1.0, rbfs) # clamp mins to one
+	rbfs = torch.exp(-(dists**2)/(2*(spreads[None, :, None, None]**2)))
+	rbfs = torch.where(dists <= min_dists[None, :, None, None], 1.0, rbfs) # clamp mins to one
 	rbfs = torch.where(S<0, (1+min_rbf)-rbfs, rbfs)
 
 	print( 1 - (dists_mask.sum(-1).sum(-1)/(N**2)))

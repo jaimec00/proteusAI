@@ -171,7 +171,7 @@ def _attn_fwd(
 		# clamp distances less than min dist to 1. min dist is the distance 
 		# calculated to get an rbf of e.g. 0.9. higher rbfs would result in numerical 
 		# instability with exp, so just make those 1 (no scaling)
-		clamp_mask = dists < min_dist
+		clamp_mask = dists <= min_dist
 		rbfs = tl.where(clamp_mask, 1.0, rbfs)
 
 		# negative logits with close distances should be less negative
@@ -181,7 +181,7 @@ def _attn_fwd(
 		rbfs = tl.where(Sij < 0, (1+eps)-rbfs, rbfs) # N x N
 
 		# set masked positions to -inf, include out of range dists in mask
-		dists_mask = dists < max_dist 
+		dists_mask = dists <= max_dist 
 		attn_mask = (mask_i[:, None]) & (mask_j[None, :]) & (dists_mask) # N x N
 
 		# scale attention logits by rbfs and mask invalid pairs
@@ -504,7 +504,7 @@ def attn(Q, K, V, coords, spreads, mask=None, context_mask=None, min_rbf=0.1, ma
 class _attn(torch.autograd.Function):
 
 	@staticmethod
-	def forward(ctx, Q, K, V, coords, spreads, mask=None, context_mask=None, min_rbf=0.1, max_rbf=0.9:
+	def forward(ctx, Q, K, V, coords, spreads, mask=None, context_mask=None, min_rbf=0.1, max_rbf=0.9):
 		
 		# checks
 		assert (Q.shape == K.shape) and (K.shape == V.shape), f"Q, K, and V projection shapes must match, but got {Q.shape=}, {K.shape=}, {V.shape=}"
@@ -625,7 +625,7 @@ class _attn(torch.autograd.Function):
 							max_dists, max_dists.stride(0), 
 							mask, mask.stride(0), mask.stride(1),
 							context_mask, context_mask.stride(0), context_mask.stride(1),
-							batch, N, nheads, d_k, max(d_k, 16), ctx.softmax_scale, ctx.eps,
+							batch, N, nheads, d_k, max(d_k, 16), ctx.softmax_scale, ctx.min_rbf,
 							BLOCK_I, BLOCK_J
 						 )
 
