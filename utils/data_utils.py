@@ -94,28 +94,27 @@ class Data(Dataset):
 		self.max_size = max_size
 		self.device = device
 		self.clusters_df = clusters_df
-		self.clusters = defaultdict(lambda: defaultdict(list)) # self.clusters[BioUnit][features/labels/pw_dists/chain_masks]
+		self.clusters = defaultdict(lambda: defaultdict(list)) # self.clusters[BioUnit][features/labels/coords/chain_masks]
 		self.rotate_data()
 
 	def rotate_data(self):
 		
 		sampled_pdbs = self.clusters_df.groupby("CLUSTER").sample(n=1)
 
-		features, labels, dists, chain_masks = [], [], [], []
+		features, labels, coords, chain_masks = [], [], [], []
 		for _, pdb in sampled_pdbs.iterrows():
 			
 			pdb_features = self.clusters[pdb.at["BIOUNIT"]]["features"]
-			pdb_pw_dists = self.clusters[pdb.at["BIOUNIT"]]["pw_dists"]
+			pdb_coords = self.clusters[pdb.at["BIOUNIT"]]["coords"]
 			pdb_labels = self.clusters[pdb.at["BIOUNIT"]]["labels"]
 			pdb_chain_idxs = self.clusters[pdb.at["BIOUNIT"]]["chain_idxs"]
 
 			if not pdb_features:
-				pdb_features, pdb_labels, pdb_pw_dists, pdb_chain_idxs = self.add_data(pdb)
+				pdb_features, pdb_labels, pdb_coords, pdb_chain_idxs = self.add_data(pdb)
 				if None in [pdb_features, pdb_labels, pdb_pw_dists, pdb_chain_idxs]: 
 					continue
 			else:
-				pdb_features, pdb_labels, pdb_pw_dists, pdb_chain_idxs = pdb_features[0], pdb_labels[0], pdb_pw_dists[0], pdb_chain_idxs[0]
-
+				pdb_features, pdb_labels, pdb_coords, pdb_chain_idxs = pdb_features[0], pdb_labels[0], pdb_coords[0], pdb_chain_idxs[0]
 
 			# create a chain mask
 			chain_start_idx, chain_end_idx = pdb_chain_idxs[pdb.at["CHAINID"].split("_")[-1]]
@@ -124,14 +123,14 @@ class Data(Dataset):
 
 			features.append(pdb_features)
 			labels.append(pdb_labels)
-			dists.append(pdb_pw_dists)
+			coords.append(pdb_coords)
 			chain_masks.append(pdb_chain_masks)
 
 
 		# stack into batches
 		self.features = torch.stack(features, dim=0).to(self.device)
 		self.labels = torch.stack(labels, dim=0).to(self.device)
-		self.dists = torch.stack(dists, dim=0).to(self.device)
+		self.coords = torch.stack(coords, dim=0).to(self.device)
 		self.chain_masks = torch.stack(chain_masks, dim=0).to(self.device)
 		self.key_padding_mask = (self.labels == -1).to(self.device)
 
@@ -144,7 +143,7 @@ class Data(Dataset):
 			pdb_data = torch.load(pdb_path, weights_only=True, map_location=self.device)
 			pdb_features = pdb_data["features"]
 			pdb_labels = pdb_data["labels"].long()
-			pdb_dists = pdb_data["pw_dists"]
+			pdb_coords = pdb_data["coords"]
 			pdb_chain_idxs = pdb_data["chain_idxs"]
 
 			if pdb_labels.size(0) <= self.max_size:
@@ -152,7 +151,7 @@ class Data(Dataset):
 		
 				self.clusters[pdb.at["BIOUNIT"]]["features"].append(pdb_features)
 				self.clusters[pdb.at["BIOUNIT"]]["labels"].append(pdb_labels)
-				self.clusters[pdb.at["BIOUNIT"]]["pw_dists"].append(pdb_dists)
+				self.clusters[pdb.at["BIOUNIT"]]["coords"].append(pdb_coords)
 				self.clusters[pdb.at["BIOUNIT"]]["chain_idxs"].append(pdb_chain_idxs)
 		
 				return pdb_features, pdb_labels, pdb_dists, pdb_chain_idxs
@@ -380,7 +379,7 @@ class DataCleaner():
 					"labels": labels[i], # N,
 					"chain_idxs": chain_masks[i] # {CHAINID: [start, end(exclusive)]}
 				}
-													# min_wl_max_wl_base
+
 				biounit_path = pdb_path / Path(f"{pdbid}_{i}.pt")
 				torch.save(biounit_data, biounit_path)
 
@@ -571,7 +570,7 @@ if __name__ == "__main__":
 	parser.add_argument("--clean_pdbs", default=True, type=bool, help="whether to clean the pdbs")
 
 	parser.add_argument("--data_path", default=Path("/gpfs_backup/wangyy_data/protAI/pmpnn_data/pdb_2021aug02"), type=Path, help="path where decompressed the PMPNN dataset")
-	parser.add_argument("--new_data_path", default=Path("/share/wangyy/hjc2538/proteusAI/pdb_2021aug02_filtered"), type=Path, help="path to write the filtered dataset")
+	parser.add_argument("--new_data_path", default=Path("/gpfs_backup/wangyy_data/protAI/pmpnn_data/pdb_2021aug02_filtered"), type=Path, help="path to write the filtered dataset")
 	parser.add_argument("--pdb_path", default=Path("pdb"), type=Path, help="path where pdbs are located, in the data_path parent directory")
 	parser.add_argument("--all_clusters_path", default=Path("list.csv"), type=Path, help="path where cluster csv is located within data_path")
 	parser.add_argument("--val_clusters_path", default=Path("valid_clusters.txt"), type=Path, help="path where valid clusters text file is located within data_path")
