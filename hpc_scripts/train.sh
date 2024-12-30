@@ -1,8 +1,8 @@
 #!/bin/bash
 
 #BSUB -n 1
-#BSUB -W 8:00
-#BSUB -R "rusage[mem=256GB]"
+#BSUB -W 1:00
+#BSUB -R "rusage[mem=32GB]"
 #BSUB -q gpu
 ##BSUB -R "select[h100]"
 ##BSUB -R "select[a100 || h100]"

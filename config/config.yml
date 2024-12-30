@@ -7,7 +7,7 @@ min_rbf: 0.1  # minimum rbf scaling factor in gaussian mha
 max_rbf: 0.9  # maximum rbf scaling factor in gaussian mha
 num_heads: 4  # number of attention heads to perform the training with
 decoder_layers: 4 # number of decoder layers
-hidden_linear_dim: 256  # intermediate dimensions of decoder feed forward layer
+hidden_linear_dim: 1024  # intermediate dimensions of decoder feed forward layer
 temperature: 0.1  # temperature for autoregressive inference (for testing)
 max_tokens: 10000  # maximum number of tokens
 include_ncaa: False # whether to include non-canonical amino acids in loss calculation
@@ -17,8 +17,8 @@ num_train: 128  # number of training samples to use; -1 means all available
 num_val: 128  # number of validation samples to use; -1 means all available
 num_test: 128  # number of test samples to use; -1 means all available
 epochs: 30  # number of epochs
-batch_size: 8  # batch size
-accumulation_steps: 4  # grad accumulation; how many batches to process before learning step
+batch_size: 32  # batch size
+accumulation_steps: 1  # grad accumulation; how many batches to process before learning step
 learning_step: 0.0001  # learning rate
 dropout: 0.1  # percentage of dropout
 label_smoothing: 0.0  # percentage of label smoothing to use on the output labels for loss calculation
@@ -38,14 +38,17 @@ training_type: "wf" # choices: wf, onehot, probs, or self_supervised
 phase_split: 0.5  # ratio of progressive learning phase
 expand_decoders: False
 
-# Input label smoothing
+# ------------------------------------------------------------------------------
+# these only apply to probs/self_supervised training type
+
+# Input label smoothing 
 initial_min_lbl_smooth_mean: 0.15  # initial minimum input label smoothing
 final_min_lbl_smooth_mean: 0.85  # final minimum input label smoothing
 max_lbl_smooth_mean: 1.05  # maximum input label smoothing
 min_lbl_smooth_stdev: 0.05  # minimum input label smoothing stdev
 max_lbl_smooth_stdev: 0.2  # maximum input label smoothing stdev
 
-# Input noise
+# Input noise (
 min_noise_stdev: 0.1  # minimum mean of noise to apply to inputs
 initial_max_noise_stdev: 0.2  # initial maximum mean of noise to apply to inputs
 final_max_noise_stdev: 0.1  # final maximum mean of noise to apply to inputs
@@ -60,12 +63,14 @@ final_max_one_hot_injection_mean: 0.5  # final maximum mean percentage of one-ho
 one_hot_injection_stdev: 0.25  # stdev percentage of one-hot label injection in training
 one_hot_injection_cycle_length: 7.4  # input one-hot injection cycle length
 
+# ------------------------------------------------------------------------------
+
 # Output
 out_path: "/share/wangyy/hjc2538/proteusAI/models/initial_test"  # path to store output, such as plots and weights file
 loss_plot: "loss_vs_epoch.png"  # path to save plot of loss vs epochs after training
 seq_plot: "seq_sim_vs_epoch.png"  # path to save plot of sequence similarity vs epochs after training
 weights_path: "model_parameters.pth"  # path to save weights after training
-write_dot: False  # whether to save the dot file of the computational graph
+write_dot: True  # whether to save the dot file of the computational graph
 
 # Input
 data_path: "/share/wangyy/hjc2538/proteusAI/pdb_2021aug02_filtered"  # path to data

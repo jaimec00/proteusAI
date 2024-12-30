@@ -498,6 +498,7 @@ def _attn_bwd(
 	tl.store(dVj_block_ptr, dVj, boundary_check=(0,1))
 
 def attn(Q, K, V, coords, spreads, mask=None, context_mask=None, min_rbf=0.1, max_rbf=0.9):
+	'''wrapper for attn so can call it with kwargs'''
 
 	return _attn.apply(Q, K, V, coords, spreads, mask, context_mask, min_rbf, max_rbf)
 
@@ -516,11 +517,24 @@ class _attn(torch.autograd.Function):
 		assert spreads.size(0) == nheads, f"number of spreads must be equal to nheads, not {spreads.size(0)=} and {nheads=}"
 		assert torch.all(spreads > 0), f"spreads must be a tensor of positive, non-zero floats, not {spreads}"
 
+		# save input dtypes, convert to float32 for computation, and cast back to original afterwards in backwards pass (for dQ, dK, dV)
+		ctx.Q_dtype = Q.dtype
+		ctx.K_dtype = K.dtype
+		ctx.V_dtype = V.dtype
+
+		Q = Q.to(torch.float32)
+		K = K.to(torch.float32)
+		V = V.to(torch.float32)
+		coords = coords.to(torch.float32)
+		spreads = spreads.to(torch.float32)
+
 		# initialize mask, output, and logsumexp tensors
-		mask = (torch.ones(batch, N, device=Q.device) if mask is None else ~mask).contiguous() # batch x N
+		mask = (torch.ones(batch, N, dtype=torch.bool, device=Q.device) if mask is None else ~mask).contiguous() # batch x N
 		context_mask = (mask if context_mask is None else ~context_mask).contiguous() # batch x N
-		out = torch.zeros(batch, nheads, N, d_k, device=Q.device).contiguous() # batch x N x d_model
-		L = torch.zeros(batch, nheads, N, device=Q.device).contiguous() # batch x nheads x N
+		out = torch.zeros(batch, nheads, N, d_k, dtype=torch.float32, device=Q.device).contiguous() # batch x N x d_model
+		L = torch.zeros(batch, nheads, N, dtype=torch.float32, device=Q.device).contiguous() # batch x nheads x N
+		min_dists = torch.sqrt(2*(spreads**2)*math.log(1/max_rbf)).contiguous()
+		max_dists = torch.sqrt(2*(spreads**2)*math.log(1/min_rbf)).contiguous()
 
 		# make sure everything is contiguous
 		Q = Q.contiguous()
@@ -528,9 +542,6 @@ class _attn(torch.autograd.Function):
 		V = V.contiguous()
 		coords = coords.contiguous()
 		spreads = spreads.contiguous()
-
-		min_dists = torch.sqrt(2*(spreads**2)*math.log(1/max_rbf))
-		max_dists = torch.sqrt(2*(spreads**2)*math.log(1/min_rbf))
 
 		# define block sizes (minimum of 16, as tl.dot needs all dimensions to be >=16)
 		BLOCK_I = 32 if d_k <= 64 else 16
@@ -569,8 +580,11 @@ class _attn(torch.autograd.Function):
 	@staticmethod
 	def backward(ctx, dO):
 
-		# load saved tensors
+		# load saved tensors (should all be float32, expect masks). also should all be contiguous from fwd
 		Q, K, V, O, L, coords, spreads, mask, context_mask = ctx.saved_tensors
+
+		# cast to float32
+		dO = dO.to(torch.float32).contiguous()
 
 		# compute D for dS calculation
 		D = torch.sum(O*dO, dim=3) # Z x H x N x D -> Z x H x N
@@ -582,16 +596,6 @@ class _attn(torch.autograd.Function):
 		# checks
 		assert Q.stride() == K.stride() == V.stride() == O.stride()
 		batch, nheads, N, d_k = Q.shape 
-
-		# make everything contiguous in memory
-		Q.contiguous()
-		K.contiguous()
-		V.contiguous()
-		D.contiguous()
-		L.contiguous()
-		coords.contiguous()
-		spreads.contiguous()
-		mask.contiguous()
 
 		# define block sizes
 		BLOCK_I = 32 if d_k <= 64 else 16
@@ -628,6 +632,10 @@ class _attn(torch.autograd.Function):
 							batch, N, nheads, d_k, max(d_k, 16), ctx.softmax_scale, ctx.min_rbf,
 							BLOCK_I, BLOCK_J
 						 )
+
+		dQ = dQ.to(ctx.Q_dtype)
+		dK = dK.to(ctx.K_dtype)
+		dV = dV.to(ctx.V_dtype)
 
 		# return the gradients
 		return dQ, dK, dV, None, None, None, None, None, None

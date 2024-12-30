@@ -51,7 +51,7 @@ class TrainingRun():
 
 	def __init__(self, args):
 
-		self.hyper_parameters = HyperParameters(args.input_atoms, args.d_model,
+		self.hyper_parameters = HyperParameters(args.d_model,
 												args.min_wl, args.max_wl, args.base,
 												args.min_rbf, args.max_rbf, 
 												args.num_heads, args.decoder_layers, 
@@ -74,7 +74,7 @@ class TrainingRun():
 																			self.training_parameters.use_onehot, self.training_parameters.use_probs ) 
 		
 		feature_path = f"{args.min_wl}_{args.max_wl}_{args.base}"
-		self.data = DataHolder(args.data_path, args.num_train, args.num_val, args.num_test, args.max_tokens, feature_path)
+		self.data = DataHolder(args.data_path, args.num_train, args.num_val, args.num_test, args.max_tokens, args.batch_size, feature_path, args.include_ncaa)
 		self.output = Output(args.out_path, args.loss_plot, args.seq_plot, args.weights_path, args.write_dot)
 
 		self.train_losses = {

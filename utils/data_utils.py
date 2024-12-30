@@ -39,12 +39,14 @@ class DataHolder(Dataset):
 	hold Data Objects, one each for train, test and val
 	'''
 
-	def __init__(self, data_path, num_train, num_val, num_test, max_size=10000, batch_size=32):
+	def __init__(self, data_path, num_train, num_val, num_test, max_size=10000, batch_size=32, feature_path="3.7_20.0_20.0", include_ncaa=False):
 
 		torch.serialization.add_safe_globals([defaultdict, list])
 
 		self.data_path = data_path
 		self.batch_size = batch_size
+		self.feature_path = feature_path
+		self.include_ncaa = include_ncaa
 
 		pdb_info_path = data_path / Path("list.csv")
 		val_clusters_path = data_path / Path("valid_clusters.txt")
@@ -79,18 +81,19 @@ class DataHolder(Dataset):
 
 	def load(self, data_type):
 		if data_type == "train":
-			self.train_data = Data(self.data_path, self.train_pdbs, self.num_train, self.max_size)
+			self.train_data = Data(self.data_path, self.train_pdbs, self.num_train, self.max_size, self.feature_path, self.include_ncaa)
 			self.train_data_loader = DataLoader(self.train_data, self.batch_size, shuffle=True)
 		elif data_type == "val":
-			self.val_data = Data(self.data_path, self.val_pdbs, self.num_val, self.max_size)	
+			self.val_data = Data(self.data_path, self.val_pdbs, self.num_val, self.max_size, self.feature_path, self.include_ncaa)	
 			self.val_data_loader = DataLoader(self.val_data, self.batch_size, shuffle=True)
 		elif data_type == "test":	
-			self.test_data = Data(self.data_path, self.test_pdbs, self.num_test, self.max_size)
+			self.test_data = Data(self.data_path, self.test_pdbs, self.num_test, self.max_size, self.feature_path, self.include_ncaa)
 			self.test_data_loader = DataLoader(self.test_data, self.batch_size, shuffle=True)
 		
 class Data(Dataset):
-	def __init__(self, data_path, clusters_df, num_samples=None, max_size=10000, feature_path="3.7_20.0_20", include_ncaa=False, device="cpu"):
+	def __init__(self, data_path, clusters_df, num_samples=None, max_size=10000, feature_path="3.7_20.0_20.0", include_ncaa=False, device="cpu"):
 		self.pdb_path = data_path / Path("pdb") / Path(feature_path)
+		self.include_ncaa = include_ncaa
 		self.max_size = max_size
 		self.device = device
 		self.clusters_df = clusters_df
@@ -111,7 +114,7 @@ class Data(Dataset):
 
 			if not pdb_features:
 				pdb_features, pdb_labels, pdb_coords, pdb_chain_idxs = self.add_data(pdb)
-				if None in [pdb_features, pdb_labels, pdb_pw_dists, pdb_chain_idxs]: 
+				if None in [pdb_features, pdb_labels, pdb_coords, pdb_chain_idxs]: 
 					continue
 			else:
 				pdb_features, pdb_labels, pdb_coords, pdb_chain_idxs = pdb_features[0], pdb_labels[0], pdb_coords[0], pdb_chain_idxs[0]
@@ -145,7 +148,7 @@ class Data(Dataset):
 			pdb_data = torch.load(pdb_path, weights_only=True, map_location=self.device)
 			pdb_features = pdb_data["features"]
 			pdb_labels = pdb_data["labels"]
-			if not include_ncaa: # mask out ncaa
+			if not self.include_ncaa: # mask out non-canonical amino acids
 				pdb_labels = torch.where(pdb_labels==20, -1, pdb_labels)	
 			pdb_coords = pdb_data["coords"]
 			pdb_chain_idxs = pdb_data["chain_idxs"]
