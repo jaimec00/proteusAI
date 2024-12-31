@@ -104,7 +104,8 @@ class Data(Dataset):
 		
 		sampled_pdbs = self.clusters_df.groupby("CLUSTER").sample(n=1)
 
-		features, labels, coords, chain_masks = [], [], [], []
+		features, labels, coords, chain_idxs = [], [], [], []
+		load_pbar = tqdm(total=len(sampled_pdbs), desc="data loading_progress", unit="step")
 		for _, pdb in sampled_pdbs.iterrows():
 			
 			pdb_features = self.clusters[pdb.at["BIOUNIT"]]["features"]
@@ -120,24 +121,20 @@ class Data(Dataset):
 				pdb_features, pdb_labels, pdb_coords, pdb_chain_idxs = pdb_features[0], pdb_labels[0], pdb_coords[0], pdb_chain_idxs[0]
 
 			# create a chain mask for loss compuation
-			chain_start_idx, chain_end_idx = pdb_chain_idxs[pdb.at["CHAINID"].split("_")[-1]]
-			pdb_chain_masks = torch.ones(pdb_labels.shape, dtype=torch.bool)
-			pdb_chain_masks[chain_start_idx:chain_end_idx] = False
-
+			pdb_chain_idxs = pdb_chain_idxs[pdb.at["CHAINID"].split("_")[-1]]
+			
 			features.append(pdb_features)
 			labels.append(pdb_labels)
 			coords.append(pdb_coords)
-			chain_masks.append(pdb_chain_masks)
+			chain_idxs.append(pdb_chain_idxs)
 
-		# pad and stack into batches
-		features, labels, coords, chain_masks, key_padding_mask = self.pad_tensors(features, labels, coords, chain_masks)
+			load_pbar.update(1)
 
 		# send to device and have them ready for next epoch
-		self.features = features.to(self.device)
-		self.labels = labels.to(self.device)
-		self.coords = coords.to(self.device)
-		self.chain_masks = chain_masks.to(self.device)
-		self.key_padding_mask =  key_padding_mask.to(self.device)
+		self.features = features
+		self.labels = labels
+		self.coords = coords
+		self.chain_idxs = chain_idxs
 
 	def add_data(self, pdb):
 
@@ -164,65 +161,50 @@ class Data(Dataset):
 
 		return None, None, None, None
 
-	def pad_tensors(self, features, labels, coords, chain_masks):
+	def pad_tensor(self, tensor, pad_val="zero"):
 
-		def pad_and_batch(tensor_list, pad_val="zero", dims=1):
-			if pad_val=="zero":
-				pad = torch.zeros
-				weight = 1
-				bias = 0
-			elif pad_val=="one":
-				pad = torch.ones
-				weight = 1
-				bias = 0
-			elif pad_val=="-one":
-				pad = torch.ones
-				weight = -1
-				bias = 0
-			elif pad_val=="inf":
-				pad = torch.zeros
-				weight = 1
-				bias = float("inf")
-			else:
-				raise ValueError(f"invalid padding option {pad_val=}")
-
-
-			tensor = torch.stack([	torch.cat( 
-											(	sample, 
-												weight*pad(
-															[self.max_size - sample.size(0)] + [sample.size(i) for i in range(1,dims)], 
-															dtype=sample.dtype, device=sample.device
-														) + bias
-											), dim=0
-										) for sample in tensor_list
-									], dim=0
-								)			
-			return tensor
+		if pad_val=="zero":
+			pad = torch.zeros
+			weight = 1
+			bias = 0
+		elif pad_val=="one":
+			pad = torch.ones
+			weight = 1
+			bias = 0
+		elif pad_val=="-one":
+			pad = torch.ones
+			weight = -1
+			bias = 0
+		elif pad_val=="inf":
+			pad = torch.zeros
+			weight = 1
+			bias = float("inf")
+		else:
+			raise ValueError(f"invalid padding option {pad_val=}")
 
 
-		features = pad_and_batch(features, pad_val="zero", dims=features[0].dim()).to(torch.float32)
-		labels = pad_and_batch(labels, pad_val="-one", dims=labels[0].dim()).to(torch.int64)
-		coords = pad_and_batch(coords, pad_val="inf", dims=coords[0].dim()).to(torch.float32)
-		chain_masks = pad_and_batch(chain_masks, pad_val="one", dims=chain_masks[0].dim()).to(torch.bool)
-		key_padding_mask = (labels==-1).to(torch.bool)
+		pad_shape = [self.max_size - tensor.size(0)] + [tensor.size(i) for i in range(1,tensor.dim())]
+		pad_tensor = weight*pad(pad_shape, dtype=tensor.dtype, device=tensor.device) + bias
+		tensor = torch.cat((tensor, pad_tensor), dim=0)
 
-		return features, labels, coords, chain_masks, key_padding_mask 
+		return tensor
 
 	def __len__(self):
-		return self.features.size(0)
+		return len(self.features)
 	
 	def __getitem__(self, idx):
 
-		item = self.features[idx]
-		label = self.labels[idx]
-		coords = self.coords[idx]
-		chain_mask = self.chain_masks[idx]
-		key_padding_mask = self.key_padding_mask[idx]
+		# pad on the fly, so the tensors in memory are not all max_size, only padded as needed
+
+		item = self.pad_tensor(self.features[idx], pad_val="zero").to(self.device)
+		label = self.pad_tensor(self.labels[idx], pad_val="-one").to(self.device)
+		coords = self.pad_tensor(self.coords[idx], pad_val="inf").to(self.device)
+		chain_start_idx, chain_end_idx = self.chain_idxs[idx]
+		chain_mask = torch.ones(label.shape, dtype=torch.bool, device=self.device)
+		chain_mask[chain_start_idx:chain_end_idx] = False # pad values are placed after the sequence, so idxs are still correct
+		key_padding_mask = label==-1
 		
 		return item, label, coords, chain_mask, key_padding_mask
-
-	def unit_test(self):
-		pass
 
 class DataCleaner():
 

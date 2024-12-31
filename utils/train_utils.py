@@ -61,9 +61,9 @@ class TrainingRun():
 		self.training_parameters = TrainingParameters(  args.epochs, args.batch_size, 
 														args.accumulation_steps, args.learning_step, 
 														args.dropout, args.label_smoothing, args.include_ncaa,
-														args.loss_type, args.lr_scale, args.lr_patience,
+														args.loss_type, args.loss_sum_norm, args.lr_scale, args.lr_patience,
 														args.phase_split, args.expand_decoders, args.training_type,
-														args.use_amp, args.use_checkpoint )
+														args.use_amp, args.use_checkpoint, args.use_chain_mask )
 		
 		self.input_perturbation_parameters = InputPerturbationParameters(	args.initial_min_lbl_smooth_mean, args.final_min_lbl_smooth_mean, 
 																			args.max_lbl_smooth_mean, args.min_lbl_smooth_stdev, args.max_lbl_smooth_stdev, 
@@ -185,8 +185,8 @@ class TrainingRun():
 			None
 		'''
 
-		self.output.log.info("loading loss function...")
-		self.loss_function = nn.CrossEntropyLoss(ignore_index=-1, reduction=self.training_parameters.loss_type, label_smoothing=self.training_parameters.label_smoothing)
+		self.output.log.info("loading loss function...") 
+		self.loss_function = nn.CrossEntropyLoss(ignore_index=-1, reduction="none", label_smoothing=self.training_parameters.label_smoothing)
 
 	def train(self):
 		'''
@@ -241,15 +241,19 @@ class TrainingRun():
 			# loop through validation batches
 			for feature_batch, label_batch, coords_batch, chain_mask, key_padding_mask in self.data.val_data_loader:
 
+				if not self.training_parameters.use_chain_mask:
+					chain_mask = None
+
 				batch = Batch(feature_batch, label_batch, coords_batch, chain_mask, key_padding_mask, 
-							use_probs=self.training_parameters.use_probs, use_amp=False, auto_regressive=False)
+							use_probs=self.training_parameters.use_probs, use_amp=False, auto_regressive=False,
+							loss_type=self.training_parameters.loss_type,
+							loss_sum_norm=self.training_parameters.loss_sum_norm)
 				input_perturbations.apply_perturbations(batch)
 				batch.batch_forward(self.model, self.loss_function, self.gpu)
 
 				# store losses
 				loss, seq_sim = batch.outputs.losses["output"].get_avg()
-				valid_toks = float(torch.sum(batch.labels != -1)) if self.loss_function.reduction == "sum" else 1 
-				val_losses.add_losses(float(loss.item()) / valid_toks, seq_sim)
+				val_losses.add_losses(float(loss.item()), seq_sim)
 
 		self.val_losses.add_losses(*val_losses.get_avg())
 		self.output.log_val_losses(val_losses)
@@ -271,20 +275,23 @@ class TrainingRun():
 
 			# loop through testing batches
 			for feature_batch, label_batch, coords_batch, chain_mask, key_padding_mask in self.data.test_data_loader:
-				
+
+				if not self.training_parameters.use_chain_mask:
+					chain_mask = None
+					
 				batch = Batch(feature_batch, label_batch, coords_batch, chain_mask, key_padding_mask, 
 								use_probs=self.training_parameters.use_probs, use_amp=False, 
 								auto_regressive=self.training_parameters.auto_regressive, 
-								temp=self.hyper_parameters.temperature)
+								temp=self.hyper_parameters.temperature, loss_type=self.training_parameters.loss_type,
+								loss_sum_norm=self.training_parameters.loss_sum_norm)
 
 				input_perturbations.apply_perturbations(batch)
 				batch.batch_forward(self.model, self.loss_function, self.gpu)
 
 				loss, seq_sim = batch.outputs.losses["output"].get_avg()
 				_, ar_seq_sim = batch.outputs.losses["ar_output"].get_avg()
-				valid_toks = float(torch.sum(batch.labels != -1)) if self.loss_function.reduction == "sum" else 1 
 				
-				test_losses.append(float(loss.item()) / valid_toks)
+				test_losses.append(float(loss.item()) )
 				test_seq_sims.append(seq_sim)
 				test_ar_seq_sims.append(ar_seq_sim)
 		
@@ -352,11 +359,15 @@ class Epoch():
 		# loop through batches
 		epoch_pbar = tqdm(total=len(self.training_run_parent.data.train_data_loader), desc="epoch_progress", unit="step")
 		for b_idx, (feature_batch, label_batch, coords_batch, chain_mask, key_padding_mask) in enumerate(self.training_run_parent.data.train_data_loader):
-			
+
+			if not self.training_run_parent.training_parameters.use_chain_mask:
+				chain_mask = None
+					
 			batch = Batch(feature_batch, label_batch, coords_batch, chain_mask, key_padding_mask, 
 						b_idx=b_idx, epoch=self, use_probs=self.training_run_parent.training_parameters.use_probs, 
 						use_amp=self.training_run_parent.training_parameters.use_amp, include_ncaa=self.training_run_parent.training_parameters.include_ncaa,
-						use_checkpoint=self.training_run_parent.training_parameters.use_checkpoint)
+						use_checkpoint=self.training_run_parent.training_parameters.use_checkpoint, loss_type=self.training_run_parent.training_parameters.loss_type,
+						loss_sum_norm=self.training_run_parent.training_parameters.loss_sum_norm)
 			batch.batch_learn()
 			# normalize by number of valid tokens if computing sum, else it is already normalized
 			self.gather_batch_losses(batch, normalize=self.training_run_parent.loss_function.reduction=="sum")
@@ -413,18 +424,18 @@ class Batch():
 	def __init__(self, features, labels, coords, chain_mask, key_padding_mask, 
 					b_idx=None, epoch=None, use_probs=False, 
 					use_amp=True, auto_regressive=False, temp=0.1, include_ncaa=False,
-					use_checkpoint=True):
+					use_checkpoint=True, loss_type="sum", loss_sum_norm=2000):
 
 		self.features = features
 		self.labels = labels
 		self.coords = coords 
-		self.chain_mask = chain_mask 
+		self.chain_mask = chain_mask if chain_mask is not None else torch.zeros(labels.shape, dtype=torch.bool, device=labels.device) 
 		self.use_probs = use_probs
 		self.use_amp = use_amp
 		self.use_checkpoint = use_checkpoint
 		num_aas = 20 if not include_ncaa else 21
 		if self.use_probs:
-			self.predictions = torch.full(self.labels.shape, 1/num_ass).unsqueeze(-1).expand(-1,-1,num_aas)
+			self.predictions = torch.full(self.labels.shape, 1/num_aas).unsqueeze(-1).expand(-1,-1,num_aas)
 		else:
 			self.predictions = torch.zeros(self.labels.shape).unsqueeze(-1).expand(-1,-1,num_aas)
 
@@ -438,6 +449,9 @@ class Batch():
 		self.use_amp = use_amp
 		self.auto_regressive = auto_regressive
 		self.temp = temp
+
+		self.loss_type = loss_type
+		self.loss_sum_norm = loss_sum_norm
 
 		self.outputs = None
 
@@ -500,7 +514,7 @@ class Batch():
 		else:
 			self.outputs = self.get_outputs(model)
 
-		self.outputs.get_losses(loss_function)
+		self.outputs.get_losses(loss_function, loss_type=self.loss_type, sum_norm=self.loss_sum_norm)
 
 	def batch_backward(self):
 
@@ -556,7 +570,7 @@ class Batch():
 			self_prediction_batch = output_prediction.detach()
 
 			# get percentages
-			self_prediction_batch = F.softmax(self_prediction_batch, dim=-1)
+			self_prediction_batch = torch.softmax(self_prediction_batch, dim=-1)
 
 			# replace with original one hots
 			self_prediction_batch = torch.where((self.onehot_mask | self.key_padding_mask).unsqueeze(-1), self.predictions, self_prediction_batch)
@@ -608,6 +622,8 @@ class ModelOutputs():
 
 	def compute_cel(self, prediction, num_classes=20):
 
+		prediction = torch.softmax(prediction, dim=-1)
+
 		# Flatten the tensor to simplify indexing for CEL calculation
 		prediction_flat = prediction.contiguous().view(-1, num_classes)
 		labels_flat = self.labels.view(-1)
@@ -625,7 +641,7 @@ class ModelOutputs():
 
 		return cel
 
-	def compute_cel_and_seq_sim(self, prediction, loss_function=None, num_classes=20):
+	def compute_cel_and_seq_sim(self, prediction, loss_function=None, loss_type="sum", sum_norm=2000):
 		"""
 		Compute the mean cross-entropy loss (CEL) and sequence similarity (accuracy) between
 		the original label batch and the noised & smoothed label batch.
@@ -640,7 +656,18 @@ class ModelOutputs():
 			mean_seq_sim (float): The mean sequence similarity (accuracy) over all valid positions.
 		"""
 
-		cel = loss_function(prediction.permute(0, 2, 1), self.labels.long()) if loss_function else self.compute_cel(prediction)
+		cel = loss_function(prediction.view(-1, prediction.size(2)).to(torch.float32), self.labels.view(-1).long()) if loss_function else self.compute_cel(prediction)
+		
+		valid = self.labels.view(-1)!=-1
+		
+		# doing manual calculation because needs to be float32 or get overflow in sum
+		cel_sum = (cel*valid).sum()
+		
+		if loss_type == "sum":
+			cel = cel_sum / sum_norm
+		elif loss_type == "mean":
+			cel = cel_sum / valid.sum()
+
 		seq_sim = self.compute_seq_sim(prediction)
 
 
@@ -649,7 +676,7 @@ class ModelOutputs():
 	def get_valid(self):
 		return (self.labels != -1).sum()
 
-	def get_losses(self, loss_function):
+	def get_losses(self, loss_function, loss_type="sum", sum_norm=2000):
 
 		for prediction, prediction_loss in zip(	
 												[self.input_predictions, self.output_predictions,
@@ -660,7 +687,7 @@ class ModelOutputs():
 											):
 
 			# for some reason gives tuple to cel and None to seq sim if do 'cel, seq_sim = self.compute...'
-			cel_and_seq_sim = self.compute_cel_and_seq_sim(prediction, loss_function) if prediction is not None else (None, None)
+			cel_and_seq_sim = self.compute_cel_and_seq_sim(prediction, loss_function, loss_type, sum_norm) if prediction is not None else (None, None)
 			cel, seq_sim = cel_and_seq_sim
 			prediction_loss.add_losses(cel, seq_sim)
 
