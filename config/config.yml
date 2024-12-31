@@ -23,6 +23,9 @@ epochs: 10  # number of epochs
 batch_size: 16  # batch size
 accumulation_steps: 2  # grad accumulation; how many batches to process before learning step
 learning_step: 0.0001  # learning rate
+beta1: 0.9  # learning rate
+beta2: 0.98  # learning rate
+epsilon: 10e-9  # learning rate
 dropout: 0.1  # percentage of dropout
 label_smoothing: 0.1  # percentage of label smoothing to use on the output labels for loss calculation
 loss_type: "sum"  # whether to use the 'sum' or the 'mean' for CEL

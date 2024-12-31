@@ -60,6 +60,7 @@ class TrainingRun():
 		
 		self.training_parameters = TrainingParameters(  args.epochs, args.batch_size, 
 														args.accumulation_steps, args.learning_step, 
+														args.beta1, args.beta2, args.epsilon, 
 														args.dropout, args.label_smoothing, args.include_ncaa,
 														args.loss_type, args.loss_sum_norm, args.lr_scale, args.lr_patience,
 														args.phase_split, args.expand_decoders, args.training_type,
@@ -157,7 +158,9 @@ class TrainingRun():
 		'''
 
 		self.output.log.info("loading optimizer...")
-		self.optim = torch.optim.Adam(self.model.parameters(), lr=self.training_parameters.learning_step)
+		self.optim = torch.optim.Adam(self.model.parameters(), lr=self.training_parameters.learning_step, 
+									beta=(self.training_parameters.beta1, self.training_parameters.beta2), 
+									eps=self.training_parameters.epsilon)
 		self.optim.zero_grad()
 
 	def setup_scheduler(self):

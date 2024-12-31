@@ -293,13 +293,16 @@ class HyperParameters():
 
 class TrainingParameters():
 
-	def __init__(self, epochs, batch_size, accumulation_steps, learning_step, dropout, label_smoothing, include_ncaa, 
+	def __init__(self, epochs, batch_size, accumulation_steps, learning_step, beta1, beta2, epsilon, dropout, label_smoothing, include_ncaa, 
 				loss_type, loss_sum_norm, lr_scale, lr_patience, phase_split, expand_decoders, training_type, use_amp, use_checkpoint, use_chain_mask
 				):
 		self.epochs = epochs
 		self.batch_size = batch_size
 		self.accumulation_steps = accumulation_steps
 		self.learning_step = learning_step
+		self.beta1 = beta1
+		self.beta2 = beta2
+		self.epsilon = epsilon
 		self.dropout = dropout
 		self.label_smoothing = label_smoothing
 		self.include_ncaa = include_ncaa

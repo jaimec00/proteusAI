@@ -15,7 +15,7 @@ from torch.utils.data import DataLoader
 from Bio.Data.IUPACData import protein_letters_3to1
 from Bio.PDB import PDBParser
 
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
 from multiprocessing import Manager
 from collections import defaultdict
 import multiprocessing as mp
@@ -105,8 +105,9 @@ class Data(Dataset):
 		sampled_pdbs = self.clusters_df.groupby("CLUSTER").sample(n=1)
 
 		features, labels, coords, chain_idxs = [], [], [], []
-		load_pbar = tqdm(total=len(sampled_pdbs), desc="data loading_progress", unit="step")
-		for _, pdb in sampled_pdbs.iterrows():
+		load_pbar = tqdm(total=len(sampled_pdbs), desc="data loading progress", unit="step")
+
+		def process_pdb(pdb):
 			
 			pdb_features = self.clusters[pdb.at["BIOUNIT"]]["features"]
 			pdb_coords = self.clusters[pdb.at["BIOUNIT"]]["coords"]
@@ -116,19 +117,31 @@ class Data(Dataset):
 			if not pdb_features:
 				pdb_features, pdb_labels, pdb_coords, pdb_chain_idxs = self.add_data(pdb)
 				if None in [pdb_features, pdb_labels, pdb_coords, pdb_chain_idxs]: 
-					continue
+					return None
 			else:
 				pdb_features, pdb_labels, pdb_coords, pdb_chain_idxs = pdb_features[0], pdb_labels[0], pdb_coords[0], pdb_chain_idxs[0]
 
 			# create a chain mask for loss compuation
 			pdb_chain_idxs = pdb_chain_idxs[pdb.at["CHAINID"].split("_")[-1]]
-			
-			features.append(pdb_features)
-			labels.append(pdb_labels)
-			coords.append(pdb_coords)
-			chain_idxs.append(pdb_chain_idxs)
 
-			load_pbar.update(1)
+			return pdb_features, pdb_labels, pdb_coords, pdb_chain_idxs
+
+		# parallel execution
+		with ThreadPoolExecutor(max_workers=8) as executor:
+			# submit tasks
+			futures = {executor.submit(process_pdb, pdb): pdb for _, pdb in sampled_pdbs.iterrows()}
+			
+			# collect results
+			for future in as_completed(futures):
+
+				result = future.result()
+				if result is not None:  # Ignore failed results
+					pdb_features, pdb_labels, pdb_coords, pdb_chain_idxs = result
+					features.append(pdb_features)
+					labels.append(pdb_labels)
+					coords.append(pdb_coords)
+					chain_idxs.append(pdb_chain_idxs)
+				load_pbar.update(1)
 
 		# send to device and have them ready for next epoch
 		self.features = features
