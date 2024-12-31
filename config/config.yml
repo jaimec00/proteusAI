@@ -21,7 +21,7 @@ num_val: -1  # number of validation samples to use; -1 means all available
 num_test: -1  # number of test samples to use; -1 means all available
 epochs: 10  # number of epochs
 batch_size: 16  # batch size
-accumulation_steps: 2  # grad accumulation; how many batches to process before learning step
+accumulation_steps: 1  # grad accumulation; how many batches to process before learning step
 learning_step: 0.0001  # learning rate
 beta1: 0.9  # learning rate
 beta2: 0.98  # learning rate

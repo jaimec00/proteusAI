@@ -1,7 +1,7 @@
 #!/bin/bash
 
 #BSUB -n 1
-#BSUB -W 2:00
+#BSUB -W 1:00
 #BSUB -R "rusage[mem=32GB]"
 #BSUB -q gpu
 #BSUB -R "select[h100]"
@@ -25,4 +25,5 @@ export TRITON_CACHE_DIR="/share/wangyy/hjc2538/proteusAI/.triton/cache"
 
 export CUDA_VISIBLE_DEVICES=0
 export CUDA_LAUNCH_BLOCKING=1
-python -u learn_seqs.py --config config/config.yml
+export PYTHONPATH="/home/hjc2538/ondemand/data/sys/myjobs/projects/proteusAI"
+python -u tests/gauss_attn.py

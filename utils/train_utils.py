@@ -2,7 +2,7 @@
 '''
 author: 		jaime cardenas
 title:  		train_utils.py
-description:	utility classes for training. organize 
+description:	utility classes for training
 '''
 # ----------------------------------------------------------------------------------------------------------------------
 

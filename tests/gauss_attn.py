@@ -12,7 +12,7 @@ def main():
 	device = torch.device("cuda")
 
 	# prepare inputs
-	batch, nheads, N, d_model = 2, 4, 10000, 256
+	batch, nheads, N, d_model = 16, 8, 10000, 512
 	assert d_model%2==0 and d_model%nheads==0
 	d_k = d_model // nheads
 	min_wl, max_wl, base = 3.7, 20, 20
@@ -44,7 +44,7 @@ def main():
 	print("forward pass:\n")
 
 	params = [Q, K, V, coords, spreads, mask, context_mask, min_rbf, max_rbf]
-	torch_out, triton_out = test_fwd(torch_attn, attn, params, start_event, end_event, atol, rtol)
+	torch_out, triton_out = test_fwd(attn, attn, params, start_event, end_event, atol, rtol)
 
 	print("\nbackward pass:\n")
 
