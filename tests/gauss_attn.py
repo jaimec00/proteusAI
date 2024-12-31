@@ -12,11 +12,11 @@ def main():
 	device = torch.device("cuda")
 
 	# prepare inputs
-	batch, nheads, N, d_model = 1, 8, 10000, 512
+	batch, nheads, N, d_model = 2, 4, 10000, 256
 	assert d_model%2==0 and d_model%nheads==0
 	d_k = d_model // nheads
 	min_wl, max_wl, base = 3.7, 20, 20
-	min_rbf, max_rbf = 0.2, 0.9
+	min_rbf, max_rbf = 0.1, 0.9
 
 	coords = 3.7 * torch.normal(mean=0, std=1, size=(batch, N, 1), dtype=torch.float32, device=device).expand(batch, N, 3) # batch x N x 3
 

@@ -72,6 +72,26 @@ def _attn_fwd(
 		order=(0, 1)
 	)
 
+	# load coordinates for I rows
+	coords_I_ptr = tl.make_block_ptr(
+		base=coords_ptr + (offs_Z*stride_coords_Z),
+		shape=(tot_N, 3),
+		strides=(stride_coords_N, stride_coords_S),
+		offsets=(offs_I, 0),
+		block_shape=(BLOCK_I, 4), # tensor need to be power of 2, 4th value is masked (x,y,z,mask)
+		order=(0, 1)
+	)
+
+		# create mask pointer for Q/O rows and load
+	mask_i_ptr = tl.make_block_ptr( # N,
+		base=mask_ptr + (offs_Z*stride_mask_Z),
+		shape=(tot_N, ),
+		strides=(stride_mask_N, ),
+		offsets=(offs_I, ),
+		block_shape=(BLOCK_I, ),
+		order=(0, )
+	)
+
 	# transpose k when loading directly by flipping N and D,
 	KjT_block_ptr = tl.make_block_ptr( # d_k x N
 		base=K_ptr + (offs_Z*stride_K_Z) + (offs_H*stride_K_H),
@@ -91,37 +111,6 @@ def _attn_fwd(
 		order=(0, 1)
 	)
 
-	# load the Qi block first, out of bounds values are 0, stays in SRAM throughout
-	Qi = tl.load(Qi_block_ptr, boundary_check=(0,1), padding_option="zero") # N x d_k
-
-	# initialize output and statistics block
-	Oi = tl.zeros_like(Qi)
-	li = tl.zeros((BLOCK_I, ), dtype=tl.float32)
-	inf = float("inf")
-	mi = tl.zeros_like(li) - inf
-
-	# create mask pointer for Q/O rows and load
-	mask_i_ptr = tl.make_block_ptr( # N,
-		base=mask_ptr + (offs_Z*stride_mask_Z),
-		shape=(tot_N, ),
-		strides=(stride_mask_N, ),
-		offsets=(offs_I, ),
-		block_shape=(BLOCK_I, ),
-		order=(0, )
-	)
-	mask_i = tl.load(mask_i_ptr, boundary_check=(0,), padding_option="zero").to(tl.int1) # N x d_k
-
-	# load coordinates for I rows
-	coords_I_ptr = tl.make_block_ptr(
-		base=coords_ptr + (offs_Z*stride_coords_Z),
-		shape=(tot_N, 3),
-		strides=(stride_coords_N, stride_coords_S),
-		offsets=(offs_I, 0),
-		block_shape=(BLOCK_I, 4), # tensor need to be power of 2, 4th value is masked (x,y,z,mask)
-		order=(0, 1)
-	)
-	coords_I = tl.load(coords_I_ptr, boundary_check=(0,1), padding_option="zero") # N x 4
-
 	# initialize coords J ptr, loaded in for loop
 	coords_J_ptr = tl.make_block_ptr(
 		base=coords_ptr + (offs_Z*stride_coords_Z),
@@ -131,14 +120,6 @@ def _attn_fwd(
 		block_shape=(BLOCK_J, 4),
 		order=(0, 1)
 	)
-
-	# load spread for this head, scaler value
-	spread_ptr = spreads_ptr + (offs_H*stride_spreads_H)
-	spread = tl.load(spread_ptr)
-	min_dist_ptr = min_dists_ptr + (offs_H*stride_min_dists_H)
-	min_dist = tl.load(min_dist_ptr)
-	max_dist_ptr = max_dists_ptr + (offs_H*stride_max_dists_H)
-	max_dist = tl.load(max_dist_ptr)
 
 	# create K/V column mask pointer (loaded in the next loop)
 	mask_j_ptr = tl.make_block_ptr( # N,
@@ -150,29 +131,44 @@ def _attn_fwd(
 		order=(0, )
 	)
 
+	# load spread for this head, scaler value
+	spread_ptr = spreads_ptr + (offs_H*stride_spreads_H)
+	min_dist_ptr = min_dists_ptr + (offs_H*stride_min_dists_H)
+	max_dist_ptr = max_dists_ptr + (offs_H*stride_max_dists_H)
+
+	# load the Qi block first, out of bounds values are 0, stays in SRAM throughout
+	Qi = tl.load(Qi_block_ptr, boundary_check=(0,1), padding_option="zero") # N x d_k
+
+	# initialize output and statistics block, all in fp32
+	Oi = tl.zeros_like(Qi)
+	li = tl.zeros((BLOCK_I, ), dtype=tl.float32)
+	inf = float("inf")
+	mi = tl.zeros_like(li) - inf
+
+	spread = tl.load(spread_ptr)
+	min_dist = tl.load(min_dist_ptr)
+	max_dist = tl.load(max_dist_ptr)
+
+	coords_I = tl.load(coords_I_ptr, boundary_check=(0,1), padding_option="zero") # N x 4
+
+	mask_i = tl.load(mask_i_ptr, boundary_check=(0,), padding_option="zero").to(tl.int1) # N x d_k
+
 	# loop through columns of K and V
 	for j in tl.range(0, triton.cdiv(tot_N, BLOCK_J), 1):
 
-		# load K^T and the mask
-		KjT = tl.load(KjT_block_ptr, boundary_check=(0,1), padding_option="zero") # d_k x N
-		mask_j = tl.load(mask_j_ptr, boundary_check=(0,), padding_option="zero").to(tl.int1) # N
-
-		# cmopute attn: QK^T/sqrt(d_k)
-		Sij = tl.dot(Qi, KjT) * softmax_scale # N x N
+		# compute attn: QK^T/sqrt(d_k). 
+		Sij = tl.dot(Qi.to(tl.float16), tl.load(KjT_block_ptr, boundary_check=(0,1), padding_option="zero").to(tl.float16)) * softmax_scale # N x N
 
 		# load coordinates and compute distances
-		coords_J = tl.load(coords_J_ptr, boundary_check=(0,1), padding_option="zero") # N x 4 (last val masked)
-		dists_raw = coords_I[:, None, :] - coords_J[None, :, :] # N x N x 4
+		# coords_J = tl.load(coords_J_ptr, boundary_check=(0,1), padding_option="zero") # N x 4 (last val masked)
+		dists_raw = (coords_I[:, None, :] - tl.load(coords_J_ptr, boundary_check=(0,1), padding_option="zero")[None, :, :]) # N x N x 4
 		dists = tl.sqrt(tl.sum(dists_raw * dists_raw, axis=2)) # N x N
 
 		# compute the rbfs
-		rbfs = tl.exp(-(dists*dists) / (2*spread*spread)) # N x N
-
 		# clamp distances less than min dist to 1. min dist is the distance 
 		# calculated to get an rbf of e.g. 0.9. higher rbfs would result in numerical 
 		# instability with exp, so just make those 1 (no scaling)
-		clamp_mask = dists <= min_dist
-		rbfs = tl.where(clamp_mask, 1.0, rbfs)
+		rbfs = tl.where(dists <= min_dist, 1.0, tl.exp(-(dists*dists) / (2*spread*spread)))
 
 		# negative logits with close distances should be less negative
 		# eps = min_rbf, so maximum rbf (1) would result in logits of min_rbf
@@ -181,8 +177,7 @@ def _attn_fwd(
 		rbfs = tl.where(Sij < 0, (1+eps)-rbfs, rbfs) # N x N
 
 		# set masked positions to -inf, include out of range dists in mask
-		dists_mask = dists <= max_dist 
-		attn_mask = (mask_i[:, None]) & (mask_j[None, :]) & (dists_mask) # N x N
+		attn_mask = (mask_i[:, None]) & (tl.load(mask_j_ptr, boundary_check=(0,), padding_option="zero").to(tl.int1)[None, :]) & (dists <= max_dist) # N x N
 
 		# scale attention logits by rbfs and mask invalid pairs
 		Sij = tl.where(attn_mask, Sij*rbfs, -inf) # N x N
@@ -193,23 +188,14 @@ def _attn_fwd(
 		# compute softmax(Sij - mij) = Pij
 		Pij = tl.exp(tl.where(mij[:, None]==-inf, -inf, Sij - mij[:, None])) # N x N
 
-		# sum the softmaxed values (to normalize output with denominator term)
-		lij = tl.sum(Pij, axis=1)
-
 		# compute alpha
 		alpha = tl.exp(tl.where((mi==-inf) | (mij==-inf), tl.where((mi==-inf) & (mij==-inf), 0, -inf), mi - mij))
 		
 		# update li
-		li = alpha*li + lij # N, 
+		li = alpha*li + tl.sum(Pij, axis=1) # N, 
 
-		# update output
-		Oi = Oi*alpha[:, None]
-
-		# load Vj
-		Vj = tl.load(Vj_block_ptr, boundary_check=(0,1), padding_option="zero") # N x d_k
-
-		# compute output
-		Oi = tl.dot(Pij, Vj, Oi) # N x d_k
+		# load Vj compute output
+		Oi = tl.dot(Pij.to(tl.float16), tl.load(Vj_block_ptr, boundary_check=(0,1), padding_option="zero").to(tl.float16), acc=Oi*alpha[:, None]) # N x d_k
 
 		# update statistics for next iteration
 		mi = mij
@@ -312,16 +298,11 @@ def _attn_bwd(
 		block_shape=(BLOCK_J, 4),
 		order=(0, 1)		
 	)
-	coords_j = tl.load(coords_j_ptr, boundary_check=(0,1), padding_option="zero")
 
-	# load the spread assigned to this block (based on the head it was assigned)
 	spread_ptr = spreads_ptr + (offs_H*stride_spreads_H)
-	spread = tl.load(spread_ptr)
 	min_dist_ptr = min_dists_ptr + (offs_H*stride_min_dists_H)
-	min_dist = tl.load(min_dist_ptr)
 	max_dist_ptr = max_dists_ptr + (offs_H*stride_max_dists_H)
-	max_dist = tl.load(max_dist_ptr)
-	
+
 	# initialize mask for j columns
 	mask_j_ptr = tl.make_block_ptr( # N 
 		base=context_mask_ptr + (offs_Z*stride_context_mask_Z),
@@ -331,15 +312,6 @@ def _attn_bwd(
 		block_shape=(BLOCK_J, ),
 		order=(0, )
 	)
-	mask_j = tl.load(mask_j_ptr, boundary_check=(0, ), padding_option="zero").to(tl.int1)
-
-	# initialize dKj and dVj
-	dKj = tl.zeros((BLOCK_J, min_d_k), dtype=tl.float32)
-	dVj = tl.zeros((BLOCK_J, min_d_k), dtype=tl.float32)
-
-	# load KjT and Vj
-	KjT = tl.load(KjT_ptr, boundary_check=(0, 1), padding_option="zero")
-	Vj = tl.load(Vj_ptr, boundary_check=(0, 1), padding_option="zero")
 
 	# initialize pointers for Qi, dQi, dOi, Li, and Di. only loaded within loop
 	Qi_block_ptr = tl.make_block_ptr( # N x d_k
@@ -400,6 +372,24 @@ def _attn_bwd(
 		block_shape=(BLOCK_I, ),
 		order=(0, )
 	)
+
+	coords_j = tl.load(coords_j_ptr, boundary_check=(0,1), padding_option="zero")
+
+	# load the spread assigned to this block (based on the head it was assigned)
+	spread = tl.load(spread_ptr)
+	min_dist = tl.load(min_dist_ptr)
+	max_dist = tl.load(max_dist_ptr)
+
+	mask_j = tl.load(mask_j_ptr, boundary_check=(0, ), padding_option="zero").to(tl.int1)
+
+	# initialize dKj and dVj
+	dKj = tl.zeros((BLOCK_J, min_d_k), dtype=tl.float32)
+	dVj = tl.zeros((BLOCK_J, min_d_k), dtype=tl.float32)
+
+	# load KjT and Vj
+	KjT = tl.load(KjT_ptr, boundary_check=(0, 1), padding_option="zero")
+	Vj = tl.load(Vj_ptr, boundary_check=(0, 1), padding_option="zero")
+
 
 	inf = float("inf") # convenience
 	for i in tl.range(0, triton.cdiv(tot_N, BLOCK_I), 1):
@@ -517,7 +507,6 @@ class _attn(torch.autograd.Function):
 		assert spreads.size(0) == nheads, f"number of spreads must be equal to nheads, not {spreads.size(0)=} and {nheads=}"
 		assert torch.all(spreads > 0), f"spreads must be a tensor of positive, non-zero floats, not {spreads}"
 
-		# save input dtypes, convert to float32 for computation, and cast back to original afterwards in backwards pass (for dQ, dK, dV)
 		ctx.Q_dtype = Q.dtype
 		ctx.K_dtype = K.dtype
 		ctx.V_dtype = V.dtype
@@ -529,12 +518,14 @@ class _attn(torch.autograd.Function):
 		spreads = spreads.to(torch.float32)
 
 		# initialize mask, output, and logsumexp tensors
-		mask = (torch.ones(batch, N, dtype=torch.bool, device=Q.device) if mask is None else ~mask).contiguous() # batch x N
-		context_mask = (mask if context_mask is None else ~context_mask).contiguous() # batch x N
-		out = torch.zeros(batch, nheads, N, d_k, dtype=torch.float32, device=Q.device).contiguous() # batch x N x d_model
-		L = torch.zeros(batch, nheads, N, dtype=torch.float32, device=Q.device).contiguous() # batch x nheads x N
-		min_dists = torch.sqrt(2*(spreads**2)*math.log(1/max_rbf)).contiguous()
-		max_dists = torch.sqrt(2*(spreads**2)*math.log(1/min_rbf)).contiguous()
+		mask = (torch.ones(batch, N, dtype=torch.bool, device=Q.device) if mask is None else ~mask)#.contiguous() # batch x N
+		context_mask = (mask if context_mask is None else ~context_mask)#.contiguous() # batch x N
+		
+		out = torch.zeros(batch, nheads, N, d_k, dtype=Q.dtype, device=Q.device)#.contiguous() # batch x N x d_model
+		L = torch.zeros(batch, nheads, N, dtype=Q.dtype, device=Q.device)#.contiguous() # batch x nheads x N
+		
+		min_dists = torch.sqrt(2*(spreads**2)*math.log(1/max_rbf))#.contiguous()
+		max_dists = torch.sqrt(2*(spreads**2)*math.log(1/min_rbf))#.contiguous()
 
 		# make sure everything is contiguous
 		Q = Q.contiguous()
@@ -544,8 +535,8 @@ class _attn(torch.autograd.Function):
 		spreads = spreads.contiguous()
 
 		# define block sizes (minimum of 16, as tl.dot needs all dimensions to be >=16)
-		BLOCK_I = 32 if d_k <= 64 else 16
-		BLOCK_J = 32 if d_k <= 64 else 16
+		BLOCK_I = 16
+		BLOCK_J = 16
 		
 		# define the grid
 		grid = lambda args: (   triton.cdiv(args["tot_N"], args["BLOCK_I"]), 
