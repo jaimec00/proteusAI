@@ -28,6 +28,20 @@ import torch
 import triton
 import triton.language as tl
 
+configs = [	triton.Config({"BLOCK_I": i, "BLOCK_J": j}, num_warps=w)
+			for i in [16, 32, 64, 128]
+			for j in [16, 32, 64, 128]
+			for w in [4, 8]
+		]
+def keep(conf):
+    BLOCK_I = conf.kwargs["BLOCK_I"]
+    BLOCK_J = conf.kwargs["BLOCK_J"]
+    return (BLOCK_I * BLOCK_J) <= 2048
+
+
+@triton.autotune(list(filter(keep, configs)),
+				 key=['tot_N', 'tot_Z', 'nheads', 'min_d_k'],
+				 restore_value=["O_ptr", "L_ptr"])
 @triton.jit
 def _attn_fwd(
 	O_ptr, stride_O_Z, stride_O_H, stride_O_N, stride_O_D,
@@ -238,6 +252,9 @@ def _attn_fwd(
 	tl.store(Oi_block_ptr, Oi, boundary_check=(0,1))
 	tl.store(Li_block_ptr, mi, boundary_check=(0,))
 
+@triton.autotune(list(filter(keep, configs)), 
+				key=['tot_N', 'tot_Z', 'nheads', 'min_d_k'],
+				 restore_value=["dQ_ptr", "dK_ptr", "dV_ptr"])
 @triton.jit
 def _attn_bwd(
 	Q_ptr, stride_Q_Z, stride_Q_H, stride_Q_N, stride_Q_D,
@@ -535,8 +552,8 @@ class _attn(torch.autograd.Function):
 		spreads = spreads.contiguous()
 
 		# define block sizes (minimum of 16, as tl.dot needs all dimensions to be >=16)
-		BLOCK_I = 16
-		BLOCK_J = 16
+		# BLOCK_I = 16
+		# BLOCK_J = 16
 		
 		# define the grid
 		grid = lambda args: (   triton.cdiv(args["tot_N"], args["BLOCK_I"]), 
@@ -556,8 +573,7 @@ class _attn(torch.autograd.Function):
 							L, L.stride(0), L.stride(1), L.stride(2), # batch x nhead x N
 							mask, mask.stride(0), mask.stride(1), # batch x N
 							context_mask, context_mask.stride(0), context_mask.stride(1),
-							N, batch, nheads, d_k, max(d_k, 16), softmax_scale, min_rbf,
-							BLOCK_I, BLOCK_J
+							N, batch, nheads, d_k, max(d_k, 16), softmax_scale, min_rbf
 						)
 
 		# for backwards pass
@@ -588,10 +604,6 @@ class _attn(torch.autograd.Function):
 		assert Q.stride() == K.stride() == V.stride() == O.stride()
 		batch, nheads, N, d_k = Q.shape 
 
-		# define block sizes
-		BLOCK_I = 32 if d_k <= 64 else 16
-		BLOCK_J = 32 if d_k <= 64 else 16
-
 		# initialize dQ, dK, and dV
 		dQ = torch.zeros_like(Q).contiguous()
 		dK = torch.zeros_like(K).contiguous()
@@ -621,7 +633,6 @@ class _attn(torch.autograd.Function):
 							mask, mask.stride(0), mask.stride(1),
 							context_mask, context_mask.stride(0), context_mask.stride(1),
 							batch, N, nheads, d_k, max(d_k, 16), ctx.softmax_scale, ctx.min_rbf,
-							BLOCK_I, BLOCK_J
 						 )
 
 		dQ = dQ.to(ctx.Q_dtype)
