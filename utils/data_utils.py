@@ -102,11 +102,6 @@ class Data(Dataset):
 
 	def rotate_data(self):
 		
-		sampled_pdbs = self.clusters_df.groupby("CLUSTER").sample(n=1)
-
-		features, labels, coords, chain_idxs = [], [], [], []
-		load_pbar = tqdm(total=len(sampled_pdbs), desc="data loading progress", unit="step")
-
 		def process_pdb(pdb):
 			
 			pdb_features = self.clusters[pdb.at["BIOUNIT"]]["features"]
@@ -126,8 +121,18 @@ class Data(Dataset):
 
 			return pdb_features, pdb_labels, pdb_coords, pdb_chain_idxs
 
+		# get random cluster representative chains
+		sampled_pdbs = self.clusters_df.groupby("CLUSTER").sample(n=1)
+
+		# initialize list for this epoch
+		features, labels, coords, chain_idxs = [], [], [], []
+
+		# init progress bar
+		load_pbar = tqdm(total=len(sampled_pdbs), desc="data loading progress", unit="step")
+
 		# parallel execution
 		with ThreadPoolExecutor(max_workers=8) as executor:
+			
 			# submit tasks
 			futures = {executor.submit(process_pdb, pdb): pdb for _, pdb in sampled_pdbs.iterrows()}
 			

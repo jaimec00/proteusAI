@@ -159,7 +159,7 @@ class TrainingRun():
 
 		self.output.log.info("loading optimizer...")
 		self.optim = torch.optim.Adam(self.model.parameters(), lr=self.training_parameters.learning_step, 
-									beta=(self.training_parameters.beta1, self.training_parameters.beta2), 
+									betas=(self.training_parameters.beta1, self.training_parameters.beta2), 
 									eps=self.training_parameters.epsilon)
 		self.optim.zero_grad()
 
