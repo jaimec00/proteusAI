@@ -2,3 +2,4 @@ out.*
 err.*
 wf_plots/
 __pycache__/
+.nfs*
