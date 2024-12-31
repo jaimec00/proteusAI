@@ -19,21 +19,13 @@ def main():
 	min_rbf, max_rbf = 0.1, 0.9
 
 	coords = 3.7 * torch.normal(mean=0, std=1, size=(batch, N, 1), dtype=torch.float32, device=device).expand(batch, N, 3) # batch x N x 3
-
-	# use real coordinates
-	real = False
-	if real:
-		coords = torch.load("/home/ubuntu/triton/data/pdb_2021aug02_sample/pdb/l3/2l3w_A.pt", weights_only=True, map_location=device)
-		coords = coords["xyz"][:, 1, :]
-		coords = coords.unsqueeze(0)
-		batch, N , _ = coords.shape
-
 	spreads = min_wl + (torch.logspace(0, 1, nheads, base, dtype=torch.float32, device=coords.device) - 1) / (base-1) * (max_wl-min_wl) # nheads,
 	mask = torch.rand((batch, N), device=coords.device) > 1 # batch x N
 	context_mask = torch.rand((batch, N), device=coords.device) > 1 # batch x N
 	Q = torch.normal(mean=0, std=1, size=(batch, nheads, N, d_k), device=device, dtype=torch.float32, requires_grad=True) # batch x nhead x N x d_k 
 	K = torch.normal(mean=0, std=1, size=(batch, nheads, N, d_k), device=device, dtype=torch.float32, requires_grad=True) # batch x nhead x N x d_k 
 	V = torch.normal(mean=0, std=1, size=(batch, nheads, N, d_k), device=device, dtype=torch.float32, requires_grad=True) # batch x nhead x N x d_k 
+	params = [Q, K, V, coords, spreads, mask, context_mask, min_rbf, max_rbf]
 
 	# prepare for recording mem and time
 	torch.cuda.synchronize()  
@@ -41,14 +33,39 @@ def main():
 	end_event = torch.cuda.Event(enable_timing=True)
 	atol, rtol = 1e-2, 0
 
+	# autotune triton configs before profiling, allows optimal configs and triton to use cache rather than recompiling
+	print("autotuning:\n")
+
+	autotune(attn, params)
+
+	# zero grads
+	Q.grad.zero_()
+	K.grad.zero_()
+	V.grad.zero_()	
+
 	print("forward pass:\n")
 
-	params = [Q, K, V, coords, spreads, mask, context_mask, min_rbf, max_rbf]
-	torch_out, triton_out = test_fwd(attn, attn, params, start_event, end_event, atol, rtol)
+	num_floats = batch * nheads * N * d_k  
+	num_bytes = num_floats * 4 # assume fp32
+	max_bytes = 20 * (1024**3) # 20 GB
+	if num_bytes >= max_bytes:
+		torch_func = attn # rerun with kernel instead of using torch
+	else:
+		torch_func = torch_attn
+
+	torch_out, triton_out = test_fwd(torch_func, attn, params, start_event, end_event, atol, rtol)
 
 	print("\nbackward pass:\n")
 
 	test_bwd(torch_out.sum(), triton_out.sum(), Q, K, V, start_event, end_event, atol, rtol)
+
+def autotune(func, params):
+
+	# autotune _attn_fwd
+	out = attn(*params)
+	
+	# autotune _attn_fwd
+	out.sum().backwards()
 
 def test_fwd(torch_attn, attn, params, start_event, end_event, atol, rtol):
 
