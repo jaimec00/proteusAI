@@ -2,7 +2,7 @@
 
 #BSUB -n 1
 #BSUB -W 1:00
-#BSUB -R "rusage[mem=64GB]"
+#BSUB -R "rusage[mem=32GB]"
 #BSUB -q gpu
 ##BSUB -R "select[h100]"
 ##BSUB -R "select[a100 || h100]"

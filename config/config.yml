@@ -11,12 +11,14 @@ hidden_linear_dim: 1024  # intermediate dimensions of decoder feed forward layer
 temperature: 0.1  # temperature for autoregressive inference (for testing)
 max_tokens: 10000  # maximum number of tokens
 include_ncaa: False # whether to include non-canonical amino acids in loss calculation
+use_amp: True  # whether to use automatic mixed precision
+use_checkpoint: True # whether to use gradient checkpointing for the MHA module
 
 # Training configuration
-num_train: -1  # number of training samples to use; -1 means all available
-num_val: -1  # number of validation samples to use; -1 means all available
-num_test: -1  # number of test samples to use; -1 means all available
-epochs: 20  # number of epochs
+num_train: 64  # number of training samples to use; -1 means all available
+num_val: 64  # number of validation samples to use; -1 means all available
+num_test: 64  # number of test samples to use; -1 means all available
+epochs: 5  # number of epochs
 batch_size: 16  # batch size
 accumulation_steps: 2  # grad accumulation; how many batches to process before learning step
 learning_step: 0.0001  # learning rate

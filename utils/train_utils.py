@@ -62,7 +62,8 @@ class TrainingRun():
 														args.accumulation_steps, args.learning_step, 
 														args.dropout, args.label_smoothing, args.include_ncaa,
 														args.loss_type, args.lr_scale, args.lr_patience,
-														args.phase_split, args.expand_decoders, args.training_type )
+														args.phase_split, args.expand_decoders, args.training_type,
+														args.use_amp, args.use_checkpoint )
 		
 		self.input_perturbation_parameters = InputPerturbationParameters(	args.initial_min_lbl_smooth_mean, args.final_min_lbl_smooth_mean, 
 																			args.max_lbl_smooth_mean, args.min_lbl_smooth_stdev, args.max_lbl_smooth_stdev, 
@@ -240,8 +241,8 @@ class TrainingRun():
 			# loop through validation batches
 			for feature_batch, label_batch, coords_batch, chain_mask, key_padding_mask in self.data.val_data_loader:
 
-
-				batch = Batch(feature_batch, label_batch, coords_batch, chain_mask, key_padding_mask, use_probs=self.training_parameters.use_probs, use_amp=False, auto_regressive=False)
+				batch = Batch(feature_batch, label_batch, coords_batch, chain_mask, key_padding_mask, 
+							use_probs=self.training_parameters.use_probs, use_amp=False, auto_regressive=False)
 				input_perturbations.apply_perturbations(batch)
 				batch.batch_forward(self.model, self.loss_function, self.gpu)
 
@@ -352,7 +353,10 @@ class Epoch():
 		epoch_pbar = tqdm(total=len(self.training_run_parent.data.train_data_loader), desc="epoch_progress", unit="step")
 		for b_idx, (feature_batch, label_batch, coords_batch, chain_mask, key_padding_mask) in enumerate(self.training_run_parent.data.train_data_loader):
 			
-			batch = Batch(feature_batch, label_batch, coords_batch, chain_mask, key_padding_mask, b_idx=b_idx, epoch=self, use_probs=self.training_run_parent.training_parameters.use_probs, include_ncaa=self.training_run_parent.training_parameters.include_ncaa)
+			batch = Batch(feature_batch, label_batch, coords_batch, chain_mask, key_padding_mask, 
+						b_idx=b_idx, epoch=self, use_probs=self.training_run_parent.training_parameters.use_probs, 
+						use_amp=self.training_run_parent.training_parameters.use_amp, include_ncaa=self.training_run_parent.training_parameters.include_ncaa,
+						use_checkpoint=self.training_run_parent.training_parameters.use_checkpoint)
 			batch.batch_learn()
 			# normalize by number of valid tokens if computing sum, else it is already normalized
 			self.gather_batch_losses(batch, normalize=self.training_run_parent.loss_function.reduction=="sum")
@@ -404,19 +408,20 @@ class Epoch():
 	def gather_batch_losses(self, batch, normalize=False):
 		self.train_losses["input"].extend_losses(batch.outputs.losses["input"], normalize)
 		self.train_losses["output"].extend_losses(batch.outputs.losses["self_output" if batch.self_supervised else "output"], normalize)
-	
-
 
 class Batch():
 	def __init__(self, features, labels, coords, chain_mask, key_padding_mask, 
 					b_idx=None, epoch=None, use_probs=False, 
-					use_amp=True, auto_regressive=False, temp=0.1, include_ncaa=False):
+					use_amp=True, auto_regressive=False, temp=0.1, include_ncaa=False,
+					use_checkpoint=True):
 
 		self.features = features
 		self.labels = labels
 		self.coords = coords 
 		self.chain_mask = chain_mask 
 		self.use_probs = use_probs
+		self.use_amp = use_amp
+		self.use_checkpoint = use_checkpoint
 		num_aas = 20 if not include_ncaa else 21
 		if self.use_probs:
 			self.predictions = torch.full(self.labels.shape, 1/num_ass).unsqueeze(-1).expand(-1,-1,num_aas)
@@ -536,12 +541,13 @@ class Batch():
 		# cant compute cel with one hot vector, this is only for testing
 		with torch.no_grad():
 			if self.auto_regressive: 
-				ar_output_prediction = model(self.coords, self.predictions, features=self.features, key_padding_mask=self.key_padding_mask, auto_regressive=self.auto_regressive, temp=self.temp)
+				ar_output_prediction = model(self.coords, self.predictions, features=self.features, key_padding_mask=self.key_padding_mask, 
+											auto_regressive=self.auto_regressive, temp=self.temp, use_checkpoint=False)
 			else:
 				ar_output_prediction = None
 
 		# compute one shot also
-		output_prediction = model(self.coords, self.predictions, features=self.features, key_padding_mask=self.key_padding_mask, auto_regressive=False)
+		output_prediction = model(self.coords, self.predictions, features=self.features, key_padding_mask=self.key_padding_mask, auto_regressive=False, use_checkpoint=self.use_checkpoint)
 
 		# use the outputs as the inputs also
 		if self.self_supervised:
@@ -556,7 +562,7 @@ class Batch():
 			self_prediction_batch = torch.where((self.onehot_mask | self.key_padding_mask).unsqueeze(-1), self.predictions, self_prediction_batch)
 
 			# run the model
-			self_output_prediction = model(self.coords, self_prediction_batch, features=self.features, key_padding_mask=self.key_padding_mask, auto_regressive=False)
+			self_output_prediction = model(self.coords, self_prediction_batch, features=self.features, key_padding_mask=self.key_padding_mask, auto_regressive=False, use_checkpoint=self.use_checkpoint)
 			
 		else:
 

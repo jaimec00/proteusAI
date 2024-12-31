@@ -294,7 +294,7 @@ class HyperParameters():
 class TrainingParameters():
 
 	def __init__(self, epochs, batch_size, accumulation_steps, learning_step, dropout, label_smoothing, include_ncaa, loss_type, 
-				lr_scale, lr_patience, phase_split, expand_decoders, training_type):
+				lr_scale, lr_patience, phase_split, expand_decoders, training_type, use_amp, use_checkpoint):
 		self.epochs = epochs
 		self.batch_size = batch_size
 		self.accumulation_steps = accumulation_steps
@@ -308,6 +308,8 @@ class TrainingParameters():
 		self.phase_split = phase_split
 		self.expand_decoders = expand_decoders
 		self.training_type = training_type
+		self.use_amp = use_amp
+		self.use_checkpoint = use_checkpoint
 
 		self.use_onehot = self.training_type != "wf"
 		self.use_probs = self.training_type in ["probs", "self-supervised"]

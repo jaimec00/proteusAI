@@ -78,6 +78,7 @@ def init_args():
 	parser.add_argument("--lr_patience", default=5, type=int, help="LR patience for scaling down after plateu")
 	parser.add_argument("--training_type", default="wf", type=str, choices=["wf", "onehot", "probs", "self-supervision"],  help="what type of training")
 	parser.add_argument("--use_amp", default=True, type=bool,  help="whether to use automatic mixed precision")
+	parser.add_argument("--use_checkpoint", default=True, type=bool,  help="whether to use gradient checkpointing for MHA")
 
 	# input label smoothing
 	parser.add_argument("--initial_min_lbl_smooth_mean", default=3/20, type=float, help="initial minimum input label smoothing")
