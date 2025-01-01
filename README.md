@@ -13,8 +13,8 @@ where $|r - r_i|$ is Euclidaean norm of the positions vector of the $i^\text{th}
 
 Moreover, we can define multiple wavefunctions, each with a different k, and thus a different wavelength. In this case, wave functions corresponding to small $\lambda$ encode local interactions between the $C_a$ atoms, while larger $\lambda$ encode global interactions. Thus, the output of a wave function, $\psi_k$, corresponds to two features of the input $C_a$, a real part and imaginary part, i.e. a cos and sin term. To emphasize local interactions, since these are more prone to large fluctuations from small changes in wavelength, the wavelengths are sampled logarithmically from min_wl to max_wl, given a base. This gives the general featurization formula for wave function featurization (WF):
 
-$WF(2i, r_i) = \sum_{j=1}^N \frac{ cos( k |r_i-r_j| )}{|r_i-r_j|}$ = \sum_{j=1}^N \frac{ cos( (min\_wl + (max\_wl-min\_wl)\frac{ base^{ 2i/d_model } - 1 } {base - 1}  ) |r_i-r_j| )}{|r_i-r_j|}$
-$WF(2i+1, r_i) = \sum_{j=1}^N \frac{ sin( k |r_i-r_j| )}{|r_i-r_j|}$ = \sum_{j=1}^N \frac{ sin( (min\_wl + (max\_wl-min\_wl)\frac{ base^{ 2i/d_model } - 1 } {base - 1}  ) |r_i-r_j| )}{|r_i-r_j|}$
+$WF(2i, r_i) = \sum_{j=1}^N \frac{ cos( k |r_i-r_j| )}{|r_i-r_j|} = \sum_{j=1}^N \frac{ cos( (min\_wl + (max\_wl-min\_wl)\frac{ base^{ 2i/d_model } - 1 } {base - 1}  ) |r_i-r_j| )}{|r_i-r_j|}$
+$WF(2i+1, r_i) = \sum_{j=1}^N \frac{ sin( k |r_i-r_j| )}{|r_i-r_j|} = \sum_{j=1}^N \frac{ sin( (min\_wl + (max\_wl-min\_wl)\frac{ base^{ 2i/d_model } - 1 } {base - 1}  ) |r_i-r_j| )}{|r_i-r_j|}$
 
 Note the similarity between this formula and the traditional positional encoding formula:
 
