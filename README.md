@@ -13,9 +13,11 @@ where $|r - r_i|$ is Euclidaean norm of the positions vector of the $i^\text{th}
 
 Moreover, we can define multiple wavefunctions, each with a different k, and thus a different wavelength. In this case, wave functions corresponding to small $\lambda$ encode local interactions between the $C_a$ atoms, while larger $\lambda$ encode global interactions. Thus, the output of a wave function, $\psi_k$, corresponds to two features of the input $C_a$, a real part and imaginary part, i.e. a cos and sin term. To emphasize local interactions, since these are more prone to large fluctuations from small changes in wavelength, the wavelengths are sampled logarithmically from $wl_{min}$ to $wl_{max}$, given a base. This gives the general featurization formula for wave function featurization (WF):
 
-$WF(2i, r_i) = \sum_{j=1}^N \frac{ cos( k |r_i-r_j| )}{|r_i-r_j|} = \frac{1}{|r_i-r_j|}\sum_{j=1}^N cos( (wl_{min} + (wl_{max}-wl_{min})(\frac{ base^{ 2i/d_{model} } - 1 } {base - 1}  ) |r_i-r_j| )$
+k(2i) = k(2i+1) = wl_{min} + (wl_{max}-wl_{min})(\frac{ base^{ 2i/d_{model} } - 1 } {base - 1} 
 
-$WF(2i+1, r_i) = \sum_{j=1}^N \frac{ sin( k |r_i-r_j| )}{|r_i-r_j|} = \frac{1}{|r_i-r_j|}\sum_{j=1}^N sin( (wl_{min} + (wl_{max}-wl_{min})(\frac{ base^{ 2i/d_{model} } - 1 } {base - 1}  ) |r_i-r_j| )$
+$WF(2i, r_i) = \sum_{j=1}^N \frac{ cos( k(2i) |r_i-r_j| )}{|r_i-r_j|} 
+
+$WF(2i+1, r_i) = \sum_{j=1}^N \frac{ sin( k(2i+1) |r_i-r_j| )}{|r_i-r_j|} 
 
 Note the similarity between this formula and the traditional positional encoding formula:
 
@@ -27,9 +29,9 @@ This is because the wave function embedding process can be seen as a generalizat
 
 This method offers several advantages to existing methods. For one, it offers rotationally and translationally invariant representation of the protein, since the wave function only accounts for relative distances. Additionally, by using multiple wave functions of differing granularity (with different k), the model will capture a wide range of representations of the same structure, in which both local and global interactions are encoded. While computing the superposed wave function outputs for each Ca, and for each of the d_model//2 wave functions, scales O($N^2$) in compute, memory, and time, we have implemented a custom triton program to fuse the required operations into a single GPU kernel, which significantly speeds up the computation and drastically reduces memory usage.
 
-These features align very well with the rest of the model, which is a stack of decoder layers, each of which performs a novel multi-head attention (MHA) mechanism. In the custom MHA module, the attention logits are scaled by Radial Basis Functions (RBF), in order to give the model a spatial bias. Each head of the MHA module gets assigned a specific spread ($\sigma_head$) to compute the RBFs. The RBF is thus:
+These features align very well with the rest of the model, which is a stack of decoder layers, each of which performs a novel multi-head attention (MHA) mechanism. In the custom MHA module, the attention logits are scaled by Radial Basis Functions (RBF), in order to give the model a spatial bias. Each head of the MHA module gets assigned a specific spread ($\sigma_{head}$) to compute the RBFs. The RBF is thus:
 
-$RBF(r_i, r_j, \sigma_head) = exp(-\frac{|r_i-r_j|^2}{2\sigma_head^2})$
+$RBF(r_i, r_j, \sigma_{head}) = exp(-\frac{|r_i-r_j|^2}{2\sigma_{head}^2})$
 
 The spread of each head is approximately the average wavelength used to compute the wave function outputs of the feature space the head is operating on. Thus, each head performs the attention mechanism at a distinct scale, which aligns with the feature space it is operating on. Pair-wise distances beyond a certain threshold (computed based on each head's assigned spread) are masked out in the attention matrix by setting the logits to -$\inf$. Thus, heads operated on low index features focus on local interactions, and heads operating on large index features focus on global interactions.
 
