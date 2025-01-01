@@ -33,7 +33,7 @@ These features align very well with the rest of the model, which is a stack of d
 
 $RBF_{head}(r_i, r_j) = exp(-\frac{|r_i-r_j|^2}{2\sigma_{head}^2})$
 
-The spread of each head is approximately the average wavelength used to compute the wave function outputs of the feature space the head is operating on. Thus, each head performs the attention mechanism at a distinct scale, which aligns with the feature space it is operating on. Pair-wise distances beyond a certain threshold (computed based on each head's assigned spread) are masked out in the attention matrix by setting the logits to -$\inf$. Thus, heads operated on low index features focus on local interactions, and heads operating on large index features focus on global interactions.
+The spread of each head is approximately the average wavelength used to compute the wave function outputs of the feature space the head is operating on. Thus, each head performs the attention mechanism at a distinct scale, which aligns with the feature space it is operating on. Pair-wise distances beyond a certain threshold (computed based on each head's assigned spread) are masked out in the attention matrix by setting the logits to -$\infinity$. Thus, heads operated on low index features focus on local interactions, and heads operating on large index features focus on global interactions.
 
 To reduce the memory footprint and speed up the computation, the multi-scale gaussian attention module is fused into a single GPU kernel using triton, taking inspiration from the Flash Attention 2 paper ().
 
