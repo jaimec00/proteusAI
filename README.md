@@ -18,7 +18,9 @@ $SE(2i, r) = \sum_{j=0}^N \frac{1}{{|r-r_j|}} cos( k_{2i} |r-r_j| ) $
 $SE(2i+1, r) = \sum_{j=0}^N \frac{1}{|r-r_j|} sin( k_{2i} |r-r_j| ) $
 
 Where, 
+
 $k_{2i} = \frac{2\pi}{\lambda_{2i}}$
+
 $\lambda_{2i} = \lambda_{min} + (\lambda_{max}-\lambda_{min})(\frac{ b^{ 2i/d_{model} } - 1 } {b - 1} )$
 
 Note the similarity between this formula and the traditional positional encoding formula:
