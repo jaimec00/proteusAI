@@ -1,5 +1,5 @@
 # proteusAI
-## Protein Sequence Prediction of Target Structure via Wave Function Encoding and Multi-Scale Gaussian Self-Attention
+## Protein Sequence Prediction of Target Structure via Wave Function Embedding and Multi-Scale Gaussian Self-Attention
 
 proteusAI is a transformer model that predicts the optimal protein sequence given a target structure of alpha-carbon ($C_a$) coordinates. 
 
