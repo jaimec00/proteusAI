@@ -154,6 +154,8 @@ class Data(Dataset):
 		self.coords = coords
 		self.chain_idxs = chain_idxs
 
+		self.epoch_max = max(sample.size(0) for sample in self.labels)
+
 	def add_data(self, pdb):
 
 		section = Path("".join(pdb.at["CHAINID"].split("_")[0][1:3]))

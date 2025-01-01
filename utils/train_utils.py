@@ -124,7 +124,7 @@ class TrainingRun():
 		
 		self.output.log.info("loading model...")
 		
-		self.model = proteusAI(	self.data.max_size, self.hyper_parameters.d_model, 
+		self.model = proteusAI(	self.hyper_parameters.d_model, 
 								self.hyper_parameters.num_heads, 
 								self.hyper_parameters.decoder_layers,
 								self.hyper_parameters.hidden_linear_dim,

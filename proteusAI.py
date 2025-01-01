@@ -243,7 +243,7 @@ class proteusAI(nn.Module):
 
 	'''
 	
-	def __init__(self, 	N, d_model, n_head, decoder_layers, hidden_linear_dim, dropout, 
+	def __init__(self, 	d_model, n_head, decoder_layers, hidden_linear_dim, dropout, 
 						min_wl=3.7, max_wl=20, base=20, min_rbf=0.1, max_rbf=0.9, 
 						active_decoders=-1, use_probs=False, include_ncaa=False
 					):

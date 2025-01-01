@@ -1,11 +1,11 @@
 #!/bin/bash
 
 #BSUB -n 1
-#BSUB -W 2:00
+#BSUB -W 3:00
 #BSUB -R "rusage[mem=32GB]"
 #BSUB -q gpu
 ##BSUB -R "select[a100]"
-#BSUB -R "select[l40]"
+#BSUB -R "select[l40 || a100]"
 ##BSUB -R "select[a100 || h100]"
 ##BSUB -R "select[a10 || a30]"
 ##BSUB -R "select[l40 || a100 || h100]"

@@ -28,11 +28,14 @@ import torch
 import triton
 import triton.language as tl
 
+# define configurations for autotuning
 configs = [	triton.Config({"BLOCK_I": i, "BLOCK_J": j}, num_warps=w)
 			for i in [16, 32, 64, 128]
 			for j in [16, 32, 64, 128]
 			for w in [4, 8]
 		]
+
+# filter out configs that are too big
 def keep(conf):
     BLOCK_I = conf.kwargs["BLOCK_I"]
     BLOCK_J = conf.kwargs["BLOCK_J"]
@@ -40,8 +43,8 @@ def keep(conf):
 
 
 @triton.autotune(list(filter(keep, configs)),
-				 key=['tot_N', 'tot_Z', 'nheads', 'min_d_k'],
-				 restore_value=["O_ptr", "L_ptr"])
+				 key=['tot_N', 'tot_Z', 'nheads', 'min_d_k'], # triton will not recompile if these inputs are the same (size of input tensor)
+				 restore_value=["O_ptr", "L_ptr"]) # make sure autotuning resets the outputs of this function for each configuration
 @triton.jit
 def _attn_fwd(
 	O_ptr, stride_O_Z, stride_O_H, stride_O_N, stride_O_D,
@@ -156,7 +159,7 @@ def _attn_fwd(
 	# initialize output and statistics block, all in fp32
 	Oi = tl.zeros_like(Qi)
 	li = tl.zeros((BLOCK_I, ), dtype=tl.float32)
-	inf = float("inf")
+	inf = float("inf") # convenience
 	mi = tl.zeros_like(li) - inf
 
 	spread = tl.load(spread_ptr)
@@ -254,7 +257,7 @@ def _attn_fwd(
 
 @triton.autotune(list(filter(keep, configs)), 
 				key=['tot_N', 'tot_Z', 'nheads', 'min_d_k'],
-				 restore_value=["dQ_ptr", "dK_ptr", "dV_ptr"])
+				restore_value=["dQ_ptr", "dK_ptr", "dV_ptr"])
 @triton.jit
 def _attn_bwd(
 	Q_ptr, stride_Q_Z, stride_Q_H, stride_Q_N, stride_Q_D,
@@ -399,44 +402,35 @@ def _attn_bwd(
 
 	mask_j = tl.load(mask_j_ptr, boundary_check=(0, ), padding_option="zero").to(tl.int1)
 
-	# initialize dKj and dVj
+	# initialize dKj and dVj 
 	dKj = tl.zeros((BLOCK_J, min_d_k), dtype=tl.float32)
 	dVj = tl.zeros((BLOCK_J, min_d_k), dtype=tl.float32)
 
-	# load KjT and Vj
+	# load KjT and Vj (load as fp16 for matmul)
 	KjT = tl.load(KjT_ptr, boundary_check=(0, 1), padding_option="zero")
 	Vj = tl.load(Vj_ptr, boundary_check=(0, 1), padding_option="zero")
-
 
 	inf = float("inf") # convenience
 	for i in tl.range(0, triton.cdiv(tot_N, BLOCK_I), 1):
 
 		# load Qi and compute attn, ie Sij
-		Qi = tl.load(Qi_block_ptr, boundary_check=(0, 1), padding_option="zero")
-		Sij = tl.dot(Qi, KjT) * softmax_scale # N x N
+		Sij = tl.dot(tl.load(Qi_block_ptr, boundary_check=(0, 1), padding_option="zero"), KjT) * softmax_scale # N x N
 		
 		# load coordinates for i rows and compute distances
-		coords_i = tl.load(coords_i_ptr, boundary_check=(0,1), padding_option="zero") # N x 4
-		dists_raw = coords_i[:, None, :] - coords_j[None, :, :] # N x N x 4
+		dists_raw = (tl.load(coords_i_ptr, boundary_check=(0,1), padding_option="zero"))[:, None, :] - coords_j[None, :, :] # N x N x 4
 		dists = tl.sqrt(tl.sum(dists_raw * dists_raw, axis=2)) # N x N 
 
 		# compute rbfs
-		rbfs = tl.exp(-(dists*dists) / (2.0*spread*spread))
-
 		# clamp small distances to 1 (no scaling, unless negative, see 2 code 
 		# blocks below). only far distances are masked
-		clamp_mask = dists < min_dist
-		rbfs = tl.where(clamp_mask, 1.0, rbfs)
-
-		# mask out distances that are not relevant to this head
-		dists_mask = dists <= max_dist
+		rbfs = tl.where(dists < min_dist, 1.0, tl.exp(-(dists*dists) / (2.0*spread*spread))) # N x N
 
 		# for negative logits, small dists should be scaled to be less negative than for far distances
 		rbfs = tl.where(Sij < 0, (1+eps)-rbfs, rbfs)
 
 		# mask out attention that is not relevant to this head
 		mask_i = tl.load(mask_i_ptr, boundary_check=(0, ), padding_option="zero").to(tl.int1)
-		attn_mask = mask_i[:, None] & mask_j[None, :] & dists_mask # N x N
+		attn_mask = mask_i[:, None] & (mask_j[None, :]) & (dists <= max_dist) # N x N
 
 		# scale attention logits by RBFs
 		Sij = tl.where(attn_mask, Sij*rbfs, -inf) # N x N
@@ -535,14 +529,14 @@ class _attn(torch.autograd.Function):
 		spreads = spreads.to(torch.float32)
 
 		# initialize mask, output, and logsumexp tensors
-		mask = (torch.ones(batch, N, dtype=torch.bool, device=Q.device) if mask is None else ~mask)#.contiguous() # batch x N
-		context_mask = (mask if context_mask is None else ~context_mask)#.contiguous() # batch x N
+		mask = (torch.ones(batch, N, dtype=torch.bool, device=Q.device) if mask is None else ~mask).contiguous() # batch x N
+		context_mask = (mask if context_mask is None else ~context_mask).contiguous() # batch x N
 		
-		out = torch.zeros(batch, nheads, N, d_k, dtype=Q.dtype, device=Q.device)#.contiguous() # batch x N x d_model
-		L = torch.zeros(batch, nheads, N, dtype=Q.dtype, device=Q.device)#.contiguous() # batch x nheads x N
+		out = torch.zeros(batch, nheads, N, d_k, dtype=Q.dtype, device=Q.device).contiguous() # batch x N x d_model
+		L = torch.zeros(batch, nheads, N, dtype=Q.dtype, device=Q.device).contiguous() # batch x nheads x N
 		
-		min_dists = torch.sqrt(2*(spreads**2)*math.log(1/max_rbf))#.contiguous()
-		max_dists = torch.sqrt(2*(spreads**2)*math.log(1/min_rbf))#.contiguous()
+		min_dists = torch.sqrt(2*(spreads**2)*math.log(1/max_rbf)).contiguous()
+		max_dists = torch.sqrt(2*(spreads**2)*math.log(1/min_rbf)).contiguous()
 
 		# make sure everything is contiguous
 		Q = Q.contiguous()
@@ -550,10 +544,6 @@ class _attn(torch.autograd.Function):
 		V = V.contiguous()
 		coords = coords.contiguous()
 		spreads = spreads.contiguous()
-
-		# define block sizes (minimum of 16, as tl.dot needs all dimensions to be >=16)
-		# BLOCK_I = 16
-		# BLOCK_J = 16
 		
 		# define the grid
 		grid = lambda args: (   triton.cdiv(args["tot_N"], args["BLOCK_I"]), 
