@@ -21,9 +21,9 @@ $WF(2i+1, r_i) = \sum_{j=1}^N \frac{ sin( k(2i+1) |r_i-r_j| )}{|r_i-r_j|} $
 
 Note the similarity between this formula and the traditional positional encoding formula:
 
-$PE_{2i, p} = cos(\frac{2i}{10000^{2i/d_{model}}})$
+$PE(2i, p) = cos(\frac{2i}{10000^{2i/d_{model}}})$
 
-$PE_{2i+1, p} = sin(\frac{2i}{10000^{2i/d_{model}}})$
+$PE(2i+1, p) = sin(\frac{2i}{10000^{2i/d_{model}}})$
 
 This is because the wave function embedding process can be seen as a generalization of positional encoding for irregularly spaced tokens in arbitrary dimensions.
 
