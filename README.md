@@ -21,9 +21,9 @@ Where $k(2i) = k(2i+1) = wl_{min} + (wl_{max}-wl_{min})(\frac{ base^{ 2i/d_{mode
 
 Note the similarity between this formula and the traditional positional encoding formula:
 
-$PE(2i, p) = cos(\frac{2i}{10000^{2i/d_{model}}})$
+$PE(2i, p) = cos(\frac{p}{10000^{2i/d_{model}}})$
 
-$PE(2i+1, p) = sin(\frac{2i}{10000^{2i/d_{model}}})$
+$PE(2i+1, p) = sin(\frac{p}{10000^{2i/d_{model}}})$
 
 This is because the wave function embedding process can be seen as a generalization of positional encoding for irregularly spaced tokens in arbitrary dimensions.
 
