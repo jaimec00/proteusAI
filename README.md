@@ -15,9 +15,9 @@ Moreover, we can define multiple wavefunctions, each with a different k, and thu
 
 $WF(2i, r_i) = \sum_{j=1}^N \frac{ cos( k(2i) |r_i-r_j| )}{|r_i-r_j|} $
 
-$WF(2i+1, r_i) = \sum_{j=1}^N \frac{ sin( k(2i+1) |r_i-r_j| )}{|r_i-r_j|} $
+$WF(2i+1, r_i) = \sum_{j=1}^N \frac{ sin( k(2i) |r_i-r_j| )}{|r_i-r_j|} $
 
-Where $k(2i) = k(2i+1) = wl_{min} + (wl_{max}-wl_{min})(\frac{ b^{ 2i/d_{model} } - 1 } {b - 1} )$
+Where $k(2i) = wl_{min} + (wl_{max}-wl_{min})(\frac{ b^{ 2i/d_{model} } - 1 } {b - 1} )$
 
 Note the similarity between this formula and the traditional positional encoding formula:
 
