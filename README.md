@@ -11,13 +11,13 @@ $\psi_k(r) = \sum_{i=1}^N \frac{e^{ik|r-r_i|}}{|r - r_i|}$
 
 where $|r - r_i|$ is Euclidaean norm of the positions vector of the $i^\text{th}$ $C_a$ source and the observer, i.e. the input to the wavefunction, and k is the wavenumber, related to the wavelength $\lambda$ by $k = \frac{2\pi}{\lambda}$.
 
-Moreover, we can define multiple wavefunctions, each with a different k, and thus a different wavelength. In this case, wave functions corresponding to small $\lambda$ encode local interactions between the $C_a$ atoms, while larger $\lambda$ encode global interactions. Thus, the output of a wave function, $\psi_k$, corresponds to two features of the input $C_a$, a real part and imaginary part, i.e. a cos and sin term. To emphasize local interactions, since these are more prone to large fluctuations from small changes in wavelength, the wavelengths are sampled logarithmically from $wl_{min}$ to $wl_{max}$, given a base, $b$. This gives the general wave function featurization formula (WF):
+Moreover, we can define multiple wavefunctions, each with a different k, and thus a different wavelength. In this case, wave functions corresponding to small $\lambda$ encode local interactions between the $C_a$ atoms, while larger $\lambda$ encode global interactions. Thus, the output of a wave function, $\psi_k$, corresponds to two features of the input $C_a$, a real part and imaginary part, i.e. a cos and sin term. To emphasize local interactions, since these are more prone to large fluctuations from small changes in wavelength, the wavelengths are sampled logarithmically from $\lambda_{min}$ to $\lambda_{max}$, given a base, $b$. This gives the general wave function featurization formula (WF):
 
 $WF(2i, r_i) = \sum_{j=1}^N \frac{ cos( k(2i) |r_i-r_j| )}{|r_i-r_j|} $
 
 $WF(2i+1, r_i) = \sum_{j=1}^N \frac{ sin( k(2i) |r_i-r_j| )}{|r_i-r_j|} $
 
-Where $k(2i) = wl_{min} + (wl_{max}-wl_{min})(\frac{ b^{ 2i/d_{model} } - 1 } {b - 1} )$
+Where $k(2i) = \lambda_{min} + (\lambda_{max}-\lambda_{min})(\frac{ b^{ 2i/d_{model} } - 1 } {b - 1} )$
 
 Note the similarity between this formula and the traditional positional encoding formula:
 
@@ -31,8 +31,12 @@ This method offers several advantages to existing methods. For one, it offers ro
 
 These features align very well with the rest of the model, which is a stack of decoder layers, each of which performs a novel multi-head attention (MHA) mechanism. In the custom MHA module, the attention logits are scaled by Radial Basis Functions (RBF), in order to give the model a spatial bias. Each head of the MHA module gets assigned a specific spread ($\sigma_{head}$) to compute the RBFs. The RBF is thus:
 
-$RBF(r_i, r_j, \sigma_{head}) = exp(-\frac{|r_i-r_j|^2}{2\sigma_{head}^2})$
+$RBF_{head}(r_i, r_j) = exp(-\frac{|r_i-r_j|^2}{2\sigma_{head}^2})$
 
 The spread of each head is approximately the average wavelength used to compute the wave function outputs of the feature space the head is operating on. Thus, each head performs the attention mechanism at a distinct scale, which aligns with the feature space it is operating on. Pair-wise distances beyond a certain threshold (computed based on each head's assigned spread) are masked out in the attention matrix by setting the logits to -$\inf$. Thus, heads operated on low index features focus on local interactions, and heads operating on large index features focus on global interactions.
 
+To reduce the memory footprint and speed up the computation, the multi-scale gaussian attention module is fused into a single GPU kernel using triton, taking inspiration from the Flash Attention 2 paper ().
+
 This multi-scale gaussian attention mechanism can be seen as a generalization of graph neural networks (GNN), since the scaled attention mechanism creates soft, continuous edges between token pairs, which are defined at multiple scales. 
+
+After passing through all decoder layers, the logits pass through a linear layer to convert the $d_{model}$ feature space into AA feature space (20 dimensions, one for each amino acid) and softmax is performed to get amino acid probabilities for each position. The model selects the most confident prediction and auto-regressively updates the sequence, until the final prediction is reached. 
