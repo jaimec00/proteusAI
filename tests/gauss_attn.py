@@ -4,6 +4,7 @@ import torch
 import torch.nn.functional as F
 from utils.test_utils import calculate_error, profile_func, profile_bwd
 from utils.model_utils.gaussian_attn import attn
+import os
 
 def main():
 
@@ -36,6 +37,9 @@ def main():
 	# autotune triton configs before profiling, allows optimal configs and triton to use cache rather than recompiling
 	print("autotuning:\n")
 
+	# log autotuning
+	os.environ["TRITON_PRINT_AUTOTUNING"] = "1"
+
 	autotune(attn, params)
 
 	# zero grads
@@ -62,10 +66,10 @@ def main():
 def autotune(func, params):
 
 	# autotune _attn_fwd
-	out = attn(*params)
+	out = func(*params)
 	
-	# autotune _attn_fwd
-	out.sum().backwards()
+	# autotune _attn_bwd
+	out.sum().backward()
 
 def test_fwd(torch_attn, attn, params, start_event, end_event, atol, rtol):
 
@@ -155,8 +159,6 @@ def torch_attn(Q, K, V, coords, spreads, mask=None, context_mask=None, min_rbf=0
 	rbfs = torch.exp(-(dists**2)/(2*(spreads[None, :, None, None]**2)))
 	rbfs = torch.where(dists <= min_dists[None, :, None, None], 1.0, rbfs) # clamp mins to one
 	rbfs = torch.where(S<0, (1+min_rbf)-rbfs, rbfs)
-
-	print( 1 - (dists_mask.sum(-1).sum(-1)/(N**2)))
 
 	attn_mask = mask[:, None, :, None] | context_mask[:, None, None, :] | dists_mask
 	S = torch.where(attn_mask, float("-inf"), S*rbfs)
