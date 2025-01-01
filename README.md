@@ -7,23 +7,23 @@ Many protein sequence prediction AI models use contact maps, distance metrics, a
 
 To achieve a greater inductive bias, we propose a method of encoding the three-dimensional coordinates of each token, i.e. each $C_a$, into high dimensional feature space through the use of wave functions. We model each $C_a$ as a point source via the Green's function solution to the Hemholtz equation in three dimensions, and create a global wave function that is a superpositions of all $C_a$ atom point sources. More precisely, the global wavefunction, $\psi_k$ is defined as:
 
-$\psi_k(r) = \sum_{i=1}^N \frac{e^{ik|r-r_i|}}{|r - r_i|}$
+$\psi_k(r_j) = \sum_{k \ne j} \frac{e^{ik|r_j-r_k|}}{|r_j - r_k|}$
 
-where $|r - r_i|$ is Euclidaean norm of the positions vector of the $i^\text{th}$ $C_a$ source and the observer, i.e. the input to the wavefunction, and k is the wavenumber, related to the wavelength $\lambda$ by $k = \frac{2\pi}{\lambda}$.
+where $|r_j - r_k|$ is Euclidaean norm of the positions vector of the $k^\text{th}$ $C_a$ source and the observer, i.e. the input to the wavefunction, and k is the wavenumber, related to the wavelength $\lambda$ by $k = \frac{2\pi}{\lambda}$.
 
 Moreover, we can define multiple wavefunctions, each with a different k, and thus a different wavelength. In this case, wave functions corresponding to small $\lambda$ encode local interactions between the $C_a$ atoms, while larger $\lambda$ encode global interactions. Thus, the output of a wave function, $\psi_k$, corresponds to two features of the input $C_a$, a real part and imaginary part, i.e. a cos and sin term. To emphasize local interactions, since these are more prone to large fluctuations from small changes in wavelength, the wavelengths are sampled logarithmically from $\lambda_{min}$ to $\lambda_{max}$, given a base, $b$. This gives the general wave function featurization formula, termed Spatial Embedding (SE):
 
-$SE(2i, r_i) = \sum_{j=1}^N \frac{1}{{|r_i-r_j|}} cos( k(2i) |r_i-r_j| ) $
+$SE(2i, r_i) = \sum_{j \ne i} \frac{1}{{|r_i-r_j|}} cos( k(2i) |r_i-r_j| ) $
 
-$SE(2i+1, r_i) = \sum_{j=1}^N \frac{1}{|r_i-r_j|} sin( k(2i) |r_i-r_j| ) $
+$SE(2i+1, r_i) = \sum_{j \ne i} \frac{1}{|r_i-r_j|} sin( k(2i) |r_i-r_j| ) $
 
 Where $k(2i) = \lambda_{min} + (\lambda_{max}-\lambda_{min})(\frac{ b^{ 2i/d_{model} } - 1 } {b - 1} )$
 
 Note the similarity between this formula and the traditional positional encoding formula:
 
-$PE(2i, p) = cos(\frac{p}{10000^{2i/d_{model}}})$
+$PE(2i, p) = sin(\frac{p}{10000^{2i/d_{model}}})$
 
-$PE(2i+1, p) = sin(\frac{p}{10000^{2i/d_{model}}})$
+$PE(2i+1, p) = cos(\frac{p}{10000^{2i/d_{model}}})$
 
 This is because the wave function embedding process can be seen as a generalization of positional encoding for irregularly spaced tokens in arbitrary dimensions.
 
