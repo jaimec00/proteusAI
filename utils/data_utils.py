@@ -24,6 +24,8 @@ from tqdm import tqdm
 import pandas as pd
 import numpy as np
 import argparse
+import random
+import math
 import time
 import os
 
@@ -185,35 +187,31 @@ class Data():
 	def batch_data(self):
 
 		# shuffle indexes when creating data
-		random_idxs = random.shuffle(list(range(len(self.labels))))
+		idxs = list(range(len(self.labels)))
+		idx_size = [[i, self.labels[i].size(0)] for i in idxs]
+		# sort first and then chunk and randomize mini chunks, so that batches have similar sized samples, yet still random when do batch_subset
+		idx_size = sorted(idx_size, key=lambda x: x[1])
+		# max_batch_size = len(self.labels)//4
+		max_batch_size = max(self.batch_sizes)*2
+		random_idx_batches = [idx_size[i:i+max_batch_size] for i in range(0, len(idx_size), max_batch_size)]
+
+		for i in random_idx_batches:
+			random.shuffle(i)
 
 		# split the index list into mini batches of size max_batch_len. will send these initial batches
 		# to threads to process in parallel, then sort these mini batches, and split in two recursively until the batches are
 		# the target batch size
-		max_batch_size = max(self.batch_sizes)
-		random_idx_batches = [random_idxs[i:i+max_batch_size] for i in range(0, len(random_idxs), max_batch_size)]
-		random_idx_batches = [
-								sorted(
-									[
-										[i, self.labels[i].size(0)] 
-										for i in batch
-									], 
-									key=lambda x: x[1]
-								) 
-								for batch in random_idx_batches
-							]
 
-
-		def batch_subset(batch_idxs):
+		def batch_subset(batch_idxs, max_size):
 			'''
 			recursively splits batch idxs until reach target number of tokens. 
 			starts at max batch d eg 64, and splits into 2
 			returns a list of lists, each inner list containing sample indexes and corresponding size
 			'''
 
-			if sum(i[1] for i in batch_idxs) > self.batch_size:
+			if (sum(i[1] for i in batch_idxs) > self.batch_size) or (len(batch_idxs) > max_size):
 				split = len(batch_idxs) // 2
-				return batch_subset(batch_idxs[:split]) + batch_subset(batch_idxs[split:])
+				return batch_subset(batch_idxs[:split], max_size) + batch_subset(batch_idxs[split:], max_size)
 
 			else: 
 				return [batch_idxs]
@@ -223,7 +221,8 @@ class Data():
 		with ThreadPoolExecutor(max_workers=8) as executor:
 			
 			# submit tasks
-			futures = [executor.submit(batch_subset, batch) for batch in random_batch_idxs]
+			max_batch = max(self.batch_sizes)
+			futures = [executor.submit(batch_subset, batch, max_batch) for batch in random_idx_batches]
 			
 			# collect results
 			batches = []
@@ -239,8 +238,8 @@ class Data():
 		for batch in self.batches:
 			min_size = min(self.seq_sizes)
 			max_size = max(self.seq_sizes)
-			next_pow2 = 2**math.ceil(math.log(max(i[1] for i in batch), 2)) # next power of 2
-			seq_size = max(min_size, min(max_size, next_pow2))
+			seq_next_pow2 = 2**math.ceil(math.log(max(i[1] for i in batch), 2)) # next power of 2
+			seq_size = max(min_size, min(max_size, seq_next_pow2))
 
 			features = []
 			labels = []
@@ -256,6 +255,14 @@ class Data():
 				chain_mask = torch.ones(self.labels[idx].shape, dtype=torch.bool, device=self.device)
 				chain_mask[start:end] = False
 				chain_masks.append(chain_mask)
+
+			batch_next_pow2 = 2**math.ceil(math.log(len(batch), 2)) # next power of 2
+			batch_pads = range(batch_next_pow2 - len(batch))
+			for extra_batch in batch_pads:
+				features.append(torch.zeros(seq_size, features[0].size(1), dtype=features[0].dtype, device=self.device))
+				labels.append(-torch.ones(seq_size, dtype=labels[0].dtype, device=self.device))
+				coords.append(torch.zeros(seq_size, 3, dtype=coords[0].dtype, device=self.device) + float("inf"))
+				chain_masks.append(torch.zeros(seq_size, dtype=chain_masks[0].dtype, device=self.device))
 
 			features = self.pad_and_batch(features, pad_val="zero", max_size=seq_size)
 			labels = self.pad_and_batch(labels, pad_val="-one", max_size=seq_size)
@@ -297,7 +304,7 @@ class Data():
 		return pad_and_batched
 
 	def __len__(self):
-		return len(self.features)
+		return len(self.batches)
 	
 
 class DataCleaner():

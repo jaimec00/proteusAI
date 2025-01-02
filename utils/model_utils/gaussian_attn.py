@@ -27,22 +27,35 @@ import math
 import torch
 import triton
 import triton.language as tl
+import os
 
 # define configurations for autotuning
 configs = [	triton.Config({"BLOCK_I": i, "BLOCK_J": j}, num_warps=w)
-			for i in [16, 32, 64, 128]
-			for j in [16, 32, 64, 128]
-			for w in [4, 8]
+			for i in [16, 32, 64]
+			for j in [16, 32, 64]
+			for w in [4]
 		]
 
 # filter out configs that are too big
-def keep(conf):
-    BLOCK_I = conf.kwargs["BLOCK_I"]
-    BLOCK_J = conf.kwargs["BLOCK_J"]
-    return (BLOCK_I * BLOCK_J) <= 2048
+def keep_fwd(conf):
+	autotune = os.environ.get("ATTN_AUTOTUNE")
+	BLOCK_I = conf.kwargs["BLOCK_I"]
+	BLOCK_J = conf.kwargs["BLOCK_J"]
+	if autotune == "1":
+		return (BLOCK_I * BLOCK_J) <= 2048
+	else:
+		return ((BLOCK_I == 64) and (BLOCK_J == 32) and (conf.num_warps==4))
 
+def keep_bwd(conf):
+	autotune = os.environ.get("ATTN_AUTOTUNE")
+	BLOCK_I = conf.kwargs["BLOCK_I"]
+	BLOCK_J = conf.kwargs["BLOCK_J"]
+	if autotune == "1":
+		return (BLOCK_I * BLOCK_J) <= 2048
+	else:
+		return ((BLOCK_I == 32) and (BLOCK_J == 64) and (conf.num_warps==4))
 
-@triton.autotune(list(filter(keep, configs)),
+@triton.autotune(list(filter(keep_fwd, configs)),
 				 key=['tot_N', 'tot_Z', 'nheads', 'min_d_k'], # triton will not recompile if these inputs are the same (size of input tensor)
 				 restore_value=["O_ptr", "L_ptr"]) # make sure autotuning resets the outputs of this function for each configuration
 @triton.jit
@@ -255,7 +268,7 @@ def _attn_fwd(
 	tl.store(Oi_block_ptr, Oi, boundary_check=(0,1))
 	tl.store(Li_block_ptr, mi, boundary_check=(0,))
 
-@triton.autotune(list(filter(keep, configs)), 
+@triton.autotune(list(filter(keep_bwd, configs)), 
 				key=['tot_N', 'tot_Z', 'nheads', 'min_d_k'],
 				restore_value=["dQ_ptr", "dK_ptr", "dV_ptr"])
 @triton.jit

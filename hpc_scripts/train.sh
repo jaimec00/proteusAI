@@ -1,8 +1,8 @@
 #!/bin/bash
 
 #BSUB -n 1
-#BSUB -W 3:00
-#BSUB -R "rusage[mem=32GB]"
+#BSUB -W 10:00
+#BSUB -R "rusage[mem=128GB]"
 #BSUB -q gpu
 ##BSUB -R "select[a100]"
 #BSUB -R "select[l40 || a100]"
@@ -26,6 +26,7 @@ export TRITON_CACHE_DIR="/share/wangyy/hjc2538/proteusAI/.triton/cache"
 
 # print autotuning configs, to make sure it isnt autotuning each time, and to see for reference
 export TRITON_PRINT_AUTOTUNING="1"
+# export ATTN_AUTOTUNE="1"
 
 export CUDA_VISIBLE_DEVICES=0
 export CUDA_LAUNCH_BLOCKING=1

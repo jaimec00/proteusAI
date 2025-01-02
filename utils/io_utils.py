@@ -106,8 +106,10 @@ class Output():
 				train clusters: {data.num_train}
 				validation clusters: {data.num_val}
 				test clusters: {data.num_test}
-			batch size: {training_parameters.batch_size}
-			effective batch size: {training_parameters.batch_size * training_parameters.accumulation_steps}
+			batch size (tokens): {training_parameters.batch_size}
+			possible batch sizes (samples): {training_parameters.batch_sizes}
+			possible sequence lengths (tokens): {training_parameters.seq_sizes}
+			effective batch size (tokens): {training_parameters.batch_size * training_parameters.accumulation_steps}
 
 			epochs: {training_parameters.epochs}
 			phase I: {round(training_parameters.epochs * training_parameters.phase_split)} epochs

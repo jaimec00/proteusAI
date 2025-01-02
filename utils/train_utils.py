@@ -14,6 +14,7 @@ import torch.nn as nn
 
 from tqdm import tqdm
 import pandas as pd
+import os
 
 from proteusAI import proteusAI
 from utils.parameter_utils import (	HyperParameters, TrainingParameters, 
@@ -202,24 +203,30 @@ class TrainingRun():
 		not recompile each time a new input size is encountered.
 		'''
 
+		# set env vars to tell functions not to autotune (i.e. test a single configuration on the fly)
+		os.environ["ATTN_AUTOTUNE"] = "1" if mha else "0"
+		os.environ["WF_AUTOTUNE"] = "1" if wf else "0"
 
-		if not (wf or mha): return
-
-		self.log.info(f"performing triton autotuning for: {'protein_to_wavefunc' if wf}{' and ' if wf and mha}{'attn' if mha}")
+		self.output.log.info(f"performing triton autotuning for: {'protein_to_wavefunc' if wf else ''}{' and ' if (wf and mha) else ''}{'attn' if mha else ''}")
 		os.environ["TRITON_PRINT_AUTOTUNING"] = "1"
+
+		# these rely on env vars, so have to be evaluated after setting them
+		from utils.model_utils.featurization import protein_to_wavefunc
+		from utils.model_utils.gaussian_attn import attn
 
 		for batch_size in self.data.batch_sizes:
 			for seq_size in self.data.seq_sizes:
-				self.log.info(f"testing batch_size: {batch_size}, seq_size: {seq_size}")
-				coords = torch.rand((batch_size, seq_size, 3), device=self.gpu)
-				mask = torch.zeros(batch_size, seq_size, device=self.gpu)
+				
+				self.output.log.info(f"testing batch_size: {batch_size}, seq_size: {seq_size}")
+				coords = torch.rand((batch_size, seq_size, 3), dtype=torch.float32, device=self.gpu)
+				mask = torch.zeros(batch_size, seq_size, dtype=torch.bool, device=self.gpu)
 				if wf:
-					protein_to_wavefunc(coords, self.hyperparameters.d_model, self.hyperparameters.min_wl, self.hyperparameters.max_wl, self.hyperparameters.base, mask)
+					protein_to_wavefunc(coords, self.hyper_parameters.d_model, self.hyper_parameters.min_wl, self.hyper_parameters.max_wl, self.hyper_parameters.base, mask)
 				if mha:
-					qkv = torch.rand((batch_size, self.hyperparameters.nheads, seq_size, self.hyperparameters.d_model // self.hyperparameters.nheads), device=self.gpu)
-					spreads = self.hyperparameters.min_wl + (self.hyperparameters.max_wl-self.hyperparameters.min_wl)*(torch.logspace(0,1,self.hyperparameters.nheads, self.hyperparameters.base)-1)/(self.hyperparameters.base-1)
-					attn(qkv, qkv, qkv, coords, spreads, mask, mask, self.hyperparameters.min_rbf, self.hyperparameters.min_rbf)
-
+					qkv = torch.rand((batch_size, self.hyper_parameters.num_heads, seq_size, self.hyper_parameters.d_model // self.hyper_parameters.num_heads), dtype=torch.float32, device=self.gpu, requires_grad=True)
+					spreads = self.hyper_parameters.min_wl + (self.hyper_parameters.max_wl-self.hyper_parameters.min_wl)*(torch.logspace(0,1,self.hyper_parameters.num_heads, self.hyper_parameters.base, dtype=torch.float32, device=self.gpu)-1)/(self.hyper_parameters.base-1)
+					out = attn(qkv, qkv, qkv, coords, spreads, mask, mask, self.hyper_parameters.min_rbf, self.hyper_parameters.max_rbf)
+					out.sum().backward()
 
 	def train(self):
 		'''
@@ -241,8 +248,8 @@ class TrainingRun():
 
 		# log training info
 		self.output.log.info(f"\n\ninitializing training. "\
-							f"training on {len(self.data.train_data_loader)} batches "\
-							f"of batch size {self.training_parameters.batch_size} "\
+							f"training on {len(self.data.train_data)} batches "\
+							f"of batch size {self.training_parameters.batch_size} tokens "\
 							f"for {self.training_parameters.epochs} epochs.\n" )
 		
 		# loop through epochs
@@ -390,7 +397,7 @@ class Epoch():
 		self.setup_epoch()
 
 		# loop through batches
-		epoch_pbar = tqdm(total=len(self.training_run_parent.data.train_data_loader), desc="epoch_progress", unit="step")
+		epoch_pbar = tqdm(total=len(self.training_run_parent.data.train_data), desc="epoch_progress", unit="step")
 		for b_idx, (feature_batch, label_batch, coords_batch, chain_mask, key_padding_mask) in enumerate(self.training_run_parent.data.train_data):
 
 			if not self.training_run_parent.training_parameters.use_chain_mask:
