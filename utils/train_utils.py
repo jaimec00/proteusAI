@@ -601,6 +601,7 @@ class Batch():
 				ar_output_prediction = None
 
 		# compute one shot also
+
 		output_prediction = model(self.coords, self.predictions, features=self.features, key_padding_mask=self.key_padding_mask, auto_regressive=False, use_checkpoint=self.use_checkpoint)
 
 		# use the outputs as the inputs also
@@ -698,6 +699,9 @@ class ModelOutputs():
 
 		cel = loss_function(prediction.view(-1, prediction.size(2)).to(torch.float32), self.labels.view(-1).long()) if loss_function else self.compute_cel(prediction)
 		
+		# if cel.isnan().any():
+		# 	print(prediction.view(-1, prediction.size(2))[cel.isnan()], self.labels.view(-1)[cel.isnan()] )
+
 		valid = self.labels.view(-1)!=-1
 		
 		# doing manual calculation because needs to be float32 or get overflow in sum
@@ -707,6 +711,7 @@ class ModelOutputs():
 			cel = cel_sum / sum_norm
 		elif loss_type == "mean":
 			cel = cel_sum / valid.sum()
+
 
 		seq_sim = self.compute_seq_sim(prediction)
 

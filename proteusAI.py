@@ -391,6 +391,16 @@ class proteusAI(nn.Module):
 		else:
 			wavefunc = features
 
+
+		if wavefunc.isnan().any():
+			print(wavefunc.isnan().any(dim=-1).shape)
+			print(wavefunc[wavefunc.isnan().any(dim=-1)], wavefunc[wavefunc.isnan().any(dim=-1)].shape)
+			print(aa_onehot[wavefunc.isnan().any(dim=-1)], aa_onehot[wavefunc.isnan().any(dim=-1)].shape)
+			print(coords[wavefunc.isnan().any(dim=-1)], coords[wavefunc.isnan().any(dim=-1)].shape)
+			print((key_padding_mask[wavefunc.isnan().any(dim=-1).any(dim=-1)]), (key_padding_mask[wavefunc.isnan().any(dim=-1).any(dim=-1)]).shape)
+			print(wavefunc.shape)
+			
+
 		wavefunc = self.wavefunc_norm(wavefunc)
 
 		# contextualize environment with AAs if any sequence has context
@@ -402,7 +412,9 @@ class proteusAI(nn.Module):
 		if auto_regressive:
 			seq_probs = self.auto_regressive(wavefunc, coords, aa_onehot, key_padding_mask, temp=temp) # batch x N x 20 (returns one-hot tensor)
 		else: 
+
 			seq_probs = self.decode(wavefunc, coords, key_padding_mask) # batch x N x 20 (returns aa probability logits)
+
 
 		return seq_probs
 

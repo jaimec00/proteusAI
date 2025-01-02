@@ -145,6 +145,12 @@ class Data():
 				result = future.result()
 				if result is not None:  # Ignore failed results
 					pdb_features, pdb_labels, pdb_coords, pdb_chain_idxs = result
+					# there is a bug in wf kernel, iassumed no residues would occupy the same space, but it looks like
+					# some samples have multiple residues with the same position. just skipping these for now, as there are only
+					# a few i am aware of. will fix this in the kernel later and recompute. i am assuming this is due to
+					# multiple structures resolved, but i would have thought the pmpnn people woulf have filtered this,
+					# so that is unlikely. i will look into the source
+					if pdb_features.isnan().any(): continue
 					features.append(pdb_features)
 					labels.append(pdb_labels)
 					coords.append(pdb_coords)
@@ -231,6 +237,9 @@ class Data():
 				result = future.result()
 				if result is not None:  # Ignore failed results
 					batches.extend(result)
+
+		# shuffle batches, as mini batches are ordered by number of samples (descending) due to previous logic
+		random.shuffle(batches)
 					
 		self.batches = batches
 
