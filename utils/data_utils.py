@@ -10,7 +10,6 @@ import torch
 import torch.nn as nn
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import Dataset
-from torch.utils.data import DataLoader
 
 from Bio.Data.IUPACData import protein_letters_3to1
 from Bio.PDB import PDBParser
@@ -33,17 +32,19 @@ from utils.model_utils.featurization import protein_to_wavefunc
 
 # ----------------------------------------------------------------------------------------------------------------------
 
-class DataHolder(Dataset):
+class DataHolder():
 
 	'''
 	hold Data Objects, one each for train, test and val
 	'''
 
-	def __init__(self, data_path, num_train, num_val, num_test, max_size=10000, batch_size=32, feature_path="3.7_20.0_20.0", include_ncaa=False):
+	def __init__(self, data_path, num_train, num_val, num_test, max_size=10000, batch_sizes=[1], seq_sizes=[10000], batch_size=10000, feature_path="3.7_20.0_20.0", include_ncaa=False):
 
 		torch.serialization.add_safe_globals([defaultdict, list])
 
 		self.data_path = data_path
+		self.batch_sizes = batch_sizes
+		self.seq_sizes = seq_sizes
 		self.batch_size = batch_size
 		self.feature_path = feature_path
 		self.include_ncaa = include_ncaa
@@ -73,28 +74,28 @@ class DataHolder(Dataset):
 		self.val_pdbs = val_pdbs.loc[val_pdbs.CLUSTER.isin(val_pdbs.CLUSTER.drop_duplicates().sample(n=self.num_val)), ["CHAINID", "CLUSTER", "BIOUNIT"]]
 		self.test_pdbs = test_pdbs.loc[test_pdbs.CLUSTER.isin(test_pdbs.CLUSTER.drop_duplicates().sample(n=self.num_test)), ["CHAINID", "CLUSTER", "BIOUNIT"]]
 
-		self.train_data_loader = None
-		self.val_data_loader = None
-		self.test_data_loader = None
-
 		self.max_size = max_size
 
 	def load(self, data_type):
 		if data_type == "train":
-			self.train_data = Data(self.data_path, self.train_pdbs, self.num_train, self.max_size, self.feature_path, self.include_ncaa)
-			self.train_data_loader = DataLoader(self.train_data, self.batch_size, shuffle=True)
+			self.train_data = Data(self.data_path, self.train_pdbs, self.num_train, self.max_size, self.feature_path, self.include_ncaa, self.batch_sizes, self.seq_sizes, self.batch_size)
 		elif data_type == "val":
-			self.val_data = Data(self.data_path, self.val_pdbs, self.num_val, self.max_size, self.feature_path, self.include_ncaa)	
-			self.val_data_loader = DataLoader(self.val_data, self.batch_size, shuffle=True)
+			self.val_data = Data(self.data_path, self.val_pdbs, self.num_val, self.max_size, self.feature_path, self.include_ncaa, self.batch_sizes, self.seq_sizes, self.batch_size)	
 		elif data_type == "test":	
-			self.test_data = Data(self.data_path, self.test_pdbs, self.num_test, self.max_size, self.feature_path, self.include_ncaa)
-			self.test_data_loader = DataLoader(self.test_data, self.batch_size, shuffle=True)
-		
-class Data(Dataset):
-	def __init__(self, data_path, clusters_df, num_samples=None, max_size=10000, feature_path="3.7_20.0_20.0", include_ncaa=False, device="cpu"):
+			self.test_data = Data(self.data_path, self.test_pdbs, self.num_test, self.max_size, self.feature_path, self.include_ncaa, self.batch_sizes, self.seq_sizes, self.batch_size)
+
+class Data():
+	def __init__(self, data_path, clusters_df, num_samples=None, max_size=10000, feature_path="3.7_20.0_20.0", include_ncaa=False, batch_sizes=[1], seq_sizes=[10000], batch_size=10000, device="cpu"):
 		self.pdb_path = data_path / Path(feature_path) / Path("pdb")
 		self.include_ncaa = include_ncaa
 		self.max_size = max_size
+		self.batch_sizes = batch_sizes
+
+		assert all(math.log(size, 2).is_integer() for size in self.batch_sizes), "batch sizes must be powers of two"
+
+		self.seq_sizes = seq_sizes
+		self.batch_size = batch_size
+
 		self.device = device
 		self.clusters_df = clusters_df
 		self.clusters = defaultdict(lambda: defaultdict(list)) # self.clusters[BioUnit][features/labels/coords/chain_masks]
@@ -148,13 +149,13 @@ class Data(Dataset):
 					chain_idxs.append(pdb_chain_idxs)
 				load_pbar.update(1)
 
-		# send to device and have them ready for next epoch
+		# store for next epoch
 		self.features = features
 		self.labels = labels
 		self.coords = coords
 		self.chain_idxs = chain_idxs
 
-		self.epoch_max = max(sample.size(0) for sample in self.labels)
+		self.batch_data()
 
 	def add_data(self, pdb):
 
@@ -181,50 +182,123 @@ class Data(Dataset):
 
 		return None, None, None, None
 
-	def pad_tensor(self, tensor, pad_val="zero"):
+	def batch_data(self):
 
-		if pad_val=="zero":
-			pad = torch.zeros
-			weight = 1
-			bias = 0
-		elif pad_val=="one":
-			pad = torch.ones
-			weight = 1
-			bias = 0
-		elif pad_val=="-one":
-			pad = torch.ones
-			weight = -1
-			bias = 0
-		elif pad_val=="inf":
-			pad = torch.zeros
-			weight = 1
-			bias = float("inf")
-		else:
-			raise ValueError(f"invalid padding option {pad_val=}")
+		# shuffle indexes when creating data
+		random_idxs = random.shuffle(list(range(len(self.labels))))
+
+		# split the index list into mini batches of size max_batch_len. will send these initial batches
+		# to threads to process in parallel, then sort these mini batches, and split in two recursively until the batches are
+		# the target batch size
+		max_batch_size = max(self.batch_sizes)
+		random_idx_batches = [random_idxs[i:i+max_batch_size] for i in range(0, len(random_idxs), max_batch_size)]
+		random_idx_batches = [
+								sorted(
+									[
+										[i, self.labels[i].size(0)] 
+										for i in batch
+									], 
+									key=lambda x: x[1]
+								) 
+								for batch in random_idx_batches
+							]
 
 
-		pad_shape = [self.max_size - tensor.size(0)] + [tensor.size(i) for i in range(1,tensor.dim())]
-		pad_tensor = weight*pad(pad_shape, dtype=tensor.dtype, device=tensor.device) + bias
-		tensor = torch.cat((tensor, pad_tensor), dim=0)
+		def batch_subset(batch_idxs):
+			'''
+			recursively splits batch idxs until reach target number of tokens. 
+			starts at max batch d eg 64, and splits into 2
+			returns a list of lists, each inner list containing sample indexes and corresponding size
+			'''
 
-		return tensor
+			if sum(i[1] for i in batch_idxs) > self.batch_size:
+				split = len(batch_idxs) // 2
+				return batch_subset(batch_idxs[:split]) + batch_subset(batch_idxs[split:])
+
+			else: 
+				return [batch_idxs]
+
+
+		# parallel processing
+		with ThreadPoolExecutor(max_workers=8) as executor:
+			
+			# submit tasks
+			futures = [executor.submit(batch_subset, batch) for batch in random_batch_idxs]
+			
+			# collect results
+			batches = []
+			for future in as_completed(futures):
+
+				result = future.result()
+				if result is not None:  # Ignore failed results
+					batches.extend(result)
+					
+		self.batches = batches
+
+	def __iter__(self):
+		for batch in self.batches:
+			min_size = min(self.seq_sizes)
+			max_size = max(self.seq_sizes)
+			next_pow2 = 2**math.ceil(math.log(max(i[1] for i in batch), 2)) # next power of 2
+			seq_size = max(min_size, min(max_size, next_pow2))
+
+			features = []
+			labels = []
+			coords = []
+			chain_masks = []
+
+			for idx, _ in batch:
+				features.append(self.features[idx])
+				labels.append(self.labels[idx])
+				coords.append(self.coords[idx])
+				
+				start, end = self.chain_idxs[idx]
+				chain_mask = torch.ones(self.labels[idx].shape, dtype=torch.bool, device=self.device)
+				chain_mask[start:end] = False
+				chain_masks.append(chain_mask)
+
+			features = self.pad_and_batch(features, pad_val="zero", max_size=seq_size)
+			labels = self.pad_and_batch(labels, pad_val="-one", max_size=seq_size)
+			coords = self.pad_and_batch(coords, pad_val="inf", max_size=seq_size)
+			chain_masks = self.pad_and_batch(chain_masks, pad_val="one", max_size=seq_size)
+			key_padding_masks = labels==-1
+
+			yield features, labels, coords, chain_masks, key_padding_masks
+
+
+	def pad_and_batch(self, tensor_list, pad_val="zero", max_size=10000):
+
+		pad_options = {
+			"zero": (torch.zeros, 1, 0),
+			"one": (torch.ones, 1, 0),
+			"-one": (torch.ones, -1, 0),
+			"inf": (torch.zeros, 1, float("inf")),
+		}
+		try:
+			pad, weight, bias = pad_options[pad_val]
+		except KeyError:
+			raise ValueError(f"invalid padding option: {pad_val=}")
+
+		pad_and_batched = torch.stack(
+										[
+											torch.cat(
+														(	tensor, 
+															weight*pad(
+																		[max_size - tensor.size(0)] + \
+																		[tensor.size(i) for i in range(1,tensor.dim())], 
+																		dtype=tensor.dtype, device=tensor.device
+																	) + bias
+														), dim=0
+													)
+											for tensor in tensor_list
+										], dim=0
+									)
+
+		return pad_and_batched
 
 	def __len__(self):
 		return len(self.features)
 	
-	def __getitem__(self, idx):
-
-		# pad on the fly, so the tensors in memory are not all max_size, only padded as needed
-
-		item = self.pad_tensor(self.features[idx], pad_val="zero").to(self.device)
-		label = self.pad_tensor(self.labels[idx], pad_val="-one").to(self.device)
-		coords = self.pad_tensor(self.coords[idx], pad_val="inf").to(self.device)
-		chain_start_idx, chain_end_idx = self.chain_idxs[idx]
-		chain_mask = torch.ones(label.shape, dtype=torch.bool, device=self.device)
-		chain_mask[chain_start_idx:chain_end_idx] = False # pad values are placed after the sequence, so idxs are still correct
-		key_padding_mask = label==-1
-		
-		return item, label, coords, chain_mask, key_padding_mask
 
 class DataCleaner():
 

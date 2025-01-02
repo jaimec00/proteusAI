@@ -20,6 +20,8 @@ from utils.parameter_utils import (	HyperParameters, TrainingParameters,
 									InputPerturbationParameters, InputPerturbations )
 from utils.io_utils import Output
 from utils.data_utils import DataHolder
+from utils.model_utils.featurization import protein_to_wavefunc
+from utils.model_utils.gaussian_attn import attn
 
 # ----------------------------------------------------------------------------------------------------------------------
 
@@ -58,13 +60,14 @@ class TrainingRun():
 												args.hidden_linear_dim, args.temperature, 
 												args.max_tokens, args.use_model )
 		
-		self.training_parameters = TrainingParameters(  args.epochs, args.batch_size, 
+		self.training_parameters = TrainingParameters(  args.epochs, args.batch_sizes, args.seq_sizes, args.batch_size, 
 														args.accumulation_steps, args.learning_step, 
 														args.beta1, args.beta2, args.epsilon, 
 														args.dropout, args.label_smoothing, args.include_ncaa,
 														args.loss_type, args.loss_sum_norm, args.lr_scale, args.lr_patience,
 														args.phase_split, args.expand_decoders, args.training_type,
-														args.use_amp, args.use_checkpoint, args.use_chain_mask )
+														args.use_amp, args.use_checkpoint, args.use_chain_mask,
+														args.autotune_wf, args.autotune_mha )
 		
 		self.input_perturbation_parameters = InputPerturbationParameters(	args.initial_min_lbl_smooth_mean, args.final_min_lbl_smooth_mean, 
 																			args.max_lbl_smooth_mean, args.min_lbl_smooth_stdev, args.max_lbl_smooth_stdev, 
@@ -76,7 +79,7 @@ class TrainingRun():
 																			self.training_parameters.use_onehot, self.training_parameters.use_probs ) 
 		
 		feature_path = f"{args.min_wl}_{args.max_wl}_{args.base}"
-		self.data = DataHolder(args.data_path, args.num_train, args.num_val, args.num_test, args.max_tokens, args.batch_size, feature_path, args.include_ncaa)
+		self.data = DataHolder(args.data_path, args.num_train, args.num_val, args.num_test, args.max_tokens, args.batch_sizes, args.seq_sizes, args.batch_size, feature_path, args.include_ncaa)
 		self.output = Output(args.out_path, args.loss_plot, args.seq_plot, args.weights_path, args.write_dot)
 
 		self.train_losses = {
@@ -109,6 +112,8 @@ class TrainingRun():
 		self.scaler = GradScaler(self.gpu) if self.gpu is not None else None
 
 		self.output.log_hyperparameters(self.training_parameters, self.hyper_parameters, self.input_perturbation_parameters, self.data)
+
+		self.autotune_triton(wf=self.training_parameters.autotune_wf, mha=self.training_parameters.autotune_mha)
 
 	def setup_model(self):
 		'''
@@ -191,6 +196,31 @@ class TrainingRun():
 		self.output.log.info("loading loss function...") 
 		self.loss_function = nn.CrossEntropyLoss(ignore_index=-1, reduction="none", label_smoothing=self.training_parameters.label_smoothing)
 
+	def autotune_triton(self, wf=False, mha=True):
+		'''
+		performs autotuning once with each of the possible input sizes, this allows triton to find best configuration at the beginning and 
+		not recompile each time a new input size is encountered.
+		'''
+
+
+		if not (wf or mha): return
+
+		self.log.info(f"performing triton autotuning for: {'protein_to_wavefunc' if wf}{' and ' if wf and mha}{'attn' if mha}")
+		os.environ["TRITON_PRINT_AUTOTUNING"] = "1"
+
+		for batch_size in self.data.batch_sizes:
+			for seq_size in self.data.seq_sizes:
+				self.log.info(f"testing batch_size: {batch_size}, seq_size: {seq_size}")
+				coords = torch.rand((batch_size, seq_size, 3), device=self.gpu)
+				mask = torch.zeros(batch_size, seq_size, device=self.gpu)
+				if wf:
+					protein_to_wavefunc(coords, self.hyperparameters.d_model, self.hyperparameters.min_wl, self.hyperparameters.max_wl, self.hyperparameters.base, mask)
+				if mha:
+					qkv = torch.rand((batch_size, self.hyperparameters.nheads, seq_size, self.hyperparameters.d_model // self.hyperparameters.nheads), device=self.gpu)
+					spreads = self.hyperparameters.min_wl + (self.hyperparameters.max_wl-self.hyperparameters.min_wl)*(torch.logspace(0,1,self.hyperparameters.nheads, self.hyperparameters.base)-1)/(self.hyperparameters.base-1)
+					attn(qkv, qkv, qkv, coords, spreads, mask, mask, self.hyperparameters.min_rbf, self.hyperparameters.min_rbf)
+
+
 	def train(self):
 		'''
 		entry point for training the model. loads train and validation data, loops through epochs, plots training, 
@@ -242,7 +272,7 @@ class TrainingRun():
 			input_perturbations = self.get_test_perturbations()
 
 			# loop through validation batches
-			for feature_batch, label_batch, coords_batch, chain_mask, key_padding_mask in self.data.val_data_loader:
+			for feature_batch, label_batch, coords_batch, chain_mask, key_padding_mask in self.data.val_data:
 
 				if not self.training_parameters.use_chain_mask:
 					chain_mask = None
@@ -277,7 +307,7 @@ class TrainingRun():
 			input_perturbations = self.get_test_perturbations()
 
 			# loop through testing batches
-			for feature_batch, label_batch, coords_batch, chain_mask, key_padding_mask in self.data.test_data_loader:
+			for feature_batch, label_batch, coords_batch, chain_mask, key_padding_mask in self.data.test_data:
 
 				if not self.training_parameters.use_chain_mask:
 					chain_mask = None
@@ -361,7 +391,7 @@ class Epoch():
 
 		# loop through batches
 		epoch_pbar = tqdm(total=len(self.training_run_parent.data.train_data_loader), desc="epoch_progress", unit="step")
-		for b_idx, (feature_batch, label_batch, coords_batch, chain_mask, key_padding_mask) in enumerate(self.training_run_parent.data.train_data_loader):
+		for b_idx, (feature_batch, label_batch, coords_batch, chain_mask, key_padding_mask) in enumerate(self.training_run_parent.data.train_data):
 
 			if not self.training_run_parent.training_parameters.use_chain_mask:
 				chain_mask = None
