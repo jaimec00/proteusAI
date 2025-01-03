@@ -33,7 +33,7 @@ def profile_bwd(loss, start_event, end_event):
 	torch.cuda.reset_peak_memory_stats()
 	start_event.record()
 
-	loss.backward()
+	loss.backward(retain_graph=False)
 
 	end_event.record()
 	torch.cuda.synchronize()

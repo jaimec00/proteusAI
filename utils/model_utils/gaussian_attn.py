@@ -193,24 +193,26 @@ def _attn_fwd(
 		# load coordinates and compute distances (fp32)
 		dists_raw = (coords_I[:, None, :] - tl.load(coords_J_ptr, boundary_check=(0,1), padding_option="zero")[None, :, :]) # N x N x 4
 		dists = tl.sqrt(tl.sum(dists_raw * dists_raw, axis=2)) # N x N
-
-		# compute the rbfs
-		# clamp distances less than min dist to 1. min dist is the distance 
+		
+		# clamp distances less than min dist to 0. min dist is the distance 
 		# calculated to get an rbf of e.g. 0.9. higher rbfs would result in numerical 
 		# instability with exp, so just make those 1 (no scaling)
-		rbfs = tl.where(dists <= min_dist, 1.0, tl.exp(-(dists*dists) / (2*spread*spread))) # N x N (fp32)
+		dists = tl.where(dists <= min_dist, 0.0, dists) # N x N
+
+		# compute the rbfs
+		Rij = tl.exp(-(dists*dists) / (2*spread*spread)) # N x N (fp32)
 
 		# negative logits with close distances should be less negative
 		# eps = min_rbf, so maximum rbf (1) would result in logits of min_rbf
 		# minimum rbf (0.1) would result in logits of 1 (no scaling)
 		# this achieves the goal of inverting the rbf for negative logits
-		rbfs = tl.where(Sij < 0, (1+eps)-rbfs, rbfs) # N x N (fp32)
+		Rij = tl.where(Sij < 0, (2+eps)-Rij, Rij + 1) # N x N (fp32)
 
 		# set masked positions to -inf, include out of range dists in mask
 		attn_mask = (mask_i[:, None]) & (tl.load(mask_j_ptr, boundary_check=(0,), padding_option="zero").to(tl.int1)[None, :]) & (dists <= max_dist) # N x N
 
-		# scale attention logits by rbfs and mask invalid pairs
-		Sij = tl.where(attn_mask, Sij*rbfs, -inf) # N x N (fp32)
+		# scale attention logits by Rij and mask invalid pairs
+		Sij = tl.where(attn_mask, Sij*Rij, -inf) # N x N (fp32)
 
 		# max of each row
 		mij = tl.maximum(mi, tl.max(Sij, axis=1)) # N,  (fp32)
@@ -270,7 +272,7 @@ def _attn_fwd(
 
 @triton.autotune(list(filter(keep_bwd, configs)), 
 				key=['tot_N', 'tot_Z', 'nheads', 'min_d_k'],
-				restore_value=["dQ_ptr", "dK_ptr", "dV_ptr"])
+				restore_value=["dQ_ptr", "dK_ptr", "dV_ptr", "d_spreads_ptr"])
 @triton.jit
 def _attn_bwd(
 	Q_ptr, stride_Q_Z, stride_Q_H, stride_Q_N, stride_Q_D,
@@ -284,6 +286,7 @@ def _attn_bwd(
 	L_ptr, stride_L_Z, stride_L_H, stride_L_N,
 	coords_ptr, stride_coords_Z, stride_coords_N, stride_coords_S,
 	spreads_ptr, stride_spreads_H,
+	d_spreads_ptr, stride_d_spreads_H,
 	min_dists_ptr, stride_min_dists_H,
 	max_dists_ptr, stride_max_dists_H,
 	mask_ptr, stride_mask_Z, stride_mask_N,
@@ -417,9 +420,10 @@ def _attn_bwd(
 	# load mask
 	mask_j = tl.load(mask_j_ptr, boundary_check=(0, ), padding_option="zero").to(tl.int1)
 
-	# initialize dKj and dVj, in fp32
+	# initialize dKj and dVj and d_spread(scalar), in fp32
 	dKj = tl.zeros((BLOCK_J, min_d_k), dtype=tl.float32)
 	dVj = tl.zeros((BLOCK_J, min_d_k), dtype=tl.float32)
+	d_spread = 0.0
 
 	# load KjT and Vj (load as fp16 for matmul)
 	KjT = tl.load(KjT_ptr, boundary_check=(0, 1), padding_option="zero")
@@ -428,7 +432,7 @@ def _attn_bwd(
 	inf = float("inf") # convenience
 	for i in tl.range(0, triton.cdiv(tot_N, BLOCK_I), 1):
 
-		# fp16
+		# fp16, N x d_k
 		Qi = tl.load(Qi_block_ptr, boundary_check=(0, 1), padding_option="zero")
 
 		# load Qi and compute attn, ie Sij. inputs are fp16, Sij is fp32
@@ -438,20 +442,28 @@ def _attn_bwd(
 		dists_raw = (tl.load(coords_i_ptr, boundary_check=(0,1), padding_option="zero"))[:, None, :] - coords_j[None, :, :] # N x N x 4 
 		dists = tl.sqrt(tl.sum(dists_raw * dists_raw, axis=2)) # N x N 
 
-		# compute rbfs (fp32)
-		# clamp small distances to 1 (no scaling, unless negative, see 2 code 
-		# blocks below). only far distances are masked
-		rbfs = tl.where(dists < min_dist, 1.0, tl.exp(-(dists*dists) / (2.0*spread*spread))) # N x N (fp32)
+		# clamp small distances to 0. only far distances are masked
+		dists = tl.where(dists <= min_dist, 0.0, dists)
 
-		# for negative logits, small dists should be scaled to be less negative than for far distances
-		rbfs = tl.where(Sij < 0, (1+eps)-rbfs, rbfs)
+		# compute rbfs (fp32)
+		Rij = tl.exp(-(dists*dists) / (2.0*spread*spread)) # N x N (fp32)
+
+		# for positive logits, scale by 1 + rbf, which is in range (1,2). the multiplication ensures cross
+		# talk between attention weights and the rbfs themselves, and adding 1 to the rbf achieves two goals: 
+		# 	first, gradients for spreads AND Q and K are much more stable, since the logits are scaled up 
+		# 		dynamically, this increases the probability of gradient-friendly softmax. 
+		# 	second, this amplifies the effect of the original attention weights, allowing dynamic attention that is tied
+		# 		to the spatial geometry.
+		# for negative logits, small dists should be scaled to be less negative than for far distances. still range
+		# between 1 and 2, but the rbfs are "inverted", where large distance corresponds to 1 + min_rbf and small distance to 2
+		Rij = tl.where(Sij < 0, (2+eps)-Rij, 1 + Rij)
 
 		# mask out attention that is not relevant to this head
 		mask_i = tl.load(mask_i_ptr, boundary_check=(0, ), padding_option="zero").to(tl.int1)
 		attn_mask = mask_i[:, None] & (mask_j[None, :]) & (dists <= max_dist) # N x N
 
 		# scale attention logits by RBFs
-		Sij = tl.where(attn_mask, Sij*rbfs, -inf) # N x N (fp32)
+		SRij = tl.where(attn_mask, Sij*Rij, -inf) # N x N (fp32)
 		
 		# load log sum exp statistics
 		Li = tl.load(Li_block_ptr, boundary_check=(0, ), padding_option="zero") # (fp32)
@@ -459,7 +471,7 @@ def _attn_bwd(
 		# exp(Sij - Lij) = exp(Sij - mi - log(li)) = exp(Sij - mi) / exp(log(li)) 
 		# = exp(Sij - mi) / li
 		# mi is max for the row pre-softmax (for safe softmax), li is the normalizing term (sum of exponentials for that row)
-		Pij = tl.exp(tl.where(attn_mask, Sij - Li[:, None], -inf)) # N x N (fp32)
+		Pij = tl.exp(tl.where(attn_mask, SRij - Li[:, None], -inf)) # N x N (fp32)
 
 		# load gradient w.r.t output (fp32)
 		dOi = tl.load(dOi_block_ptr, boundary_check=(0, 1), padding_option="zero") # N x d_k
@@ -470,9 +482,27 @@ def _attn_bwd(
 		# compute gradient wrt Pij (dOi and Vj already in fp16)
 		dPij = tl.dot(dOi, tl.permute(Vj, (1,0)), out_dtype=tl.float32) # N x N
 
-		# load Di = rowsum(O*dO) to compute gradient wrt Sij
-		# note that multiplying dSij by rbfs for correct bwds
-		dSij = rbfs * Pij * (dPij -  tl.load(Di_block_ptr, boundary_check=(0, ), padding_option="zero")[:, None]) # N x N
+		# load Di = rowsum(O*dO) to compute gradient wrt Sij_rbf (grad of loss wrt Sij*rbf)
+		dSRij = Pij * (dPij -  tl.load(Di_block_ptr, boundary_check=(0, ), padding_option="zero")[:, None]) # N x N
+
+		# compute dSij, ie grad wrt Sij. note the direct communication between dSij and Rij
+		dSij = dSRij * Rij # N x N
+
+		# compute gradient wrt rbfs. also direct communication between dRij and Sij
+		dRij = dSRij * Sij
+
+		# compute the gradient wrt the spread of this head 
+		# 		d_rbfs/dspreads  = d/dspreads exp(-(d^2)/(2*sigma^2)) 
+		# 		= [d/dspreads * -(d^2)/(2*sigma^2)] * exp(-(d^2)/(2*sigma^2))
+		# 		= [d/dspreads * -(d^2)/(2*sigma^2)] * rbfs
+		# 		= [(d^2)/(sigma^3)] * rbfs
+		d_spread_factor = (dists*dists)/(spread*spread*spread)
+		d_spread_exp = tl.where(Sij < 0, Rij - 2 - eps, Rij-1) 	# get rid of the artifacts from adding 1 and/or inverting, 
+																# since addition of constants is not relevant to gradient
+																# note that if have negative logits, Rij is negative
+		
+		# accumulate the gradients for this head's spread
+		d_spread += tl.sum(tl.where(attn_mask, dRij * d_spread_exp * d_spread_factor , 0.0))
 
 		# compute gradient wrt Qij and perform atomic add to communicate between thread blocks (Kj already in fp16)
 		dQi = tl.dot(dSij.to(tl.float16), tl.permute(KjT, (1,0)), out_dtype=tl.float32) * softmax_scale # N x d_k
@@ -514,6 +544,10 @@ def _attn_bwd(
 	tl.store(dKj_block_ptr, dKj, boundary_check=(0,1))
 	tl.store(dVj_block_ptr, dVj, boundary_check=(0,1))
 
+	# store the grad wrt to spread for this head
+	d_spread_ptr = d_spreads_ptr + (offs_H*stride_d_spreads_H)
+	tl.atomic_add(d_spread_ptr, d_spread)
+
 def attn(Q, K, V, coords, spreads, mask=None, context_mask=None, min_rbf=0.1, max_rbf=0.9):
 	'''wrapper for attn so can call it with kwargs'''
 
@@ -537,6 +571,7 @@ class _attn(torch.autograd.Function):
 		ctx.Q_dtype = Q.dtype
 		ctx.K_dtype = K.dtype
 		ctx.V_dtype = V.dtype
+		ctx.spreads_dtype = spreads.dtype
 
 		# matmults done in fp16
 		Q = Q.to(torch.float16)
@@ -600,7 +635,7 @@ class _attn(torch.autograd.Function):
 		# load saved tensors (should all be float32, expect masks). also should all be contiguous from fwd
 		Q, K, V, O, L, coords, spreads, mask, context_mask = ctx.saved_tensors
 
-		# compute D for dS calculation
+		# compute D for dSR calculation
 		D = torch.sum(O*dO, dim=3).to(torch.float32) # Z x H x N x D -> Z x H x N
 
 		# cast to float16 for matmults
@@ -618,6 +653,7 @@ class _attn(torch.autograd.Function):
 		dQ = torch.zeros_like(Q).to(torch.float32).contiguous()
 		dK = torch.zeros_like(K).to(torch.float32).contiguous()
 		dV = torch.zeros_like(V).to(torch.float32).contiguous()
+		d_spreads = torch.zeros_like(spreads).to(torch.float32).contiguous()
 		
 		# define the grid
 		grid = lambda args: (
@@ -638,6 +674,7 @@ class _attn(torch.autograd.Function):
 							L, L.stride(0), L.stride(1), L.stride(2),
 							coords, coords.stride(0), coords.stride(1), coords.stride(2),
 							spreads, spreads.stride(0), 
+							d_spreads, d_spreads.stride(0), 
 							min_dists, min_dists.stride(0), 
 							max_dists, max_dists.stride(0), 
 							mask, mask.stride(0), mask.stride(1),
@@ -648,7 +685,8 @@ class _attn(torch.autograd.Function):
 		dQ = dQ.to(ctx.Q_dtype)
 		dK = dK.to(ctx.K_dtype)
 		dV = dV.to(ctx.V_dtype)
+		d_spreads = d_spreads.to(ctx.spreads_dtype)
 
 		# return the gradients
-		return dQ, dK, dV, None, None, None, None, None, None
+		return dQ, dK, dV, None, d_spreads, None, None, None, None
 
