@@ -60,6 +60,9 @@ description:	converts alpha carbon coordinates to features by modeling each Ca a
 				while this computation would be memory intensive in pytorch, protein_to_wavefunc quickly and efficiently computes the
 				exact features by fusing all the required operations into a single triton kernel, with no approximation.
 
+				TODO:
+					implement backward pass to compute gradients for min_wl, max_wl, and base
+
 '''
 # ----------------------------------------------------------------------------------------------------------------------
 
@@ -67,7 +70,31 @@ import torch
 import math
 import triton
 import triton.language as tl
+import os
 
+# define configurations for autotuning
+configs = [	triton.Config({"BLOCK_NI": i, "BLOCK_NJ": j, "BLOCK_D": d}, num_warps=w)
+			for i in [1, 2, 4, 8, 16, 32, 64]
+			for j in [1, 2, 4, 8, 16, 32, 64]
+			for d in [1, 2, 4, 8, 16, 32, 64]
+			for w in [4, 8]
+		]
+
+# filter out configs that are too big
+def keep_fwd(conf):
+	autotune = os.environ.get("ATTN_AUTOTUNE")
+	BLOCK_NI = conf.kwargs["BLOCK_NI"]
+	BLOCK_NJ = conf.kwargs["BLOCK_NJ"]
+	BLOCK_D = conf.kwargs["BLOCK_D"]
+	if autotune == "1":
+		return (BLOCK_NI * BLOCK_NJ) <= 2048
+	else:
+		return ((BLOCK_NI == 64) and (BLOCK_NJ == 32) and (BLOCK_D == 1) and (conf.num_warps==4))
+
+@triton.autotune(list(filter(keep_fwd, configs)),
+				 key=['tot_N', 'tot_Z', 'd_model'], # triton will not recompile if these inputs are the same (size of input tensor)
+				 restore_value=["out_ptr"] # make sure autotuning resets the outputs of this function for each configuration
+) 
 @triton.jit
 def _protein_to_wavefunc_kernel(
 		out_ptr, stride_out_Z, stride_out_N, stride_out_D,
@@ -75,7 +102,7 @@ def _protein_to_wavefunc_kernel(
 		wavenumber_ptr, stride_wavenumber,
 		mask_ptr, stride_mask_Z, stride_mask_N,
 
-		tot_batch: tl.constexpr,
+		tot_Z: tl.constexpr,
 		tot_N: tl.constexpr,
 		d_model:tl.constexpr, 
 		num_wn:tl.constexpr,
@@ -112,8 +139,6 @@ def _protein_to_wavefunc_kernel(
 		block_shape=(BLOCK_NI, ),
 		order=(0, )
 	)
-	mask_NI = tl.load(mask_NI_ptr, boundary_check=(0,), padding_option="zero").to(tl.int1) # NI
-
 	
 	coords_NJ_ptr = tl.make_block_ptr( # NJ x 3
 		base=coords_ptr + (Z*stride_coords_Z),
@@ -131,6 +156,24 @@ def _protein_to_wavefunc_kernel(
 		block_shape=(BLOCK_NJ, ),
 		order=(0, )
 	)
+
+	wavenumber_block_ptr = tl.make_block_ptr( # D,
+		base=wavenumber_ptr,
+		shape=(num_wn, ),
+		strides=(stride_wavenumber, ),
+		offsets=(0, ),
+		block_shape=(BLOCK_D, ),
+		order=(0, )
+	)
+	# initilize output pointer. atomic add does not support block pointers
+	# also need to add dummy NJ dimension. will be superposing along NJ and writing to 
+	# NI, so only use 1st NJ thread per NI to write output and avoid overlapping atomic adds
+	NI_out = NI_offs + tl.arange(0, BLOCK_NI)[:, None, None]
+	NJ_out = tl.zeros(( 1, BLOCK_NJ, 1), dtype=tl.int32)
+	D_out = tl.arange(0, 2*BLOCK_D)[None, None, :]
+	out_ptr = out_ptr + Z*stride_out_Z + (NI_out*stride_out_N) + (0*NJ_out) + (D_out*stride_out_D)
+
+	mask_NI = tl.load(mask_NI_ptr, boundary_check=(0,), padding_option="zero").to(tl.int1) # NI
 	mask_NJ = tl.load(mask_NJ_ptr, boundary_check=(0,), padding_option="zero").to(tl.int1) # NJ
 
 	mask_IJ = mask_NI[:, None] & mask_NJ[None, :] # NJ x NJ
@@ -141,23 +184,6 @@ def _protein_to_wavefunc_kernel(
 
 	dists_raw = coords_NI[:, None, :] - coords_NJ[None, :, :] # NI x NJ x 3
 	dists = tl.sqrt(tl.sum(dists_raw * dists_raw, axis=2)) # NI x NJ
-
-	wavenumber_block_ptr = tl.make_block_ptr( # D,
-		base=wavenumber_ptr,
-		shape=(num_wn, ),
-		strides=(stride_wavenumber, ),
-		offsets=(0, ),
-		block_shape=(BLOCK_D, ),
-		order=(0, )
-	)
-
-	# initilize output pointer. atomic add does not support block pointers
-	# also need to add dummy NJ dimension. will be superposing along NJ and writing to 
-	# NI, so only use 1st NJ thread per NI to write output and avoid overlapping atomic adds
-	NI_out = NI_offs + tl.arange(0, BLOCK_NI)[:, None, None]
-	NJ_out = tl.zeros(( 1, BLOCK_NJ, 1), dtype=tl.int32)
-	D_out = tl.arange(0, 2*BLOCK_D)[None, None, :]
-	out_ptr = out_ptr + Z*stride_out_Z + (NI_out*stride_out_N) + (0*NJ_out) + (D_out*stride_out_D)
 
 	# mask out NJ threads expect one per NI (reducing alogn NJ)
 	output_mask = mask_NI[:, None, None] & (((NJ_start + tl.arange(0, BLOCK_NJ)[None, :, None])%BLOCK_NJ)==0)
@@ -246,16 +272,10 @@ class _protein_to_wavefunc(torch.autograd.Function):
 		# prepare output
 		out = torch.zeros(batch, N, d_model, dtype=torch.float32, device=coords.device).contiguous()
 
-		# total block size should be less than number of threads per block (approx. 1024)
-		BLOCK_NJ = min(1024, triton.next_power_of_2(N))
-		BLOCK_NI = min(triton.cdiv(1024, BLOCK_NJ), triton.next_power_of_2(N))
-		BLOCK_D = triton.cdiv(BLOCK_NI * BLOCK_NJ, 1024)
-		# BLOCK_NI x BLOCK_NJ <= 1024
-
 		# define the grid
 		grid = lambda args: (	triton.cdiv(args["tot_N"], args["BLOCK_NI"]), 
 								triton.cdiv(args["tot_N"], args["BLOCK_NJ"]), 
-								args["tot_batch"]
+								args["tot_Z"]
 							)
 
 		# run the kernel
@@ -263,12 +283,8 @@ class _protein_to_wavefunc(torch.autograd.Function):
 											coords, coords.stride(0), coords.stride(1), coords.stride(2),
 											wavenumbers, wavenumbers.stride(0),
 											mask, mask.stride(0), mask.stride(1),
-											batch, N, d_model, num_wl, torch.pi,
-											BLOCK_NI, BLOCK_NJ, BLOCK_D
+											batch, N, d_model, num_wl, torch.pi
 										)
-
-		# normalize each feature by the maximum absolute value in the sample
-		# out.div_(out.abs().max(dim=1, keepdim=True).values)
 
 		return out
 

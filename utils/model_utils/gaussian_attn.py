@@ -11,15 +11,12 @@ description:	multi-scale gaussian flash attention kernel written in triton.
 				
 				Performs Flash attention, as described in the paper, but includes scaling of attention logits using RBF
 				functions based on euclidean distances of alpha carbon pairs. each head uses a distinct spread to compute
-				the RBFs, where the spread corresponds to (roughly) the average wavelength of the feature space it is 
-				operating on. small spread heads focus on local interactions, and large spread heads focus on global interactions. 
-				wavelength, in this context, refers to the wavelength used to compute the wave function features for a 
-				particular feature index, see utils/model_utils/featurization.py). 
+				the RBFs, The spreads are learnable, and they interact multiplicitavely with the attention weights, allowing
+				direct communication in both the forward and backward passes between RBFs and attention weights.  
 
 				Forward and backward passes are fully implemented, only need to:
 					add dropout with RNG seed to each,
 						will possibly not add this, as the attention is highly localized
-					add optimizations for speed to finish
 '''
 # ----------------------------------------------------------------------------------------------------------------------
 
@@ -473,7 +470,7 @@ def _attn_bwd(
 		# mi is max for the row pre-softmax (for safe softmax), li is the normalizing term (sum of exponentials for that row)
 		Pij = tl.exp(tl.where(attn_mask, SRij - Li[:, None], -inf)) # N x N (fp32)
 
-		# load gradient w.r.t output (fp32)
+		# load gradient w.r.t output (fp16)
 		dOi = tl.load(dOi_block_ptr, boundary_check=(0, 1), padding_option="zero") # N x d_k
 
 		# compute gradient wrt Vj (dOi already in fp16, out is in fp32)
@@ -482,7 +479,7 @@ def _attn_bwd(
 		# compute gradient wrt Pij (dOi and Vj already in fp16)
 		dPij = tl.dot(dOi, tl.permute(Vj, (1,0)), out_dtype=tl.float32) # N x N
 
-		# load Di = rowsum(O*dO) to compute gradient wrt Sij_rbf (grad of loss wrt Sij*rbf)
+		# load Di = rowsum(O*dO) to compute gradient wrt SRij (grad of loss wrt Sij*rbf)
 		dSRij = Pij * (dPij -  tl.load(Di_block_ptr, boundary_check=(0, ), padding_option="zero")[:, None]) # N x N
 
 		# compute dSij, ie grad wrt Sij. note the direct communication between dSij and Rij
@@ -493,8 +490,8 @@ def _attn_bwd(
 
 		# compute the gradient wrt the spread of this head 
 		# 		d_rbfs/dspreads  = d/dspreads exp(-(d^2)/(2*sigma^2)) 
-		# 		= [d/dspreads * -(d^2)/(2*sigma^2)] * exp(-(d^2)/(2*sigma^2))
-		# 		= [d/dspreads * -(d^2)/(2*sigma^2)] * rbfs
+		# 		= [d/dspreads -(d^2)/(2*sigma^2)] * exp(-(d^2)/(2*sigma^2))
+		# 		= [d/dspreads -(d^2)/(2*sigma^2)] * rbfs
 		# 		= [(d^2)/(sigma^3)] * rbfs
 		d_spread_factor = (dists*dists)/(spread*spread*spread)
 		d_spread_exp = tl.where(Sij < 0, Rij - 2 - eps, Rij-1) 	# get rid of the artifacts from adding 1 and/or inverting, 

@@ -158,9 +158,6 @@ def protein_to_wavefunc_torch(coords, d_model, min_wl, max_wl, base, mask=None, 
 	
 	features = features.view(features.size(0), features.size(1), -1)  # Final shape: batch x N x d_model
 
-	# normalize so that max is one and sign is preserved
-	# features.div_(features.abs().max(dim=1, keepdim=True).values)
-
 	return features
 
 def get_wavelengths(min_wl=3.7, max_wl=20, d_model=512, base=20, device="cpu"):

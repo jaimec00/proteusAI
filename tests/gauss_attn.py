@@ -17,7 +17,7 @@ def main():
 	assert d_model%2==0 and d_model%nheads==0
 	d_k = d_model // nheads
 	min_wl, max_wl, base = 3.7, 20, 20
-	min_rbf, max_rbf = 0.01, 0.99
+	min_rbf, max_rbf = 0.05, 0.99
 
 	coords = 3.7 * torch.normal(mean=0, std=1, size=(batch, N, 1), dtype=torch.float32, device=device).expand(batch, N, 3) # batch x N x 3
 	spreads = torch.logspace(0, 1, nheads, base, dtype=torch.float32, device=coords.device, requires_grad=True)
