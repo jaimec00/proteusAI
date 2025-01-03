@@ -6,44 +6,38 @@ from utils.model_utils.featurization import protein_to_wavefunc
 import triton
 import triton.language as tl
 import math
-from utils.test_utils import calculate_error
+from utils.test_utils import calculate_error, profile_func, profile_bwd 
 
 def main():
 
 	# device
 	device = torch.device('cuda')
 
-	batch, N, d_model = 1, 10000, 512
+	batch, N, d_model = 1, 8192, 512
 	min_wl, max_wl, base = 3.7, 20, 20
 	coords = max_wl * torch.randn((batch, N, 3), dtype=torch.float32, device=device)
 	mask = (torch.rand((batch, N), device=device) > 1)
 
+	# prepare the wavenumber values
+	num_wl = int(d_model//2) # define the number of wave functions to compute
+	wavelengths = (min_wl + (torch.logspace(0, 1, num_wl, base=base, device=coords.device, dtype=torch.float32) - 1) / (base - 1) * (max_wl - min_wl))
+	wavenumbers = (2 * torch.pi / wavelengths).contiguous()
+
+	params = [coords, wavenumbers, mask]
+
+	# for autotuning
+	protein_to_wavefunc(*params)
+
 	torch.cuda.synchronize()  # Ensure no ongoing GPU operations
 	start_event = torch.cuda.Event(enable_timing=True)
 	end_event = torch.cuda.Event(enable_timing=True)
+	atol, rtol = 1e-4, 0
 
-	torch.cuda.empty_cache()  # Clear the cache for consistent results
-	torch.cuda.reset_peak_memory_stats()
-	start_event.record()
-	triton_out = protein_to_wavefunc(coords, d_model, min_wl, max_wl, base, mask=mask)
-	end_event.record()
-	torch.cuda.synchronize()  # Wait for all GPU work to finish
-	triton_time = start_event.elapsed_time(end_event)  # Time in milliseconds
-	triton_memory = torch.cuda.max_memory_allocated()  # Peak memory in bytes
-
-	torch.cuda.empty_cache()  # Clear the cache for consistent results
-	torch.cuda.reset_peak_memory_stats()
-	start_event.record()
-	torch_out = protein_to_wavefunc_torch(coords, d_model, min_wl, max_wl, base, mask, 32).to(torch.float32)
-	# torch_out = triton_out
-	end_event.record()
-	torch.cuda.synchronize()  # Wait for all GPU work to finish
-	torch_time = start_event.elapsed_time(end_event)  # Time in milliseconds
-	torch_memory = torch.cuda.max_memory_allocated()  # Peak memory in bytes
+	triton_out, triton_time, triton_memory = profile_func(protein_to_wavefunc, params, start_event, end_event)
+	torch_out, torch_time, torch_memory = profile_func(protein_to_wavefunc_torch, params, start_event, end_event)
 
 	rel_error, abs_error = calculate_error(torch_out, triton_out)
-
-	print(f"triton implementation is correct: {torch.allclose(triton_out, torch_out, atol=1e-4, rtol=1e-4, equal_nan=True)}")
+	print(f"triton implementation is correct: {torch.allclose(triton_out, torch_out, atol=atol, rtol=rtol, equal_nan=False)}")
 	print(f"triton absolute error: {abs_error:.5f}")
 	print(f"triton relative error: {rel_error:.5f}")
 	print(f"triton percent error: {rel_error*100:.5f}%")
@@ -51,6 +45,9 @@ def main():
 	print(f"triton time: {triton_time:.3f} ms")
 	print(f"torch memory usage: {torch_memory / (1024 ** 3):.3f} GB")
 	print(f"triton kernel memory usage: {triton_memory / (1024 ** 3):.3f} GB")
+
+def autotune_wf():
+	pass
 
 def protein_to_wavefunc_torch(coords, d_model, min_wl, max_wl, base, mask=None, max_splits=16):
 
