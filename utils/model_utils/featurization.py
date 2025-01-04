@@ -97,7 +97,8 @@ def keep_fwd(conf):
 def _protein_to_wavefunc_fwd(
 		out_ptr, stride_out_Z, stride_out_N, stride_out_D,
 		coords_ptr, stride_coords_Z, stride_coords_N, stride_coords_space,
-		wavenumber_ptr, stride_wavenumber,
+		wavenumber_ptr, stride_wavenumber_K,
+		phases_ptr, stride_phases_Z, stride_phases_N, stride_phases_K,
 		mask_ptr, stride_mask_Z, stride_mask_N,
 
 		tot_Z: tl.constexpr,
@@ -163,7 +164,7 @@ def _protein_to_wavefunc_fwd(
 	coords_NJ = tl.load(coords_NJ_ptr, boundary_check=(0,1), padding_option="zero") # N x 3
 
 	# compute dists
-	dists_raw = coords_NI[:, None, :] - coords_NJ[None, :, :] # NI x NJ x 3
+	dists_raw = coords_NI[:, None, :] - coords_NJ[None, :, :] # NI x NJ x 4
 	dists = tl.sqrt(tl.sum(dists_raw * dists_raw, axis=2)) # NI x NJ
 	
 	# compute mask
@@ -172,11 +173,18 @@ def _protein_to_wavefunc_fwd(
 	mask_IJ = mask_NI[:, None] & mask_NJ[None, :] # NI x NJ
 	mask_IJ = mask_IJ & (dists!=0)
 
+	# init pointer for storing sum of phases
+	phase_ptr = phases_ptr + (Z*stride_phases_Z) + ((NI_offs + tl.arange(0, BLOCK_NI))*stride_phases_N)
+
 	# loop through wavenumbers
 	for d in tl.range(0, num_wn, 1):
 
 		# load wavenumber and compute phase
-		phase = (dists*tl.load(wavenumber_ptr, mask=d<num_wn, other=0)) % (2*pi) # NI x NJ
+		phase = (dists*tl.load(wavenumber_ptr, mask=d<num_wn, other=0)) # NI x NJ
+
+		# accumulate phase for this wavenumber for bwd pass
+		# 
+		tl.atomic_add(phase_ptr, tl.sum(tl.where(mask_IJ, phase, 0.0)))
 
 		# compute real and imag parts
 		real = tl.cos(phase) / tl.where(mask_IJ, dists, float("inf")) # NI x NJ
@@ -195,11 +203,9 @@ def _protein_to_wavefunc_fwd(
 		tl.atomic_add(out_ptr, features, mask=output_mask)
 
 		# advance pointers
-		wavenumber_ptr += 1*stride_wavenumber
+		wavenumber_ptr += 1*stride_wavenumber_K
+		phase_ptr += 1*stride_phases_K
 		out_ptr += 2*stride_out_D
-
-# @triton.jit
-# def _protein_to_wavefunc_bwd()
 
 def protein_to_wavefunc(coords, d_model, min_wl, max_wl, base, mask=None):
 	'''wrapper to call protein_to_wavefunc w/ kwargs'''
@@ -237,7 +243,8 @@ class _protein_to_wavefunc(torch.autograd.Function):
 
 		# checks
 		assert (coords.dim() == 3) and (coords.size(2) == 3), f"coords must be of shape (batch x N x 3), not {coords.shape}"
-		d_model = wavenumbers.size(0) * 2
+		num_wn = wavenumbers.size(0)
+		d_model = num_wn * 2
 		
 		# prepare data
 		batch, N, space = coords.shape # input dimensions
@@ -250,7 +257,7 @@ class _protein_to_wavefunc(torch.autograd.Function):
 		out = torch.zeros(batch, N, d_model, dtype=torch.float32, device=coords.device).contiguous()
 
 		# save sum of phases for bwd pass
-		phases = torch.zeros(d_model, dtype=torch.float32, device=coords.device).contiguous())
+		phases = torch.zeros(batch, N, num_wn, dtype=torch.float32, device=coords.device).contiguous())
 
 		# define the grid
 		grid = lambda args: (	triton.cdiv(args["tot_N"], args["BLOCK_NI"]), 
@@ -262,37 +269,41 @@ class _protein_to_wavefunc(torch.autograd.Function):
 		_protein_to_wavefunc_fwd[grid](  out, out.stride(0), out.stride(1), out.stride(2),
 											coords, coords.stride(0), coords.stride(1), coords.stride(2),
 											wavenumbers, wavenumbers.stride(0),
-											phases, phases.stride(0),
+											phases, phases.stride(0),phases.stride(1), phases.stride(2),
 											mask, mask.stride(0), mask.stride(1),
 											batch, N, d_model, num_wl, torch.pi
 										)
 
-		ctx.save_for_backward(out, phases, mask)
+		ctx.save_for_backward(out, phases)
 
 		return out
 
 	@staticmethod
 	def backward(ctx, dO):
 
-		out, phases, mask = ctx.saved_tensors
+		# load saved tensors from bwd
+		O, phases = ctx.saved_tensors
 
-		dwl_min = torch.tensor(0.0, dtype=torch.float32, device=out.device)
-		dwl_max = torch.tensor(0.0, dtype=torch.float32, device=out.device)
-		db = torch.tensor(0.0, dtype=torch.float32, device=out.device)
-		
-		grid = lambda args: (triton.cdiv(args["tot_N"], args["BLOCK_NI"]),
-							triton.cdiv(args["tot_N"], args["BLOCK_NJ"]),
-							args["tot_Z"]
-							)
-		
-		_protein_to_wavefunc_bwd[grid](
-											coords, coords.stride(0), coords.stride(1), coords.stride(2),
-											wavenumbers, wavenumbers.stride(0),
-											mask, mask.stride(0), mask.stride(1),
-											batch, N, d_model, num_wl, torch.pi
-		)
+		# dont even need triton for bwd
+		# also masks already applied to O and phases, masked vals are zero, so mult with dO ensures non valid positions dont
+		# contribute to the gradients
 
-		return None, None, dwl_min, dwl_max, db, None 
+		# seperate O and dO into real and imag parts (interleaved, real is first)
+		# from Z x N x d_model --> Z x N x d_model//2 
+		real_O = O[:, :, 0::2]
+		imag_O = O[:, :, 1::2]
+		real_dO = dO[:, :, 0::2]
+		imag_dO = dO[:, :, 1::2]
+
+		# compute inner term: 
+		# dO_2i+1 * O_2i - dO_2i * O_2i+1
+		inner_term = (imag_dO*real_O) - (real_dO*imag_O)
+
+		# compute grad wrt wavenumbers
+		# sum the Z dim and N dim, to accumulate gradients, as wavenumbers is a tensor of length d_model//2
+		dk = (phases * inner_term).sum(dim=0).sum(dim=0)  # Z x N x d_model//2 --> num_wn, 
+
+		return None, dk, None 
 
 def mod_d_model(wf_features, trgt_d_model):
 

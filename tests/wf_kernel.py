@@ -49,113 +49,30 @@ def main():
 def autotune_wf():
 	pass
 
-def protein_to_wavefunc_torch(coords, d_model, min_wl, max_wl, base, mask=None, max_splits=16):
-
+def protein_to_wavefunc_torch(coords, wavenumbers, mask=None):
 
 	# get shape
 	batch, N, _ = coords.shape
+	num_wn = wavenumbers.shape
+	d_model = num_wn*2
+	mask = mask if mask is not None else torch.zeros(batch, N, dtype=torch.bool, device=coords.device)
 
-	# **GET PAIRWISE DISTANCES**
-
-	# get the euclidean distances ; batch x N x 3 --> batch x N x N 
-	pw_dists = torch.sqrt_((coords.unsqueeze(1) - coords.unsqueeze(2)).pow_(2).sum(dim=-1)).to(coords.device)
+	dists = torch.sqrt(torch.sum((coords[:, :, None, :] - coords[:, None, :, :])**2)) # Z x N x N
 	
-	# diagonal set to 1 to avoid division by zero
-	pw_dists += torch.eye(pw_dists.size(1), device=coords.device).unsqueeze(0).expand(batch, -1, -1)
+	phases = dists[:, :, :, None] * wavenumbers[None, None, None, :] # Z x N x N x w
+	mask = mask[:, :, None] | mask[:, None, :] | (dists==0)
+	magnitudes = 1 / torch.where(mask, float("inf"), dists)[:, :, :, None] # Z x N x N x 1
 
-	# set masked values to inf to exclude from wave function calculation (1/inf = 0)
-	pw_dist_mask = mask.unsqueeze(1) | mask.unsqueeze(2) # batch x N x N
-	pw_dists.masked_fill_(pw_dist_mask, float('inf'))
-	
-	# **DEFINE WAVELENGTHS**
+	real = magnitudes * torch.cos(phases) # Z x N x N x w
+	imag = magnitudes * torch.sin(phases) # Z x N x N x w
 
-	# Create a tensor of wavelengths
-	wl_tensor = get_wavelengths(min_wl, max_wl, d_model, device=coords.device, base=base) # num_wl, 
+	real_superposition = real.sum(dim=1) # Z x N x w
+	imag_superposition = imag.sum(dim=1) # Z x N x w
 
-	# **COMPUTE GREENS FN
-
-	# split along wavelengths dimension, as these computations are independant from each other
-	splits = max(1, int(2**int( math.log( min(1, (N / 10000)) * max_splits, 2 ) )))
-	sub_wl = d_model // 2 // splits
-	wl_splits = [wl_tensor[step*sub_wl:(1+step)*sub_wl] for step in range(splits)]
-
-	# prepare pw_dists by expanding it to include num_wl
-	# batch x N x N --> batch x N x N x num_wl
-	pw_dists = pw_dists.unsqueeze(-1).expand(-1, -1, -1, sub_wl)
-	pw_dist_mask = pw_dist_mask.unsqueeze(-1).expand(-1, -1, -1, sub_wl)
-
-	del wl_tensor
-	torch.cuda.empty_cache()
-
-	real, imag = [], []
-
-	for wavelengths in wl_splits:
-
-		# convert wavelengths to k_values and set up for broadcasting along middle two dimensions (N and N from pw_dists)
-		k_values = (2 * torch.pi / wavelengths).unsqueeze(0).unsqueeze(0).unsqueeze(0).expand(pw_dists.size(0), pw_dists.size(1), pw_dists.size(1), -1) # num_wl, --> batch x N x N x num_wl
-
-		# compute phase ; batch x N x N x num_wl
-		phase = pw_dists.masked_fill(pw_dist_mask, 0.0).mul_(k_values)
-		
-		# need to compute real and imaginary parts seperately for memory efficiency
-		# **REAL PART CALCULATION**
-
-		# compute the Green's function real part
-		greens_fn_real = phase.cos_().div_(pw_dists) # batch x N x N x num_wl
-
-		# delete REFERENCE to phase, greens_fn_real still in memory
-		del phase
-		torch.cuda.empty_cache()
-
-		# take care of padded values and identity positions
-		batch, N, _, wl = greens_fn_real.shape
-		greens_fn_real.masked_fill_(torch.eye(N, device=coords.device, dtype=torch.bool).unsqueeze(0).unsqueeze(-1).expand(batch, -1, -1, wl) | pw_dist_mask, 0.0) # batch x N x N x num_wl
-		
-		# superpose all other Ca point sources to each Ca
-		superpositions_real = greens_fn_real.sum(dim=2)  # sum over the third dimension ; batch x N x num_wl
-		real.append(superpositions_real)
-		
-		del greens_fn_real
-		del superpositions_real
-		torch.cuda.empty_cache()
-
-		# **IMAGINARY PART CALCULATION**
-
-		phase = pw_dists.masked_fill(pw_dist_mask, 0.0).mul_(k_values) # batch x N x N x num_wl
-		greens_fn_imag = phase.sin_().div_(pw_dists) # batch x N x N x num_wl
-
-		# del pw_dists
-		del phase
-		torch.cuda.empty_cache()
-
-		greens_fn_imag.masked_fill_(torch.eye(N, device=coords.device, dtype=torch.bool).unsqueeze(0).unsqueeze(-1).expand(batch, -1, -1, wl) | pw_dist_mask, 0.0) # batch x N x N x num_wl
-		superpositions_imag = greens_fn_imag.sum(dim=2)  # sum over the third dimension ; batch x N x num_wl
-		imag.append(superpositions_imag)
-
-		del greens_fn_imag	
-		del superpositions_imag
-		torch.cuda.empty_cache()
-
-	del pw_dist_mask
-	del batch, N, _, wl
-	torch.cuda.empty_cache()
-
-	# join the k dimensions together | batch x N x num_wl
-	real = torch.cat(real, dim=-1)
-	imag = torch.cat(imag, dim=-1)
-
-	# **CONCAT INTO FEATURES**
-
-	# every k value gets two features
-	# want real and imaginary parts next to each other (for a single k)
-	features = torch.stack((real, imag), dim=-1) # batch x N x d_model // 2 x 2
-
-	del real, imag
-	torch.cuda.empty_cache()
-	
-	features = features.view(features.size(0), features.size(1), -1)  # Final shape: batch x N x d_model
+	features = torch.stack([real_superposition, imag_superposition], dim=-1).view(batch, N, d_model) # Z x N x d_model
 
 	return features
+
 
 def get_wavelengths(min_wl=3.7, max_wl=20, d_model=512, base=20, device="cpu"):
 
