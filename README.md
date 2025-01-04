@@ -13,15 +13,15 @@ where $|r - r_j|$ is Euclidaean norm of the positions vector of the $j^\text{th}
 
 Moreover, we can define multiple wavefunctions, each with a different k, and thus a different wavelength. In this case, wave functions corresponding to small $\lambda$ encode local interactions between the $C_a$ atoms, while larger $\lambda$ encode global interactions. Thus, the output of a wave function, $\psi_k$, corresponds to two features of the input $C_a$, a real part and imaginary part, i.e. a cos and sin term. To emphasize local interactions, since these are more prone to large fluctuations from small changes in wavelength, the wavelengths are sampled logarithmically from $\lambda_{min}$ to $\lambda_{max}$, given a base, $b$. This gives the general wave function featurization formula, termed Spatial Embedding (SE):
 
-$SE(2i, r) = \sum_{j=0}^N \frac{1}{{|r-r_j|}} cos( k_{2i} |r-r_j| ) $
+$SE(2i, r) = \sum_{j=0}^N \frac{1}{{|r-r_j|}} cos( k_{i} |r-r_j| ) $
 
-$SE(2i+1, r) = \sum_{j=0}^N \frac{1}{|r-r_j|} sin( k_{2i} |r-r_j| ) $
+$SE(2i+1, r) = \sum_{j=0}^N \frac{1}{|r-r_j|} sin( k_{i} |r-r_j| ) $
 
 Where, 
 
-$k_{2i} = \frac{2\pi}{\lambda_{2i}}$
+$k_{i} = \frac{2\pi}{\lambda_{i}}$
 
-$\lambda_{2i} = \lambda_{min} + (\lambda_{max}-\lambda_{min})(\frac{ b^{ 2i/d_{model} } - 1 } {b - 1} )$
+$\lambda_{i} = \lambda_{min} + (\lambda_{max}-\lambda_{min})(\frac{ b^{ 2i/d_{model} } - 1 } {b - 1} )$
 
 Note the similarity between this formula and the traditional positional encoding formula:
 
