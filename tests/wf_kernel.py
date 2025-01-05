@@ -13,7 +13,7 @@ def main():
 	# device
 	device = torch.device('cuda')
 
-	batch, N, d_model = 1, 1024, 512
+	batch, N, d_model = 3, 1024, 512
 	min_wl, max_wl, base = 3.7, 20, 20
 	coords = max_wl * torch.randn((batch, N, 3), dtype=torch.float32, device=device)
 	mask = (torch.rand((batch, N), device=device) > 1)

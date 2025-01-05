@@ -63,9 +63,9 @@ def _attn_fwd(
 	K_ptr, stride_K_Z, stride_K_H, stride_K_N, stride_K_D,
 	V_ptr, stride_V_Z, stride_V_H, stride_V_N, stride_V_D,
 	coords_ptr, stride_coords_Z, stride_coords_N, stride_coords_S,
-	spreads_ptr, stride_spreads_H,
-	min_dists_ptr, stride_min_dists_H,
-	max_dists_ptr, stride_max_dists_H,
+	spreads_ptr, stride_spreads_Z, stride_spreads_H,
+	min_dists_ptr, stride_min_dists_Z, stride_min_dists_H,
+	max_dists_ptr, stride_max_dists_Z, stride_max_dists_H,
 	L_ptr, stride_L_Z, stride_L_H, stride_L_N,
 	mask_ptr, stride_mask_Z, stride_mask_N,
 	context_mask_ptr, stride_context_mask_Z, stride_context_mask_N,
@@ -160,9 +160,9 @@ def _attn_fwd(
 	)
 
 	# get pointers for spreads, min and max distances for this head
-	spread_ptr = spreads_ptr + (offs_H*stride_spreads_H)
-	min_dist_ptr = min_dists_ptr + (offs_H*stride_min_dists_H)
-	max_dist_ptr = max_dists_ptr + (offs_H*stride_max_dists_H)
+	spread_ptr = spreads_ptr + (offs_Z*stride_spreads_Z) + (offs_H*stride_spreads_H)
+	min_dist_ptr = min_dists_ptr + (offs_Z*stride_min_dists_Z) + (offs_H*stride_min_dists_H)
+	max_dist_ptr = max_dists_ptr + (offs_Z*stride_max_dists_Z) + (offs_H*stride_max_dists_H)
 
 	# load the Qi block first, out of bounds values are 0, stays in SRAM throughout
 	Qi = tl.load(Qi_block_ptr, boundary_check=(0,1), padding_option="zero") # N x d_k (fp16)
@@ -283,10 +283,10 @@ def _attn_bwd(
 	D_ptr, stride_D_Z, stride_D_H, stride_D_N,
 	L_ptr, stride_L_Z, stride_L_H, stride_L_N,
 	coords_ptr, stride_coords_Z, stride_coords_N, stride_coords_S,
-	spreads_ptr, stride_spreads_H,
-	d_spreads_ptr, stride_d_spreads_H,
-	min_dists_ptr, stride_min_dists_H,
-	max_dists_ptr, stride_max_dists_H,
+	spreads_ptr, stride_spreads_Z, stride_spreads_H,
+	d_spreads_ptr, stride_d_spreads_Z, stride_d_spreads_H,
+	min_dists_ptr, stride_min_dists_Z, stride_min_dists_H,
+	max_dists_ptr, stride_max_dists_Z, stride_max_dists_H,
 	mask_ptr, stride_mask_Z, stride_mask_N,
 	context_mask_ptr, stride_context_mask_Z, stride_context_mask_N,
 
@@ -334,9 +334,9 @@ def _attn_bwd(
 	)
 
 	# spread and dist pointers
-	spread_ptr = spreads_ptr + (offs_H*stride_spreads_H)
-	min_dist_ptr = min_dists_ptr + (offs_H*stride_min_dists_H)
-	max_dist_ptr = max_dists_ptr + (offs_H*stride_max_dists_H)
+	spread_ptr = spreads_ptr + (offs_Z*stride_spreads_Z) + (offs_H*stride_spreads_H)
+	min_dist_ptr = min_dists_ptr + (offs_Z*stride_min_dists_Z) + (offs_H*stride_min_dists_H)
+	max_dist_ptr = max_dists_ptr + (offs_Z*stride_max_dists_Z) + (offs_H*stride_max_dists_H)
 
 	# initialize mask pointer for j columns 
 	mask_j_ptr = tl.make_block_ptr( # N 
@@ -543,7 +543,7 @@ def _attn_bwd(
 	tl.store(dVj_block_ptr, dVj, boundary_check=(0,1))
 
 	# store the grad wrt to spread for this head
-	d_spread_ptr = d_spreads_ptr + (offs_H*stride_d_spreads_H)
+	d_spread_ptr = d_spreads_ptr + (offs_Z*stride_d_spreads_Z) + (offs_H*stride_d_spreads_H)
 	tl.atomic_add(d_spread_ptr, d_spread)
 
 def attn(Q, K, V, coords, spreads, mask=None, context_mask=None, min_rbf=0.1, max_rbf=0.9):
@@ -563,7 +563,12 @@ class _attn(torch.autograd.Function):
 		softmax_scale = 1/(d_k**0.5)
 		assert d_model % 2 == 0, f"d_model must be divisible by 2, not {d_model=}"
 		assert coords.dim() == 3 and coords.size(2) == 3, f"coordinates must be of shape (batch, N, 3), not {coords.shape}" 
-		assert spreads.size(0) == nheads, f"number of spreads must be equal to nheads, not {spreads.size(0)=} and {nheads=}"
+		
+		# currently testing if adaptive spreads helps, so if it is not Z x H (just H, with fixed spreads for all batch) 
+		# then unsqueeze and expand batch dim so i dont have to change the kernel code to test
+		if spreads.dim() < 2: 
+			spreads = spreads.unsqueeze(0).expand(batch, -1)
+		assert spreads.size(1) == nheads, f"number of spreads per batch must be equal to nheads, not {spreads.size(0)=} and {nheads=}"
 		assert torch.all(spreads > 0), f"spreads must be a tensor of positive, non-zero floats, not {spreads}"
 
 		ctx.Q_dtype = Q.dtype
@@ -578,7 +583,7 @@ class _attn(torch.autograd.Function):
 
 		# rbfs in fp32
 		coords = coords.to(torch.float32)
-		spreads = spreads.to(torch.float32)
+		spreads = spreads.to(torch.float32) # this is now Z x H, need to update everything (forward and back)
 
 		# initialize mask, output, and logsumexp tensors
 		mask = (torch.ones(batch, N, dtype=torch.bool, device=Q.device) if mask is None else ~mask).contiguous() # batch x N
@@ -610,9 +615,9 @@ class _attn(torch.autograd.Function):
 							K, K.stride(0), K.stride(1), K.stride(2), K.stride(3), # batch x nhead x N x d_k
 							V, V.stride(0), V.stride(1), V.stride(2), V.stride(3), # batch x nhead x N x d_k
 							coords, coords.stride(0), coords.stride(1), coords.stride(2), # batch x N x 3
-							spreads, spreads.stride(0), # nhead, 
-							min_dists, min_dists.stride(0), # nhead, 
-							max_dists, max_dists.stride(0), # nhead, 
+							spreads, spreads.stride(0), spreads.stride(1), # Z x nhead, 
+							min_dists, min_dists.stride(0), min_dists.stride(1), # nhead, 
+							max_dists, max_dists.stride(0), max_dists.stride(1), # nhead, 
 							L, L.stride(0), L.stride(1), L.stride(2), # batch x nhead x N
 							mask, mask.stride(0), mask.stride(1), # batch x N
 							context_mask, context_mask.stride(0), context_mask.stride(1),
@@ -671,10 +676,10 @@ class _attn(torch.autograd.Function):
 							D, D.stride(0), D.stride(1), D.stride(2),
 							L, L.stride(0), L.stride(1), L.stride(2),
 							coords, coords.stride(0), coords.stride(1), coords.stride(2),
-							spreads, spreads.stride(0), 
-							d_spreads, d_spreads.stride(0), 
-							min_dists, min_dists.stride(0), 
-							max_dists, max_dists.stride(0), 
+							spreads, spreads.stride(0), spreads.stride(1), 
+							d_spreads, d_spreads.stride(0), d_spreads.stride(1), 
+							min_dists, min_dists.stride(0), min_dists.stride(1), 
+							max_dists, max_dists.stride(0), max_dists.stride(1), 
 							mask, mask.stride(0), mask.stride(1),
 							context_mask, context_mask.stride(0), context_mask.stride(1),
 							batch, N, nheads, d_k, max(d_k, 16), ctx.softmax_scale, ctx.min_rbf,

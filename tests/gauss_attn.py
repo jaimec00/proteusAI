@@ -20,7 +20,9 @@ def main():
 	min_rbf, max_rbf = 0.05, 0.99
 
 	coords = 3.7 * torch.normal(mean=0, std=1, size=(batch, N, 1), dtype=torch.float32, device=device).expand(batch, N, 3) # batch x N x 3
-	spreads = torch.logspace(0, 1, nheads, base, dtype=torch.float32, device=coords.device, requires_grad=True)
+	# spreads = torch.logspace(0, 1, nheads, base, dtype=torch.float32, device=coords.device, requires_grad=True).unsqueeze(0).expand(batch, -1)
+
+	spreads = torch.full((batch, nheads), 3, device=coords.device, dtype=torch.float32, requires_grad=True)
 
 	mask = torch.rand((batch, N), device=coords.device) > 1 # batch x N
 	context_mask = torch.rand((batch, N), device=coords.device) > 1 # batch x N
@@ -63,8 +65,6 @@ def main():
 		torch_func = torch_attn
 
 	torch_out, triton_out = test_fwd(torch_func, attn, params, start_event, end_event, atol, rtol)
-
-	# print(torch_out.grad_fn.next_functions)
 
 	print("\nbackward pass:\n")
 
@@ -153,7 +153,7 @@ def torch_attn(Q, K, V, coords, spreads, mask=None, context_mask=None, min_rbf=0
 	
 	assert coords.dim() == 3 and coords.size(2) == 3, f"coordinates must be of shape (batch, N, 3), not {coords.shape}" 
 
-	assert spreads.size(0) == nheads, f"number of spreads must be equal to nheads, not {spreads.size(0)=} and {nheads=}"
+	assert spreads.size(1) == nheads, f"number of spreads must be equal to nheads, not {spreads.size(0)=} and {nheads=}"
 	assert torch.all(spreads != 0), f"spreads must be a tensor of non-zero floats, not {spreads}"
 	mask = torch.zeros(batch, N) if mask is None else mask # batch x N
 	context_mask = mask if context_mask is None else context_mask # batch x N
@@ -171,10 +171,10 @@ def torch_attn(Q, K, V, coords, spreads, mask=None, context_mask=None, min_rbf=0
 	S = torch.matmul(Q, K.transpose(2,3)) / (d_k**0.5) # batch x nheads x N x N
 
 	dists = torch.sqrt(torch.sum((coords[:, :, None, :] - coords[:, None, :, :])**2, axis=3))[:, None, :, :]
-	dists = torch.where(dists <= min_dists[None, :, None, None], 0.0, dists) # clamp mins to one
-	dists_mask = dists > (max_dists[None, :, None, None])
+	dists = torch.where(dists <= min_dists[:, :, None, None], 0.0, dists) # clamp mins to one
+	dists_mask = dists > (max_dists[:, :, None, None])
 
-	rbfs = torch.exp(-(dists**2)/(2*(spreads[None, :, None, None]**2)))
+	rbfs = torch.exp(-(dists**2)/(2*(spreads[:, :, None, None]**2)))
 	rbfs = torch.where(S<0, (2+min_rbf)-rbfs, rbfs + 1)
 
 	attn_mask = mask[:, None, :, None] | context_mask[:, None, None, :] | dists_mask

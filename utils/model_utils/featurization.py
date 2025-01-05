@@ -106,7 +106,6 @@ def _protein_to_wavefunc_fwd(
 		tot_N: tl.constexpr,
 		d_model:tl.constexpr, 
 		num_wn:tl.constexpr,
-		pi:tl.constexpr,
 
 		BLOCK_NI: tl.constexpr,
 		BLOCK_NJ: tl.constexpr
@@ -178,16 +177,19 @@ def _protein_to_wavefunc_fwd(
 	cos_sum_ptr = cos_sums_ptr + (Z*stride_cos_sums_Z) + ((NI_offs + tl.arange(0, BLOCK_NI))*stride_cos_sums_N)
 	sin_sum_ptr = sin_sums_ptr + (Z*stride_sin_sums_Z) + ((NI_offs + tl.arange(0, BLOCK_NI))*stride_sin_sums_N)
 
+
 	# loop through wavenumbers
+	num_wn = d_model//2
 	for d in tl.range(0, num_wn, 1):
 
 		# load wavenumber and compute phase
 		phase = (dists*tl.load(wavenumber_ptr, mask=d<num_wn, other=0)) # NI x NJ
 
+		# accumulate sum of cosines and sins for this wavenumber for bwd pass
 		cos_sums = tl.sum(tl.where(mask_IJ, tl.cos(phase), 0.0), axis=1)
 		sin_sums = tl.sum(tl.where(mask_IJ, tl.sin(phase), 0.0), axis=1)
 
-		# accumulate phase for this wavenumber for bwd pass
+		# store to for bwd
 		tl.atomic_add(cos_sum_ptr, cos_sums, mask=mask_NI)
 		tl.atomic_add(sin_sum_ptr, sin_sums, mask=mask_NI)
 
@@ -279,7 +281,7 @@ class _protein_to_wavefunc(torch.autograd.Function):
 											cos_sums, cos_sums.stride(0),cos_sums.stride(1), cos_sums.stride(2),
 											sin_sums, sin_sums.stride(0),sin_sums.stride(1), sin_sums.stride(2),
 											mask, mask.stride(0), mask.stride(1),
-											batch, N, d_model, num_wn, torch.pi
+											batch, N, d_model
 										)
 
 		ctx.save_for_backward(cos_sums, sin_sums)
@@ -289,12 +291,12 @@ class _protein_to_wavefunc(torch.autograd.Function):
 	@staticmethod
 	def backward(ctx, dO):
 
+		# dont even need triton for bwd
+		# also masks already applied to O and phases, masked vals are zero, 
+		# so mult with dO ensures non valid positions dont contribute to the gradients
+
 		# load saved tensors from bwd
 		cos_sums, sin_sums = ctx.saved_tensors
-
-		# dont even need triton for bwd
-		# also masks already applied to O and phases, masked vals are zero, so mult with dO ensures non valid positions dont
-		# contribute to the gradients
 
 		# seperate dO into real and imag parts (interleaved, real is first)
 		# from Z x N x d_model --> Z x N x d_model//2 
