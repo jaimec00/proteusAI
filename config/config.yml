@@ -25,8 +25,8 @@ num_test: -1  # number of test samples to use; -1 means all available
 epochs: 20  # number of epochs
 
 # want as few combinations as possible to speed up triton autotuning
-batch_sizes: [1, 2, 4, 8, 16, 32, 64]  # possible samples per batch
-seq_sizes: [1024, 2048, 4096, 8192, 10000] # possible sequence lengths
+batch_sizes: [1, 2, 4, 8, 16, 32, 64, 128]  # possible samples per batch
+seq_sizes: [128, 256, 512, 1024, 2048, 4096, 8192, 10000] # possible sequence lengths
 batch_size: 20000 # number of valid tokens per batch 
 autotune_wf: False # whether to perform triton autotuning on protein_to_wavefunc
 autotune_mha: False # whether to perform triton autotuning on attn

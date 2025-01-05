@@ -116,7 +116,7 @@ class TrainingRun():
 
 		self.output.log_hyperparameters(self.training_parameters, self.hyper_parameters, self.input_perturbation_parameters, self.data)
 
-		self.autotune_triton(wf=self.training_parameters.autotune_wf, mha=self.training_parameters.autotune_mha)
+		# self.autotune_triton(wf=self.training_parameters.autotune_wf, mha=self.training_parameters.autotune_mha)
 
 	def setup_model(self):
 		'''
@@ -263,7 +263,7 @@ class TrainingRun():
 			# view current params
 			# i wanna check how wavelengths and spreads are being updated
 			# self.model.print_wavelengths(self.output)
-			self.model.print_spreads(self.output)
+			# self.model.print_spreads(self.output)
 			
 			epoch = Epoch(epoch, self)
 			epoch.epoch_loop()

@@ -150,7 +150,7 @@ class Data():
 					# a few i am aware of. will fix this in the kernel later and recompute. i am assuming this is due to
 					# multiple structures resolved, but i would have thought the pmpnn people woulf have filtered this,
 					# so that is unlikely. i will look into the source
-					if pdb_features.isnan().any(): continue
+					if pdb_features.isnan().any() or pdb_features.isinf().any(): continue
 					features.append(pdb_features)
 					labels.append(pdb_labels)
 					coords.append(pdb_coords)
@@ -198,7 +198,7 @@ class Data():
 		# sort first and then chunk and randomize mini chunks, so that batches have similar sized samples, yet still random when do batch_subset
 		idx_size = sorted(idx_size, key=lambda x: x[1])
 		# max_batch_size = len(self.labels)//4
-		max_batch_size = max(self.batch_sizes)*2
+		max_batch_size = max(self.batch_sizes)
 		random_idx_batches = [idx_size[i:i+max_batch_size] for i in range(0, len(idx_size), max_batch_size)]
 
 		for i in random_idx_batches:
@@ -275,7 +275,7 @@ class Data():
 
 			features = self.pad_and_batch(features, pad_val="zero", max_size=seq_size)
 			labels = self.pad_and_batch(labels, pad_val="-one", max_size=seq_size)
-			coords = self.pad_and_batch(coords, pad_val="inf", max_size=seq_size)
+			coords = self.pad_and_batch(coords, pad_val="zero", max_size=seq_size)
 			chain_masks = self.pad_and_batch(chain_masks, pad_val="one", max_size=seq_size)
 			key_padding_masks = labels==-1
 
