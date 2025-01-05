@@ -94,9 +94,12 @@ class Output():
 			d_model: {hyper_parameters.d_model}
 			min_wl: {hyper_parameters.min_wl} 
 			max_wl: {hyper_parameters.max_wl} 
-			base: {hyper_parameters.base} 
+			min_base: {hyper_parameters.min_base} 
+			max_base: {hyper_parameters.max_base} 
 			min_rbf: {hyper_parameters.min_rbf} 
 			max_rbf: {hyper_parameters.max_rbf} 
+			min_spread: {hyper_parameters.min_spread} 
+			max_spread: {hyper_parameters.max_spread} 			
 			number of decoders: {hyper_parameters.decoder_layers}
 			number of attention heads: {hyper_parameters.num_heads}
 			temperature: {hyper_parameters.temperature}

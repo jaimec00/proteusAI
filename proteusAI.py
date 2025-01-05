@@ -36,25 +36,41 @@ class SpatialEmbedding(nn.Module):
 		self.min_base = min_base
 		self.max_base = max_base
 
-		self.min_wl_param = nn.Parameter(torch.tensor(min_wl))
-		self.max_wl_param = nn.Parameter(torch.tensor(max_wl))
-		self.base_param = nn.Parameter(torch.tensor(min_base))
+		# initialize spreadparameters so that they are distributed evenly in logspace after softplus squash
+		# first define target percentages
+		# normalize by base+1 so not fully 1
+		# init_minwl_pct = 0.1
+		# init_maxwl_pct = 0.5
+		# init_base_pct = 0.5
+
+		# # inverse softplus squash to get target spread parameters. add eps bc sps never reaches zero, also friendlier gradients
+		# init_spread_params = torch.log(torch.exp(init_spread_pct/(1-init_spread_pct))-1)
+
+
+		# self.min_wl_param = nn.Parameter(torch.randn(1))
+		# self.max_wl_param = nn.Parameter(torch.randn(1))
+		# self.base_param = nn.Parameter(torch.randn(1))
+
+		# self.wavelengths_params = nn.Parameter(torch.randn(d_model//2))
+ 
 
 	def forward(self, coords, key_padding_mask):
 
 		# use learned params to compute the min and max wavelengths and base
 		# use softplus squash to map to 0-1. slightly more comp expensive than sigmoid but much smoother gradients, which
 		# is important here since these will be the final gradients computed in the backward pass
-		sps = lambda x: torch.log1p(torch.exp(x)) / (1+torch.log1p(torch.exp(x))) 
+		# sps = lambda x: torch.log1p(torch.exp(x)) / (1+torch.log1p(torch.exp(x))) 
 
-		min_wl = self.min_wl + sps(self.min_wl_param) * (self.max_wl-self.min_wl)
-		max_wl = min_wl + sps(self.max_wl_param) * (self.max_wl-min_wl)
-		base = min_base + sps(self.base_param) * (self.max_base-self.min_base)
+		# min_wl = self.min_wl + sps(self.min_wl_param) * (self.max_wl-self.min_wl)
+		# max_wl = min_wl + sps(self.max_wl_param) * (self.max_wl-min_wl)
+		# base = min_base + sps(self.base_param) * (self.max_base-self.min_base)
 
 		# use the wl range and base to compute the wavelengths
-		wavelength_idxs = torch.arange(0, d_model//2, device=min_wl.device, dtype=min_wl.dtype)
-		wavelengths = min_wl + (max_wl-min_wl)*(base**(wavelength_idxs/((d_model//2)-1))-1)/(base-1) # N,
-
+		# wavelength_idxs = torch.arange(0, d_model//2, device=min_wl.device, dtype=min_wl.dtype)
+		# wavelengths = min_wl + (max_wl-min_wl)*(base**(wavelength_idxs/((d_model//2)-1))-1)/(base-1) # N,
+		# wavelengths = self.min_wl + (self.max_wl - self.min_wl)*sps(self.wavelengths_params)
+		self.wavelengths =  3.7 + (3.7-20)*(torch.logspace(0,1,self.d_model//2,20) - 1) / 19
+		
 		# compute wavenumbers from wavelengths
 		wavenumbers = 2 * torch.pi / wavelengths
 
@@ -79,7 +95,17 @@ class MHA(nn.Module):
 		if self.d_model % self.nhead != 0: raise ValueError(f"number of dimensions ({self.d_model}) must be divisible by number of attention heads ({self.nhead})")
 		self.d_k = self.d_model // self.nhead
 
-		self.spreads_param = nn.Parameter(torch.randn(self.nhead, )) # nhead
+		# initialize spreadparameters so that they are distributed evenly in logspace after softplus squash
+		# first define target percentages
+		# normalize by base+1 so not fully 1
+		init_spread_pct = (torch.logspace(0,1,self.nhead, 20)) / 21
+
+		# inverse softplus squash to get target spread parameters. add eps bc sps never reaches zero, also friendlier gradients
+		init_spread_params = torch.log(torch.exp(init_spread_pct/(1-init_spread_pct))-1)
+
+		# init parameter w init target spread parameters
+		# self.spreads_param = nn.Parameter(init_spread_params) # nhead
+		self.pca_weights = nn.Parameter(torch.randn) # initialize the weights to be even to start
 		self.min_rbf = min_rbf
 		self.max_rbf = max_rbf
 		self.min_spread = min_spread
@@ -89,9 +115,9 @@ class MHA(nn.Module):
 		self.k_proj = nn.Parameter(torch.randn(self.nhead, self.d_model, self.d_k)) # nhead x d_model x d_k
 		self.v_proj = nn.Parameter(torch.randn(self.nhead, self.d_model, self.d_k)) # nhead x d_model x d_k
 
-		# self.q_layernorm = nn.LayerNorm(self.d_k)
-		# self.k_layernorm = nn.LayerNorm(self.d_k)
-		# self.v_layernorm = nn.LayerNorm(self.d_k)
+		self.q_layernorm = nn.LayerNorm(self.d_k)
+		self.k_layernorm = nn.LayerNorm(self.d_k)
+		self.v_layernorm = nn.LayerNorm(self.d_k)
 
 		self.out_proj = nn.Linear(d_model, d_model)
 	
@@ -126,15 +152,31 @@ class MHA(nn.Module):
 		V = torch.matmul(v.unsqueeze(1), self.v_proj.unsqueeze(0)) # batch x nhead x N x d_k
 
 		# apply layer norm after projection to ensure numerical stability
-		# Q = self.q_layernorm(Q)
-		# K = self.k_layernorm(K)
-		# V = self.v_layernorm(V)
+		Q = self.q_layernorm(Q)
+		K = self.k_layernorm(K)
+		V = self.v_layernorm(V)
 
-		sps = lambda x: torch.log1p(torch.exp(x)) / (1+torch.log1p(torch.exp(x))) 
-		spreads = self.min_spread + (self.max_spread-self.min_spreads)*sps(self.spreads_param)
+		# do PCA to determine the stdevs along the principle axes 
+		coords_centered = coords - coords.mean(axis=1).unsqueeze(1) # Z x N x 3
+		covariance_mat = torch.matmul(coords_centered.permute(0,2,1), coords_centered) # Z x 3 x N @ Z x N x 3--> Z x 3 x 3
+		eigenvalues, _ = torch.linalg.eigh(covariance_mat) # Z x 3
+		stdevs = torch.sqrt(eigenvalues) # Z x 3
+
+		# now each head's spread is a weighted avg of the stdevs along the principal axes
+		# the weights of each head are the learnable part
+		# pca weights is 3xH and stdevs are 3,
+		# softmax along 0th dim of the weights matrix so it sums to one for each head
+		normalized_weights = torch.softmax(self.pca_weights, dim=1) # Z x 3 x H
+		spreads = torch.matmul(stdevs.unsqueeze(1), normalized_weights).squeeze(1) # Z x 1 x 3 @ Z x 3 x H --> Z x H
+
+		# now each batch has a customized spread 
+
+		# sps = lambda x: torch.log1p(torch.exp(x)) / (1+torch.log1p(torch.exp(x))) 
+		# spreads = self.min_spread + (self.max_spread-self.min_spread)*sps(self.spreads_param)
+		# spreads = 3.7 + (16.3)*(torch.logspace(0,1,self.nhead,20) - 1) / 19
 
 		# perform attention
-		out = attn(Q, K, V, coords, self.spreads.to(Q.device), mask=key_padding_mask, context_mask=context_mask, min_rbf=self.min_rbf, max_rbf=self.max_rbf)  # batch x nhead x N x d_k
+		out = attn(Q, K, V, coords, spreads.to(Q.device), mask=key_padding_mask, context_mask=context_mask, min_rbf=self.min_rbf, max_rbf=self.max_rbf)  # batch x nhead x N x d_k
 
 		out = out.permute(0,2,3,1) # batch x N x d_k x nhead
 		out = out.reshape(batch, N, self.d_model) # batch x N x d_k x nhead --> batch x N x d_model
@@ -150,7 +192,7 @@ class Decoder(nn.Module):
 	decoder module, contains self-attention, normalization, dropout, feed-forward network, and residual connections
 	'''
 
-	def __init__(self, d_model=512, nhead=8, dim_feedforward=1024, dropout=0.1, min_rbf=0.1, max_rbf=0.9, min_spread=1, min_spread=30):
+	def __init__(self, d_model=512, nhead=8, dim_feedforward=1024, dropout=0.1, min_rbf=0.1, max_rbf=0.9, min_spread=1, max_spread=30):
 		super(Decoder, self).__init__()
 
 		# Self-attention layers
@@ -286,14 +328,15 @@ class proteusAI(nn.Module):
 
 		# wavefunc norm
 		# self.wavefunc_norm = nn.LayerNorm(d_model)
+		self.wavefunc_proj = nn.Linear(d_model, d_model)
 
 		# context
 		num_aas = 20 if not include_ncaa else 21
 		self.aa_embedding = nn.Linear(num_aas, d_model)
-		self.context_module = ContextModule(d_model, n_head, hidden_linear_dim, dropout, min_wl, max_wl, base, min_rbf, max_rbf, min_spread, max_spread)
+		self.context_module = ContextModule(d_model, n_head, hidden_linear_dim, dropout, min_rbf, max_rbf, min_spread, max_spread)
 
 		# decoder
-		self.decoders = nn.ModuleList([Decoder(d_model, n_head, hidden_linear_dim, dropout, min_wl, max_wl, base, min_rbf, max_rbf, min_spread, max_spread) for _ in range(decoder_layers)])
+		self.decoders = nn.ModuleList([Decoder(d_model, n_head, hidden_linear_dim, dropout, min_rbf, max_rbf, min_spread, max_spread) for _ in range(decoder_layers)])
 
 		# map to aa probs
 		self.linear = nn.Linear(d_model, num_aas)
@@ -301,16 +344,18 @@ class proteusAI(nn.Module):
 	def print_spreads(self, output):
 		sps = lambda x: torch.log1p(torch.exp(x)) / (1+torch.log1p(torch.exp(x))) 
 		for idx, decoder in enumerate(self.decoders):
-			spreads = decoder.self_attention.min_spread + (decoder.self_attention.max_spread - decoder.self_attention.min_spread) * sps(decoder.self_attention.spreads_param)
+			spreads = decoder.self_attn.min_spread + (decoder.self_attn.max_spread - decoder.self_attn.min_spread) * sps(decoder.self_attn.spreads_param)
 			output.log.info(f"decoder {idx}: {spreads=}")
 
 	def print_wavelengths(self, output):
 		sps = lambda x: torch.log1p(torch.exp(x)) / (1+torch.log1p(torch.exp(x))) 
-		min_wl = self.spatial_embedding.min_wl + (self.spatial_embedding.max_wl - self.spatial_embedding.min_wl) * sps(self.spatial_embedding.min_wl_param)
-		max_wl = min_wl + (self.spatial_embedding.max_wl - min_wl) * sps(self.spatial_embedding.max_wl_param)
-		base = self.spatial_embedding.min_base + (self.spatial_embedding.max_base - self.spatial_embedding.min_base) * sps(self.spatial_embedding.base_param)
+		# min_wl = self.spatial_embedding.min_wl + (self.spatial_embedding.max_wl - self.spatial_embedding.min_wl) * sps(self.spatial_embedding.min_wl_param)
+		# max_wl = min_wl + (self.spatial_embedding.max_wl - min_wl) * sps(self.spatial_embedding.max_wl_param)
+		# base = self.spatial_embedding.min_base + (self.spatial_embedding.max_base - self.spatial_embedding.min_base) * sps(self.spatial_embedding.base_param)
+		wls = self.spatial_embedding.min_wl + (self.spatial_embedding.max_wl - self.spatial_embedding.min_wl) * sps(self.spatial_embedding.wavelengths_params)
 
-		output.log.info(f"{min_wl=}, {max_wl=}, {base=}")
+		output.log.info(f"{wls=}")
+		# output.log.info(f"{min_wl.item()=}, {max_wl.item()=}, {base.item()=}")
 
 	def add_decoder(self, new_decoders=1):
 		'''
@@ -434,6 +479,7 @@ class proteusAI(nn.Module):
 			
 
 		# wavefunc = self.wavefunc_norm(wavefunc)
+		wavefunc = self.wavefunc_proj(wavefunc)
 
 		# contextualize environment with AAs if any sequence has context
 		has_context = (aa_onehot.any(dim=-1) & (~key_padding_mask)).any() # 1,

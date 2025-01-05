@@ -81,7 +81,7 @@ class TrainingRun():
 																			args.one_hot_injection_cycle_length,
 																			self.training_parameters.use_onehot, self.training_parameters.use_probs ) 
 		
-		feature_path = f"{args.min_wl}_{args.max_wl}_{args.base}"
+		feature_path = f"3.7_20.0_20.0" # this is irrelevant now, since not precomputing features, but will update later
 		self.data = DataHolder(args.data_path, args.num_train, args.num_val, args.num_test, args.max_tokens, args.batch_sizes, args.seq_sizes, args.batch_size, feature_path, args.include_ncaa)
 		self.output = Output(args.out_path, args.loss_plot, args.seq_plot, args.weights_path, args.write_dot)
 
@@ -259,13 +259,15 @@ class TrainingRun():
 		
 		# loop through epochs
 		for epoch in range(self.training_parameters.epochs):
-			epoch = Epoch(epoch, self)
-			epoch.epoch_loop()
 
 			# view current params
 			# i wanna check how wavelengths and spreads are being updated
-			self.model.print_wavelengths(self.output)
+			# self.model.print_wavelengths(self.output)
 			self.model.print_spreads(self.output)
+			
+			epoch = Epoch(epoch, self)
+			epoch.epoch_loop()
+
 
 		for key in self.train_losses.keys():
 			self.train_losses[key].to_numpy()

@@ -55,7 +55,7 @@ def init_args():
 	parser.add_argument("--max_wl", default=20.0, type=float, help="maximum wavelength to use in wavelength sampling")
 	parser.add_argument("--min_base", default=2.0, type=float, help="base to use in wavelength sampling")
 	parser.add_argument("--max_base", default=80.0, type=float, help="base to use in wavelength sampling")
-	parser.add_argument("--max_spread", default=1.0, type=float, help="base to use in wavelength sampling")
+	parser.add_argument("--min_spread", default=1.0, type=float, help="base to use in wavelength sampling")
 	parser.add_argument("--max_spread", default=30.0, type=float, help="base to use in wavelength sampling")
 	parser.add_argument("--min_rbf", default=0.1, type=float, help="minimum rbf scaling to apply in gaussian mha")
 	parser.add_argument("--max_rbf", default=0.9, type=float, help="maximum rbf scaling to apply in gaussian mha")
