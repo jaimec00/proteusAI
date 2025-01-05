@@ -22,7 +22,9 @@ def main():
 	# num_wl = int(d_model//2) # define the number of wave functions to compute
 	# wavelengths = (min_wl + (torch.logspace(0, 1, num_wl, base=base, device=coords.device, dtype=torch.float32) - 1) / (base - 1) * (max_wl - min_wl))
 	# wavenumbers = (2 * torch.pi / wavelengths).contiguous()
-	wavenumbers = torch.linspace(1,3,d_model//2, device=coords.device, dtype=torch.float32, requires_grad=True)
+	wavenumbers = torch.randint(1,10,(batch, d_model//2), device=coords.device, dtype=torch.float32, requires_grad=True)
+	print(wavenumbers.shape)
+	# torch.linspace(1,3,d_model//2, device=coords.device, dtype=torch.float32, requires_grad=True)
 
 	params = [coords, wavenumbers, mask]
 
@@ -79,13 +81,13 @@ def protein_to_wavefunc_torch(coords, wavenumbers, mask=None):
 
 	# get shape
 	batch, N, _ = coords.shape
-	num_wn = wavenumbers.size(0)
+	num_wn = wavenumbers.size(1)
 	d_model = num_wn*2
 	mask = mask if mask is not None else torch.zeros(batch, N, dtype=torch.bool, device=coords.device)
 
 	dists = torch.sqrt(torch.sum((coords[:, :, None, :] - coords[:, None, :, :])**2, dim=3)) # Z x N x N
 	
-	phases = dists[:, :, :, None] * wavenumbers[None, None, None, :] # Z x N x N x w
+	phases = dists[:, :, :, None] * wavenumbers[:, None, None, :] # Z x N x N x w
 	mask = mask[:, :, None] | mask[:, None, :] | (dists==0)
 	magnitudes = 1 / torch.where(mask, float("inf"), dists)[:, :, :, None] # Z x N x N x 1
 
@@ -94,6 +96,7 @@ def protein_to_wavefunc_torch(coords, wavenumbers, mask=None):
 
 	real_superposition = real.sum(dim=1) # Z x N x w
 	imag_superposition = imag.sum(dim=1) # Z x N x w
+
 
 	features = torch.stack([real_superposition, imag_superposition], dim=-1).view(batch, N, d_model) # Z x N x d_model
 
