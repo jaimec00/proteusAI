@@ -27,18 +27,39 @@ class SpatialEmbedding(nn.Module):
 	optimized triton kernel
 	serve as a generalization of positional encoding for irregularly spaced tokens in arbitrary dimensions. 
 	'''
-	def __init__(self, d_model=512, min_wl=3.7, max_wl=20, base=20):
+	def __init__(self, d_model=512, min_wl=3.7, max_wl=50, min_base=2, max_base=100):
 		super(SpatialEmbedding, self).__init__()
 
 		self.d_model = d_model
 		self.min_wl = min_wl
 		self.max_wl = max_wl
-		self.base = base
+		self.min_base = min_base
+		self.max_base = max_base
+
+		self.min_wl_param = nn.Parameter(torch.tensor(min_wl))
+		self.max_wl_param = nn.Parameter(torch.tensor(max_wl))
+		self.base_param = nn.Parameter(torch.tensor(min_base))
 
 	def forward(self, coords, key_padding_mask):
 
+		# use learned params to compute the min and max wavelengths and base
+		# use softplus squash to map to 0-1. slightly more comp expensive than sigmoid but much smoother gradients, which
+		# is important here since these will be the final gradients computed in the backward pass
+		sps = lambda x: torch.log1p(torch.exp(x)) / (1+torch.log1p(torch.exp(x))) 
+
+		min_wl = self.min_wl + sps(self.min_wl_param) * (self.max_wl-self.min_wl)
+		max_wl = min_wl + sps(self.max_wl_param) * (self.max_wl-min_wl)
+		base = min_base + sps(self.base_param) * (self.max_base-self.min_base)
+
+		# use the wl range and base to compute the wavelengths
+		wavelength_idxs = torch.arange(0, d_model//2, device=min_wl.device, dtype=min_wl.dtype)
+		wavelengths = min_wl + (max_wl-min_wl)*(base**(wavelength_idxs/((d_model//2)-1))-1)/(base-1) # N,
+
+		# compute wavenumbers from wavelengths
+		wavenumbers = 2 * torch.pi / wavelengths
+
 		# convert to wf features if not already precomputed
-		wavefunc = protein_to_wavefunc(coords, self.d_model, self.min_wl, self.max_wl, self.base, key_padding_mask) # batch x N x 3 --> batch x N x d_model
+		wavefunc = protein_to_wavefunc(coords, wavenumbers, key_padding_mask) # batch x N x 3 --> batch x N x d_model
 
 		return wavefunc
 
@@ -49,7 +70,7 @@ class MHA(nn.Module):
 	see the imported function (supports fwd and bwd) triton implementation
 	'''
 
-	def __init__(self, d_model=512, nhead=8, min_wl=3.7, max_wl=20, base=20, min_rbf=0.1, max_rbf=0.9):
+	def __init__(self, d_model=512, nhead=8, min_rbf=0.1, max_rbf=0.9, min_spread=1, max_spread=30):
 		super(MHA, self).__init__()
 
 		self.nhead = nhead
@@ -58,20 +79,23 @@ class MHA(nn.Module):
 		if self.d_model % self.nhead != 0: raise ValueError(f"number of dimensions ({self.d_model}) must be divisible by number of attention heads ({self.nhead})")
 		self.d_k = self.d_model // self.nhead
 
-		self.spreads = min_wl + (max_wl-min_wl)*(torch.logspace(0, 1, self.nhead, base) - 1)/(base-1) # nhead, 
+		self.spreads_param = nn.Parameter(torch.randn(self.nhead, )) # nhead
 		self.min_rbf = min_rbf
 		self.max_rbf = max_rbf
+		self.min_spread = min_spread
+		self.max_spread = max_spread
 
 		self.q_proj = nn.Parameter(torch.randn(self.nhead, self.d_model, self.d_k)) # nhead x d_model x d_k
 		self.k_proj = nn.Parameter(torch.randn(self.nhead, self.d_model, self.d_k)) # nhead x d_model x d_k
 		self.v_proj = nn.Parameter(torch.randn(self.nhead, self.d_model, self.d_k)) # nhead x d_model x d_k
 
-		self.q_layernorm = nn.LayerNorm(self.d_k)
-		self.k_layernorm = nn.LayerNorm(self.d_k)
-		self.v_layernorm = nn.LayerNorm(self.d_k)
+		# self.q_layernorm = nn.LayerNorm(self.d_k)
+		# self.k_layernorm = nn.LayerNorm(self.d_k)
+		# self.v_layernorm = nn.LayerNorm(self.d_k)
 
 		self.out_proj = nn.Linear(d_model, d_model)
 	
+
 	def forward(self, q, k, v, coords, key_padding_mask=None, context_mask=None, use_checkpoint=False):
 		'''
 		forward method, wrapper for _forward so can use gradient checkpointing in training
@@ -102,10 +126,12 @@ class MHA(nn.Module):
 		V = torch.matmul(v.unsqueeze(1), self.v_proj.unsqueeze(0)) # batch x nhead x N x d_k
 
 		# apply layer norm after projection to ensure numerical stability
-		Q = self.q_layernorm(Q)
-		K = self.k_layernorm(K)
-		V = self.v_layernorm(V)
+		# Q = self.q_layernorm(Q)
+		# K = self.k_layernorm(K)
+		# V = self.v_layernorm(V)
 
+		sps = lambda x: torch.log1p(torch.exp(x)) / (1+torch.log1p(torch.exp(x))) 
+		spreads = self.min_spread + (self.max_spread-self.min_spreads)*sps(self.spreads_param)
 
 		# perform attention
 		out = attn(Q, K, V, coords, self.spreads.to(Q.device), mask=key_padding_mask, context_mask=context_mask, min_rbf=self.min_rbf, max_rbf=self.max_rbf)  # batch x nhead x N x d_k
@@ -124,11 +150,11 @@ class Decoder(nn.Module):
 	decoder module, contains self-attention, normalization, dropout, feed-forward network, and residual connections
 	'''
 
-	def __init__(self, d_model=512, nhead=8, dim_feedforward=1024, dropout=0.1, min_wl=3.7, max_wl=20, base=20, min_rbf=0.1, max_rbf=0.9):
+	def __init__(self, d_model=512, nhead=8, dim_feedforward=1024, dropout=0.1, min_rbf=0.1, max_rbf=0.9, min_spread=1, min_spread=30):
 		super(Decoder, self).__init__()
 
 		# Self-attention layers
-		self.self_attn = MHA(d_model, nhead, min_wl=min_wl, max_wl=max_wl, base=base, min_rbf=min_rbf, max_rbf=max_rbf)
+		self.self_attn = MHA(d_model, nhead, min_rbf=min_rbf, max_rbf=max_rbf, min_spread=min_spread, max_spread=max_spread)
 
 		# Separate normalization layers
 		self.norm = nn.LayerNorm(d_model)
@@ -194,8 +220,8 @@ class ContextModule(Decoder):
 	batch have no context (all masked) but the rest only have some, avoids 
 	numerical instability
 	'''
-	def __init__(self, d_model=512, nhead=8, dim_feedforward=1024, dropout=0.1, min_wl=3.7, max_wl=20, base=20, min_rbf=0.1, max_rbf=0.9):
-		super(ContextModule, self).__init__(d_model, nhead, dim_feedforward, dropout, min_wl, max_wl, base, min_rbf, max_rbf)
+	def __init__(self, d_model=512, nhead=8, dim_feedforward=1024, dropout=0.1, min_rbf=0.1, max_rbf=0.9, min_spread=1, max_spread=30):
+		super(ContextModule, self).__init__(d_model, nhead, dim_feedforward, dropout, min_rbf, max_rbf, min_spread, max_spread)
 
 								                    # vvvvvvvvvv repetive, as can do single mask, but just for clarity
 	def forward(self, wavefunc, coords, aa_context, aa_context_mask=None, key_padding_mask=None, use_checkpoint=False):
@@ -244,7 +270,8 @@ class proteusAI(nn.Module):
 	'''
 	
 	def __init__(self, 	d_model, n_head, decoder_layers, hidden_linear_dim, dropout, 
-						min_wl=3.7, max_wl=20, base=20, min_rbf=0.1, max_rbf=0.9, 
+						min_wl=1, max_wl=50, min_base=20, max_base=80, min_rbf=0.05, max_rbf=0.99, 
+						min_spread=1, max_spread=30, 
 						active_decoders=-1, use_probs=False, include_ncaa=False
 					):
 
@@ -255,21 +282,35 @@ class proteusAI(nn.Module):
 		self.active_decoders = active_decoders if active_decoders != -1 else decoder_layers
 
 		# wavefunc
-		self.spatial_embedding = SpatialEmbedding(d_model, min_wl, max_wl, base)
+		self.spatial_embedding = SpatialEmbedding(d_model, min_wl, max_wl, min_base, max_base)
 
 		# wavefunc norm
-		self.wavefunc_norm = nn.LayerNorm(d_model)
+		# self.wavefunc_norm = nn.LayerNorm(d_model)
 
 		# context
 		num_aas = 20 if not include_ncaa else 21
 		self.aa_embedding = nn.Linear(num_aas, d_model)
-		self.context_module = ContextModule(d_model, n_head, hidden_linear_dim, dropout, min_wl, max_wl, base, min_rbf, max_rbf)
+		self.context_module = ContextModule(d_model, n_head, hidden_linear_dim, dropout, min_wl, max_wl, base, min_rbf, max_rbf, min_spread, max_spread)
 
 		# decoder
-		self.decoders = nn.ModuleList([Decoder(d_model, n_head, hidden_linear_dim, dropout, min_wl, max_wl, base, min_rbf, max_rbf) for _ in range(decoder_layers)])
+		self.decoders = nn.ModuleList([Decoder(d_model, n_head, hidden_linear_dim, dropout, min_wl, max_wl, base, min_rbf, max_rbf, min_spread, max_spread) for _ in range(decoder_layers)])
 
 		# map to aa probs
 		self.linear = nn.Linear(d_model, num_aas)
+
+	def print_spreads(self, output):
+		sps = lambda x: torch.log1p(torch.exp(x)) / (1+torch.log1p(torch.exp(x))) 
+		for idx, decoder in enumerate(self.decoders):
+			spreads = decoder.self_attention.min_spread + (decoder.self_attention.max_spread - decoder.self_attention.min_spread) * sps(decoder.self_attention.spreads_param)
+			output.log.info(f"decoder {idx}: {spreads=}")
+
+	def print_wavelengths(self, output):
+		sps = lambda x: torch.log1p(torch.exp(x)) / (1+torch.log1p(torch.exp(x))) 
+		min_wl = self.spatial_embedding.min_wl + (self.spatial_embedding.max_wl - self.spatial_embedding.min_wl) * sps(self.spatial_embedding.min_wl_param)
+		max_wl = min_wl + (self.spatial_embedding.max_wl - min_wl) * sps(self.spatial_embedding.max_wl_param)
+		base = self.spatial_embedding.min_base + (self.spatial_embedding.max_base - self.spatial_embedding.min_base) * sps(self.spatial_embedding.base_param)
+
+		output.log.info(f"{min_wl=}, {max_wl=}, {base=}")
 
 	def add_decoder(self, new_decoders=1):
 		'''
@@ -390,18 +431,9 @@ class proteusAI(nn.Module):
 			wavefunc = self.spatial_embedding(coords, key_padding_mask) # batch x N x 3 --> batch x N x d_model
 		else:
 			wavefunc = features
-
-
-		if wavefunc.isnan().any():
-			print(wavefunc.isnan().any(dim=-1).shape)
-			print(wavefunc[wavefunc.isnan().any(dim=-1)], wavefunc[wavefunc.isnan().any(dim=-1)].shape)
-			print(aa_onehot[wavefunc.isnan().any(dim=-1)], aa_onehot[wavefunc.isnan().any(dim=-1)].shape)
-			print(coords[wavefunc.isnan().any(dim=-1)], coords[wavefunc.isnan().any(dim=-1)].shape)
-			print((key_padding_mask[wavefunc.isnan().any(dim=-1).any(dim=-1)]), (key_padding_mask[wavefunc.isnan().any(dim=-1).any(dim=-1)]).shape)
-			print(wavefunc.shape)
 			
 
-		wavefunc = self.wavefunc_norm(wavefunc)
+		# wavefunc = self.wavefunc_norm(wavefunc)
 
 		# contextualize environment with AAs if any sequence has context
 		has_context = (aa_onehot.any(dim=-1) & (~key_padding_mask)).any() # 1,

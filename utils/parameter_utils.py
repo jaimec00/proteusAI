@@ -277,13 +277,16 @@ class InputPerturbations():
 
 class HyperParameters():
 
-	def __init__(self, d_model, min_wl, max_wl, base, min_rbf, max_rbf, num_heads, decoder_layers, hidden_linear_dim, temperature, max_tokens, use_model):
+	def __init__(self, d_model, min_wl, max_wl, min_base, max_base, min_rbf, max_rbf, min_spread, max_spread, num_heads, decoder_layers, hidden_linear_dim, temperature, max_tokens, use_model):
 		self.d_model = d_model
 		self.min_wl = min_wl
 		self.max_wl = max_wl
-		self.base = base
+		self.min_base = min_base
+		self.max_base = max_base
 		self.min_rbf = min_rbf
 		self.max_rbf = max_rbf 
+		self.min_spread = min_spread
+		self.max_spread = max_spread
 		self.num_heads = num_heads
 		self.decoder_layers = decoder_layers
 		self.hidden_linear_dim = hidden_linear_dim
@@ -294,7 +297,7 @@ class HyperParameters():
 class TrainingParameters():
 
 	def __init__(self, epochs, batch_sizes, seq_sizes, batch_size, accumulation_steps, learning_step, beta1, beta2, epsilon, dropout, label_smoothing, include_ncaa, 
-				loss_type, loss_sum_norm, lr_scale, lr_patience, phase_split, expand_decoders, training_type, use_amp, use_checkpoint, use_chain_mask, autotune_wf, autotune_mha
+				loss_type, loss_sum_norm, lr_scale, lr_patience, phase_split, expand_decoders, training_type, precomputed_features, use_amp, use_checkpoint, use_chain_mask, autotune_wf, autotune_mha
 				):
 		self.epochs = epochs
 		self.batch_sizes = batch_sizes
@@ -315,6 +318,7 @@ class TrainingParameters():
 		self.phase_split = phase_split
 		self.expand_decoders = expand_decoders
 		self.training_type = training_type
+		self.precomputed_features = precomputed_features
 		self.use_amp = use_amp
 		self.use_checkpoint = use_checkpoint
 		self.use_chain_mask = use_chain_mask

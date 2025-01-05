@@ -55,8 +55,10 @@ class TrainingRun():
 	def __init__(self, args):
 
 		self.hyper_parameters = HyperParameters(args.d_model,
-												args.min_wl, args.max_wl, args.base,
+												args.min_wl, args.max_wl, 
+												args.min_base, args.max_base,
 												args.min_rbf, args.max_rbf, 
+												args.min_spread, args.max_spread, 
 												args.num_heads, args.decoder_layers, 
 												args.hidden_linear_dim, args.temperature, 
 												args.max_tokens, args.use_model )
@@ -66,7 +68,7 @@ class TrainingRun():
 														args.beta1, args.beta2, args.epsilon, 
 														args.dropout, args.label_smoothing, args.include_ncaa,
 														args.loss_type, args.loss_sum_norm, args.lr_scale, args.lr_patience,
-														args.phase_split, args.expand_decoders, args.training_type,
+														args.phase_split, args.expand_decoders, args.training_type, args.precomputed_features,
 														args.use_amp, args.use_checkpoint, args.use_chain_mask,
 														args.autotune_wf, args.autotune_mha )
 		
@@ -137,9 +139,12 @@ class TrainingRun():
 								self.training_parameters.dropout,
 								self.hyper_parameters.min_wl,
 								self.hyper_parameters.max_wl,
-								self.hyper_parameters.base,
+								self.hyper_parameters.min_base,
+								self.hyper_parameters.max_base,
 								self.hyper_parameters.min_rbf,
 								self.hyper_parameters.max_rbf,
+								self.hyper_parameters.min_spread,
+								self.hyper_parameters.max_spread,
 								active_decoders=-1**(not self.training_parameters.expand_decoders), # -1 for no expansion (use all), 1 for expansion (start with one)
 								use_probs=self.training_parameters.use_probs,
 								include_ncaa=self.training_parameters.include_ncaa
@@ -257,6 +262,11 @@ class TrainingRun():
 			epoch = Epoch(epoch, self)
 			epoch.epoch_loop()
 
+			# view current params
+			# i wanna check how wavelengths and spreads are being updated
+			self.model.print_wavelengths(self.output)
+			self.model.print_spreads(self.output)
+
 		for key in self.train_losses.keys():
 			self.train_losses[key].to_numpy()
 		self.val_losses.to_numpy()
@@ -284,6 +294,9 @@ class TrainingRun():
 				if not self.training_parameters.use_chain_mask:
 					chain_mask = None
 
+				if not self.training_parameters.precomputed_features:
+					features_batch = None
+					
 				batch = Batch(feature_batch, label_batch, coords_batch, chain_mask, key_padding_mask, 
 							use_probs=self.training_parameters.use_probs, use_amp=False, auto_regressive=False,
 							loss_type=self.training_parameters.loss_type,
@@ -318,6 +331,8 @@ class TrainingRun():
 
 				if not self.training_parameters.use_chain_mask:
 					chain_mask = None
+				if not self.training_parameters.precomputed_features:
+					features_batch = None
 					
 				batch = Batch(feature_batch, label_batch, coords_batch, chain_mask, key_padding_mask, 
 								use_probs=self.training_parameters.use_probs, use_amp=False, 
@@ -402,6 +417,8 @@ class Epoch():
 
 			if not self.training_run_parent.training_parameters.use_chain_mask:
 				chain_mask = None
+			if not self.training_run_parent.training_parameters.precomputed_features:
+				features_batch = None
 					
 			batch = Batch(feature_batch, label_batch, coords_batch, chain_mask, key_padding_mask, 
 						b_idx=b_idx, epoch=self, use_probs=self.training_run_parent.training_parameters.use_probs, 
@@ -411,6 +428,7 @@ class Epoch():
 			batch.batch_learn()
 			# normalize by number of valid tokens if computing sum, else it is already normalized
 			self.gather_batch_losses(batch, normalize=self.training_run_parent.loss_function.reduction=="sum")
+
 
 			epoch_pbar.update(1)
 		
