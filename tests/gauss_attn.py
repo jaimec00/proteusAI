@@ -70,6 +70,20 @@ def main():
 
 	test_bwd(torch_out.sum(), triton_out.sum(), Q, K, V, spreads, start_event, end_event, atol, rtol)
 
+	Q.grad.zero_()
+	K.grad.zero_()
+	V.grad.zero_()
+	spreads.grad.zero_()
+
+	print("testing with dropout: \n")
+
+	# need seperate test for dropout, simply to ensure the mask is reproducible. not the best test but just run the kernel
+	# twice and see if get the same results
+	dropout = 0.1 # note that for practice rng seed is dynamically generated, make sure you hard code it in the fwd pass to test this
+	dropout_params = params + [dropout]
+	run1_fwd, run2_fwd = test_fwd(attn, attn, dropout_params, start_event, end_event, atol, rtol)
+	test_bwd(run1_fwd.sum(), run2_fwd.sum(), Q, K, V, spreads, start_event, end_event, atol, rtol)
+
 def autotune(func, params):
 
 	# autotune _attn_fwd
@@ -142,6 +156,8 @@ def test_bwd(torch_loss, triton_loss, Q, K, V, spreads_p, start_event, end_event
 	print(f"torch memory usage: {torch_memory / (1024 ** 3):.3f} GB")
 	print(f"triton kernel memory usage: {triton_memory / (1024 ** 3):.3f} GB")
 
+def test_dropout():
+	pass
 
 def torch_attn(Q, K, V, coords, spreads, mask=None, context_mask=None, min_rbf=0.1, max_rbf=0.9):
 
@@ -168,7 +184,7 @@ def torch_attn(Q, K, V, coords, spreads, mask=None, context_mask=None, min_rbf=0
 	mask = mask.contiguous()
 	context_mask = context_mask.contiguous()
 
-	S = torch.matmul(Q, K.transpose(2,3)) / (d_k**0.5) # batch x nheads x N x N
+	S = torch.matmul(Q, K.transpose(2,3)) / (2*(d_k**0.5)) # batch x nheads x N x N
 
 	dists = torch.sqrt(torch.sum((coords[:, :, None, :] - coords[:, None, :, :])**2, axis=3))[:, None, :, :]
 	dists = torch.where(dists <= min_dists[:, :, None, None], 0.0, dists) # clamp mins to one
