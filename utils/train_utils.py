@@ -421,6 +421,7 @@ class Epoch():
 				chain_mask = None
 			if not self.training_run_parent.training_parameters.precomputed_features:
 				features_batch = None
+
 					
 			batch = Batch(feature_batch, label_batch, coords_batch, chain_mask, key_padding_mask, 
 						b_idx=b_idx, epoch=self, use_probs=self.training_run_parent.training_parameters.use_probs, 
@@ -566,7 +567,7 @@ class Batch():
 		self.move_to(device)
 
 		# mask one hot positions for loss. also only compute loss for the representative chain of the sequence cluster
-		self.labels = torch.where(~(self.onehot_mask | self.chain_mask | self.key_padding_mask), self.labels, -1)
+		self.labels = torch.where(self.onehot_mask | self.chain_mask | self.key_padding_mask, -1, self.labels)
 
 		if self.use_amp: # optional AMP
 			with autocast('cuda'):
@@ -718,10 +719,7 @@ class ModelOutputs():
 		"""
 
 		cel = loss_function(prediction.view(-1, prediction.size(2)).to(torch.float32), self.labels.view(-1).long()) if loss_function else self.compute_cel(prediction)
-		
-		# if cel.isnan().any():
-		# 	print(prediction.view(-1, prediction.size(2))[cel.isnan()], self.labels.view(-1)[cel.isnan()] )
-
+	
 		valid = self.labels.view(-1)!=-1
 		
 		# doing manual calculation because needs to be float32 or get overflow in sum

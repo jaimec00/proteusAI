@@ -9,14 +9,14 @@ max_rbf: 0.99  # maximum rbf scaling factor in gaussian mha
 min_spread: 1
 max_spread: 30
 num_heads: 8  # number of attention heads to perform the training with
-decoder_layers: 4 # number of decoder layers
+decoder_layers: 8 # number of decoder layers
 hidden_linear_dim: 1024  # intermediate dimensions of decoder feed forward layer
 temperature: 0.1  # temperature for autoregressive inference (for testing)
 max_tokens: 10000  # maximum number of tokens
 include_ncaa: False # whether to include non-canonical amino acids in loss calculation
 use_amp: True  # whether to use automatic mixed precision
 use_checkpoint: False # whether to use gradient checkpointing for the MHA module
-use_chain_mask: False # whether to mask all chains except the sequence cluster representative
+use_chain_mask: True # whether to mask all chains except the sequence cluster representative
 
 # Training configuration
 num_train: -1  # number of training samples to use; -1 means all available
@@ -38,7 +38,7 @@ beta2: 0.98  # learning rate
 epsilon: 10e-9  # learning rate
 dropout: 0.1  # percentage of dropout
 label_smoothing: 0.1  # percentage of label smoothing to use on the output labels for loss calculation
-loss_type: "mean"  # whether to use the 'sum' or the 'mean' for CEL
+loss_type: "sum"  # whether to use the 'sum' or the 'mean' for CEL
 loss_sum_norm: 2000
 lr_scale: 0.1  # LR scaling factor
 lr_patience: 2  # LR patience for scaling down after plateau

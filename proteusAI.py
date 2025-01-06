@@ -53,20 +53,14 @@ class SpatialEmbedding(nn.Module):
 
 		# self.wavelengths_params = nn.Parameter(torch.randn(d_model//2))
  
+		# self.wavelengths_weights = nn.Parameter(torch.randn((d_model//2, d_model//2)))
 
-	def forward(self, coords, stdevs, key_padding_mask):
+	def forward(self, coords, wavelengths, key_padding_mask):
 
-		# self.wavelengths =  3.7 + (3.7-20)*(torch.logspace(0,1,self.d_model//2,20) - 1) / 19
-		# stdevs is Z x 3
-		# get the max
-		avg_wl = stdevs.max(dim=1) # Z x 1
-		base = 10
-
-		# get first half of the feature index
-		# samples wavelengths near the average more frequently than those far away
-		small_wl = avg_wl * (base**(torch.arange(d_model//4, 0, -1) / (d_model//2)) - 1).unsqueeze(0) / (base - 1) # Z x d_model//4
-		big_wl = avg_wl + (avg_wl * (base**(torch.arange(0, d_model//4, 1) / (d_model//2)) - 1).unsqueeze(0) / (base - 1)) # Z x d_model//4
-		wavelengths = torch.cat([small_wl, big_wl], axis=1) # Z x d_model//2
+		# normalize the weight matrix along the 0th dim, so when dot wavelengths by weights, each sample gets a vector of 
+		# the weighted sums of its sample-specific wavelengths for each d_model//2 index
+		# wavelength_weights_norm = torch.softmax(self.wavelengths_weights, dim=0)
+		# wavelengths = torch.mathmul(wavelengths, wavelength_weights_norm) # Z x d_model//2 @ d_model//2 x d_model//2 --> Z x d_model//2
 
 		# compute wavenumbers from wavelengths
 		wavenumbers = 2 * torch.pi / wavelengths
@@ -92,21 +86,13 @@ class MHA(nn.Module):
 		if self.d_model % self.nhead != 0: raise ValueError(f"number of dimensions ({self.d_model}) must be divisible by number of attention heads ({self.nhead})")
 		self.d_k = self.d_model // self.nhead
 
-		# initialize spreadparameters so that they are distributed evenly in logspace after softplus squash
-		# first define target percentages
-		# normalize by base+1 so not fully 1
-		init_spread_pct = (torch.logspace(0,1,self.nhead, 20)) / 21
+		# weights matrix so each head's spread is a weighted sum of the custom wavelengths
+		# self.spread_weights = nn.Parameter(torch.randn([d_model//2, self.nhead])) 
 
-		# inverse softplus squash to get target spread parameters. add eps bc sps never reaches zero, also friendlier gradients
-		init_spread_params = torch.log(torch.exp(init_spread_pct/(1-init_spread_pct))-1)
-
-		# init parameter w init target spread parameters
-		# self.spreads_param = nn.Parameter(init_spread_params) # nhead
-		self.pca_weights = nn.Parameter(torch.randn([3, self.nhead])) 
 		self.min_rbf = min_rbf
 		self.max_rbf = max_rbf
-		self.min_spread = min_spread
-		self.max_spread = max_spread
+		# self.min_spread = min_spread
+		# self.max_spread = max_spread
 
 		self.q_proj = nn.Parameter(torch.randn(self.nhead, self.d_model, self.d_k)) # nhead x d_model x d_k
 		self.k_proj = nn.Parameter(torch.randn(self.nhead, self.d_model, self.d_k)) # nhead x d_model x d_k
@@ -119,21 +105,21 @@ class MHA(nn.Module):
 		self.out_proj = nn.Linear(d_model, d_model)
 	
 
-	def forward(self, q, k, v, coords, stdevs, key_padding_mask=None, context_mask=None, use_checkpoint=False):
+	def forward(self, q, k, v, coords, wavelengths, key_padding_mask=None, context_mask=None, use_checkpoint=False):
 		'''
 		forward method, wrapper for _forward so can use gradient checkpointing in training
 		'''
 		if use_checkpoint:
 			out = checkpoint(
 				self._forward,
-				q, k, v, coords, key_padding_mask, context_mask
+				q, k, v, coords, wavelengths, key_padding_mask, context_mask
 			)
 		else:
-			out = self._forward(q, k, v, coords, stdevs, key_padding_mask, context_mask)
+			out = self._forward(q, k, v, coords, wavelengths, key_padding_mask, context_mask)
 
 		return out
 
-	def _forward(self, q, k, v, coords, stdevs, key_padding_mask=None, context_mask=None):
+	def _forward(self, q, k, v, coords, wavelengths, key_padding_mask=None, context_mask=None):
 		'''
 		performs scaled dot-product attention weighted by Gaussian RBF 
 		'''
@@ -153,17 +139,13 @@ class MHA(nn.Module):
 		K = self.k_layernorm(K)
 		V = self.v_layernorm(V)
 
-		# pca weights is 3 x H and stdevs are Z x 3,
 		# softmax along 0th dim of the weights matrix so it sums to one for each head
-		normalized_weights = torch.softmax(self.pca_weights, dim=0) # 3 x H
+		# spread_weights_norm = torch.softmax(self.spread_weights, dim=0) # d_model//2 x H
 
-		# now each head's spread is a weighted avg of the stdevs along the principal axes
+		# now each head's spread is a weighted avg of the stdevs along the principal axss
 		# also each batch has a customized spread 
-		spreads = torch.matmul(stdevs.unsqueeze(1), normalized_weights.unsqueeze(0)).squeeze(1) # Z x 1 x 3 @ 1 x 3 x H --> Z x H
-
-		# sps = lambda x: torch.log1p(torch.exp(x)) / (1+torch.log1p(torch.exp(x))) 
-		# spreads = self.min_spread + (self.max_spread-self.min_spread)*sps(self.spreads_param)
-		# spreads = 3.7 + (16.3)*(torch.logspace(0,1,self.nhead,20) - 1) / 19
+		# spreads = torch.matmul(wavelengths, spread_weights_norm) # Z x d_model//2 @ d_model//2 x H --> Z x H
+		spreads = 3.7 + (22 - 3.7) * (torch.logspace(0,1,self.nhead, 20) - 1) / (20 - 1)
 
 		# perform attention
 		out = attn(Q, K, V, coords, spreads.to(Q.device), mask=key_padding_mask, context_mask=context_mask, min_rbf=self.min_rbf, max_rbf=self.max_rbf)  # batch x nhead x N x d_k
@@ -215,12 +197,12 @@ class Decoder(nn.Module):
 			for param in module.parameters():
 				param.requires_grad = requires_grad
 
-	def forward(self, wavefunc, coords, stdevs, key_padding_mask=None, use_checkpoint=False):
+	def forward(self, wavefunc, coords, wavelengths, key_padding_mask=None, use_checkpoint=False):
 
 		# full self-attention
 		wavefunc2 = self.self_attn(wavefunc, wavefunc, wavefunc,
 						coords=coords,
-						stdevs=stdevs,
+						wavelengths=wavelengths,
 						key_padding_mask=key_padding_mask,
 						context_mask=None,
 						use_checkpoint=use_checkpoint
@@ -311,6 +293,8 @@ class proteusAI(nn.Module):
 		super(proteusAI, self).__init__()
 
 		# configuration
+		self.d_model = d_model
+		self.n_head = n_head
 		self.use_probs = use_probs
 		self.active_decoders = active_decoders if active_decoders != -1 else decoder_layers
 
@@ -319,7 +303,7 @@ class proteusAI(nn.Module):
 
 		# wavefunc norm
 		# self.wavefunc_norm = nn.LayerNorm(d_model)
-		self.wavefunc_proj = nn.Linear(d_model, d_model)
+		# self.wavefunc_proj = nn.Linear(d_model, d_model)
 
 		# context
 		num_aas = 20 if not include_ncaa else 21
@@ -333,42 +317,65 @@ class proteusAI(nn.Module):
 		self.linear = nn.Linear(d_model, num_aas)
 
 
-	def get_stdevs(self, coords, key_padding_mask):
+	def get_wavelengths(self, coords, key_padding_mask):
 
-		# do PCA to determine the stdevs along the principle axes 
+		# # do PCA to determine the stdevs along the principle axes 
 
-		# compute valid tokens for manual mean and std calculations
-		valid_mask = (~key_padding_mask.unsqueeze(2)) & coords.isfinite().all(dim=2, keepdims=True) # Z x N x 1
-		valid_toks = valid_mask.to(torch.float32).sum(dim=1, keepdims=True) # Z x 1 x 1
+		# # compute valid tokens for manual mean and std calculations
+		# valid_mask = (~key_padding_mask.unsqueeze(2)) & coords.isfinite().all(dim=2, keepdims=True) # Z x N x 1
+		# valid_toks = valid_mask.to(torch.float32).sum(dim=1, keepdims=True) # Z x 1 x 1
 
-		# coords must be fp64 for this part, or else eigenvalues suffer over/under flow
-		coords = torch.where(valid_mask, coords, 0.0).to(torch.float64) # Z x N x 3
+		# # coords must be fp64 for this part, or else eigenvalues suffer over/under flow. save coords dtype to convert back later
+		# coords_dtype = coords.dtype
+		# coords = torch.where(valid_mask, coords, 0.0).to(torch.float64) # Z x N x 3
 
-		# center coordintes around origin
-		coords_mean = coords.sum(dim=1, keepdims=True) / valid_toks # Z x 1 x 3
-		coords_centered = (coords - coords_mean) # Z x N x 3
+		# # center coordinates around origin
+		# coords_mean = coords.sum(dim=1, keepdim=True) / valid_toks # Z x 1 x 3
+		# coords_centered = (coords - coords_mean) # Z x N x 3
 
-		# scale so stdev is 1 (for numerical stability)
-		coords_std = torch.sqrt( torch.sum(coords_centered**2, dim=1, keepdim=True) / valid_toks) # Z x 1 x 3
-		coords_scaled = coords_centered / (coords_std + 1e-6) # Z x N x 3
+		# # scale so stdev is 1 (for numerical stability)
+		# coords_std = torch.sqrt( torch.sum(coords_centered**2, dim=1, keepdim=True) / valid_toks) # Z x 1 x 3
+		# coords_scaled = coords_centered / (coords_std + 1e-6) # Z x N x 3
 
-		# compute covariance matrix
-		covariance_mat = torch.matmul(coords_scaled.transpose(1, 2), coords_scaled) / torch.where(valid_toks>1, valid_toks - 1, 1)  # Z x 3 x N @ Z x N x 3--> Z x 3 x 3
+		# # compute covariance matrix
+		# covariance_mat = torch.matmul(coords_scaled.transpose(1, 2), coords_scaled) / torch.where(valid_toks>1, valid_toks - 1, 1)  # Z x 3 x N @ Z x N x 3--> Z x 3 x 3
 
-		# scale back up 
-		covariance_mat = coords_std.transpose(1,2) * covariance_mat * coords_std # Z x N x 3
+		# # scale back up 
+		# covariance_mat = coords_std.transpose(1,2) * covariance_mat * coords_std # Z x N x 3
 
-		# compute the eigenvalues ie the variances
-		eigenvalues = torch.linalg.eigh(covariance_mat).eigenvalues # Z x 3
+		# # compute the eigenvalues ie the variances
+		# eigenvalues = torch.linalg.eigh(covariance_mat).eigenvalues # Z x 3
 
-		# compute stdevs and convert back to the dtype of the pca_weigths 	
-		stdevs = torch.sqrt(eigenvalues).to(self.pca_weights.dtype) # Z x 3
+		# # compute stdevs and convert back to original dtype	
+		# stdevs = torch.sqrt(eigenvalues).to(coords_dtype) # Z x 3
 		
-		# fully padded samples withing a batch result in nan, so make them 1 as a dummy value for the triton kernel
-		# dont do isnan() in case i need to debug, this explicitly only replaces fully padded samples
-		stdevs = torch.where(valid_mask.squeeze(2).any(axis=1, keepdim=True).expand(-1, 3), stdevs, 1.0) # Z x 3
+		# # fully padded samples withing a batch result in nan, so make them 1 as a dummy value for the kernels
+		# # dont do isnan() in case something else causes nans, this explicitly only replaces fully padded samples
+		# stdevs = torch.where(valid_mask.squeeze(2).any(axis=1, keepdim=True).expand(-1, 3), stdevs, 1.0) # Z x 3
 
-		return stdevs
+		# # get the highest std and treat that as the average wavelength
+		# max_wl = stdevs.max(dim=1, keepdim=True).values # Z x 1
+		base = 20 # hard code base for testing
+		min_wl =  3.7 # for testing
+		max_wl = 22.0
+
+		# samples wavelengths near the average more frequently than those far away. max wl is twice the avg
+
+		wavelengths = min_wl + (max_wl - min_wl) * ((torch.logspace(0, 1, self.d_model//2, base, device=coords.device) - 1) / (base - 1))
+		# get first half of the feature index
+		# small_wl = avg_wl * (
+		# 	1 - torch.pow(base, (torch.arange(self.d_model//4, 0, -1, dtype=torch.float32, device=avg_wl.device) / (self.d_model//2)) - 1)
+		# ).unsqueeze(0) / (base - 1) # Z x d_model//4
+
+		# # second half
+		# big_wl = avg_wl + (avg_wl * (
+		# 	torch.pow(base, (torch.arange(0, self.d_model//4, 1, dtype=torch.float32, device=avg_wl.device) / (self.d_model//2)) - 1)
+		# ).unsqueeze(0) / (base - 1)) # Z x d_model//4
+
+		# # concat to get the tensor of batch-specific wavelengths
+		# wavelengths = torch.cat([small_wl, big_wl], axis=1) # Z x d_model//2
+
+		return wavelengths
 
 	def add_decoder(self, new_decoders=1):
 		'''
@@ -407,12 +414,12 @@ class proteusAI(nn.Module):
 
 		return wavefunc
 
-	def decode(self, wavefunc, coords, stdevs, key_padding_mask=None):
+	def decode(self, wavefunc, coords, wavelengths, key_padding_mask=None):
 
 		for decoder_layer in self.decoders[:self.active_decoders]:
 			
 			# decode the updated environments
-			wavefunc = decoder_layer(wavefunc, coords, stdevs, key_padding_mask) # batch x N x d_model
+			wavefunc = decoder_layer(wavefunc, coords, wavelengths, key_padding_mask) # batch x N x d_model
 
 		# map the decoded environment to aa probabilities
 		seq_probs = self.linear(wavefunc) # batch x N x d_model --> batch x N x 20
@@ -484,17 +491,18 @@ class proteusAI(nn.Module):
 		# coords: batch x N x 3 (or batch x N x d_model if self.as_coords is False)
 		# aa_onehot: batch x N x 20
 
-		stdevs = get_stdevs(coords, key_padding_mask)
+		# get sample specific wavelengths via PCA and eigenvalue decomposition
+		wavelengths = self.get_wavelengths(coords, key_padding_mask)
 
 		# wave function encoding (replaces positional encoding)
 		if features is None:
-			wavefunc = self.spatial_embedding(coords, stdevs, key_padding_mask) # batch x N x 3 --> batch x N x d_model
+			wavefunc = self.spatial_embedding(coords, wavelengths, key_padding_mask) # batch x N x 3 --> batch x N x d_model
 		else:
 			wavefunc = features
 			
 
 		# wavefunc = self.wavefunc_norm(wavefunc)
-		wavefunc = self.wavefunc_proj(wavefunc)
+		# wavefunc = self.wavefunc_proj(wavefunc)
 
 		# contextualize environment with AAs if any sequence has context
 		has_context = (aa_onehot.any(dim=-1) & (~key_padding_mask)).any() # 1,
@@ -505,8 +513,7 @@ class proteusAI(nn.Module):
 		if auto_regressive:
 			seq_probs = self.auto_regressive(wavefunc, coords, aa_onehot, key_padding_mask, temp=temp) # batch x N x 20 (returns one-hot tensor)
 		else: 
-
-			seq_probs = self.decode(wavefunc, coords, stdevs, key_padding_mask) # batch x N x 20 (returns aa probability logits)
+			seq_probs = self.decode(wavefunc, coords, wavelengths, key_padding_mask) # batch x N x 20 (returns aa probability logits)
 
 
 		return seq_probs

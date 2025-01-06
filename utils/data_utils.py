@@ -145,11 +145,6 @@ class Data():
 				result = future.result()
 				if result is not None:  # Ignore failed results
 					pdb_features, pdb_labels, pdb_coords, pdb_chain_idxs = result
-					# there is a bug in wf kernel, iassumed no residues would occupy the same space, but it looks like
-					# some samples have multiple residues with the same position. just skipping these for now, as there are only
-					# a few i am aware of. will fix this in the kernel later and recompute. i am assuming this is due to
-					# multiple structures resolved, but i would have thought the pmpnn people woulf have filtered this,
-					# so that is unlikely. i will look into the source
 					if pdb_features.isnan().any() or pdb_features.isinf().any(): continue
 					features.append(pdb_features)
 					labels.append(pdb_labels)
@@ -263,7 +258,7 @@ class Data():
 				start, end = self.chain_idxs[idx]
 				chain_mask = torch.ones(self.labels[idx].shape, dtype=torch.bool, device=self.device)
 				chain_mask[start:end] = False
-				chain_masks.append(chain_mask)
+				chain_masks.append(chain_mask.to(torch.bool))
 
 			batch_next_pow2 = 2**math.ceil(math.log(len(batch), 2)) # next power of 2
 			batch_pads = range(batch_next_pow2 - len(batch))
@@ -276,7 +271,7 @@ class Data():
 			features = self.pad_and_batch(features, pad_val="zero", max_size=seq_size)
 			labels = self.pad_and_batch(labels, pad_val="-one", max_size=seq_size)
 			coords = self.pad_and_batch(coords, pad_val="zero", max_size=seq_size)
-			chain_masks = self.pad_and_batch(chain_masks, pad_val="one", max_size=seq_size)
+			chain_masks = self.pad_and_batch(chain_masks, pad_val="one", max_size=seq_size).to(torch.bool)
 			key_padding_masks = labels==-1
 
 			yield features, labels, coords, chain_masks, key_padding_masks
