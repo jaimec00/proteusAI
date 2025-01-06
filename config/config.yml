@@ -1,15 +1,15 @@
 # Configuration for training the model
 d_model: 512  # dimensionality of input embeddings
-min_wl: 1.0  # minimum wl to use in wavelength sampling
-max_wl: 50.0  # maximum wl to use in wavelength sampling
-min_base: 2.0  # minimum base to use in wavelength sampling
-max_base: 80.0  # base to use in wavelength sampling
+min_wl: 3.7  # minimum wl to use in wavelength sampling
+max_wl: 22.0  # maximum wl to use in wavelength sampling
+min_base: 20.0  # minimum base to use in wavelength sampling
+max_base: 20.0  # base to use in wavelength sampling
 min_rbf: 0.05  # minimum rbf scaling factor in gaussian mha
 max_rbf: 0.99  # maximum rbf scaling factor in gaussian mha
 min_spread: 1
 max_spread: 30
 num_heads: 8  # number of attention heads to perform the training with
-decoder_layers: 8 # number of decoder layers
+decoder_layers: 4 # number of decoder layers
 hidden_linear_dim: 1024  # intermediate dimensions of decoder feed forward layer
 temperature: 0.1  # temperature for autoregressive inference (for testing)
 max_tokens: 10000  # maximum number of tokens
@@ -38,7 +38,7 @@ beta2: 0.98  # learning rate
 epsilon: 10e-9  # learning rate
 dropout: 0.1  # percentage of dropout
 label_smoothing: 0.1  # percentage of label smoothing to use on the output labels for loss calculation
-loss_type: "sum"  # whether to use the 'sum' or the 'mean' for CEL
+loss_type: "mean"  # whether to use the 'sum' or the 'mean' for CEL
 loss_sum_norm: 2000
 lr_scale: 0.1  # LR scaling factor
 lr_patience: 2  # LR patience for scaling down after plateau
