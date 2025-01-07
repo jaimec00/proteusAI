@@ -66,11 +66,12 @@ def _attn_fwd(
 	L_ptr, stride_L_Z, stride_L_H, stride_L_N,
 	mask_ptr, stride_mask_Z, stride_mask_N,
 	context_mask_ptr, stride_context_mask_Z, stride_context_mask_N,
+	rng_seed_ptr, stride_rng_seed_Z, stride_rng_seed_H,
 
 	tot_N: tl.constexpr, tot_Z: tl.constexpr, nheads: tl.constexpr,
 	d_k: tl.constexpr, min_d_k: tl.constexpr, # max(16, d_k) bc tl.dot requires dim>=16
 	softmax_scale: tl.constexpr, eps:tl.constexpr,
-	dropout_p: tl.constexpr, rng_seed: tl.constexpr,
+	dropout_p: tl.constexpr, 
 
 	BLOCK_I: tl.constexpr, # block sizes
 	BLOCK_J: tl.constexpr,
@@ -157,19 +158,20 @@ def _attn_fwd(
 		order=(0, )
 	)
 
-	# create a dropout block for rand num generation. each Z, H, I, J should have a unique index
-	# in the worst case (for my setup), Z = 128, H = 64, I,J = 10,000
-	# Z requires 7 bits, H requires 6 bits, and I and J each require 14 bits,
-	# meaning would need a minimum of 7 + 6 + 14 + 14 = 41 bits, to represent all
-	# possible combinations, so 64 bit int is required. 
+	# create a dropout block for rand num generation. each Z, H combo has its own rng
+	# so only I, J should have a unique index
+	# in the worst case (for my setup),  I,J = 10,000
+	# I and J each require 14 bits,
+	# meaning would need a minimum of 14 + 14 = 28 bits, to represent all
+	# possible combinations, so 32 bit int is required. 
 
-	# instead we will hash this to a 32 bit integer using three 16 bit integers as input.
+	# instead we will hash this to a 16 bit integer using two 16 bit integers as input.
 	# there will be a non-negligible amount of collisions, but better than the alternative
 	# of either no dropout, or significant training speed decrease. if still slow, 
 	# will generate a single 16 bit integer per element instead
 
-	# combine Z and H into a single uint16
-	ZH_bytes = ((offs_Z & 0xFF) << 8).to(tl.uint16) | (offs_H & 0xFF).to(tl.uint16)
+	# load rng seed for this batch head combo
+	rng_seed = tl.load(rng_seed_ptr + (offs_Z*stride_rng_seed_Z) + (offs_H*stride_rng_seed_H))
 
 	# this assumes I and J fits in 16 bits. if it doesnt, code still works, just 
 	# that there will be more collisions in dropout, but this is generally acceptable
@@ -248,9 +250,9 @@ def _attn_fwd(
 
 		# apply dropout mask
 		# hash the three numbers (ZH, I, J) to get a pseudo unique number for each element	
-		hash_vals = ((ZH_bytes) ^ (I_bytes) ^ (J_idxs & 0xFFFF)) # XORs
-		hash_vals = (hash_vals ^ (hash_vals >> 8)) & 0xFFFF # mixing
-		hash_vals = (hash_vals ^ (hash_vals << 8)) & 0xFFFF # mixing
+		hash_vals = ((I_bytes) ^ (J_idxs & 0xFFFF)) # XORs
+		hash_vals = (hash_vals ^ (hash_vals >> 4)) & 0xFFFF # mixing
+		hash_vals = (hash_vals ^ (hash_vals << 4)) & 0xFFFF # mixing
 		dropout_mask = (tl.rand(rng_seed, hash_vals) > dropout_p).to(tl.int1) # N x N
 		Pij = tl.where(dropout_mask, Pij / (1-dropout_p), 0.0).to(tl.float16)
 
@@ -322,10 +324,11 @@ def _attn_bwd(
 	max_dists_ptr, stride_max_dists_Z, stride_max_dists_H,
 	mask_ptr, stride_mask_Z, stride_mask_N,
 	context_mask_ptr, stride_context_mask_Z, stride_context_mask_N,
-
+	rng_seed_ptr, stride_rng_seed_Z, stride_rng_seed_H,
+	
 	tot_Z: tl.constexpr, tot_N: tl.constexpr, nheads: tl.constexpr, 
 	d_k: tl.constexpr, min_d_k: tl.constexpr, softmax_scale: tl.constexpr, eps:tl.constexpr,
-	dropout_p: tl.constexpr, rng_seed: tl.constexpr,
+	dropout_p: tl.constexpr, 
 
 	BLOCK_I: tl.constexpr, BLOCK_J: tl.constexpr
 ):
@@ -442,9 +445,11 @@ def _attn_bwd(
 		order=(0, )
 	)
 
+	# load rng seed for this batch head combo
+	rng_seed = tl.load(rng_seed_ptr + (offs_Z*stride_rng_seed_Z) + (offs_H*stride_rng_seed_H))
+
 	# prepare bytes for dropout
-	ZH_bytes = ((offs_Z & 0xFF) << 8).to(tl.uint16) | (offs_H & 0xFF).to(tl.uint16)
-	J_bytes = tl.arange(0, BLOCK_J)[None, :]
+	J_bytes = offs_J + tl.arange(0, BLOCK_J)[None, :]
 	J_bytes = (J_bytes & 0xFFFF).to(tl.uint16) 
 	I_idxs = tl.arange(0, BLOCK_I)[:, None].to(tl.uint16)
 	I_inc = tl.full([BLOCK_I, 1], BLOCK_I, dtype=tl.uint16)
@@ -512,9 +517,9 @@ def _attn_bwd(
 		Pij = tl.exp(tl.where(attn_mask, SRij - Li[:, None], -inf)).to(tl.float16) # N x N (fp32)
 
 		# apply dropout mask
-		hash_vals = ((ZH_bytes) ^ (I_idxs & 0xFFFF) ^ (J_bytes)) # XORs
-		hash_vals = (hash_vals ^ (hash_vals >> 8)) & 0xFFFF # mixing
-		hash_vals = (hash_vals ^ (hash_vals << 8)) & 0xFFFF # mixing
+		hash_vals = ((I_idxs & 0xFFFF) ^ (J_bytes)) # XORs
+		hash_vals = (hash_vals ^ (hash_vals >> 4)) & 0xFFFF # mixing
+		hash_vals = (hash_vals ^ (hash_vals << 4)) & 0xFFFF # mixing
 		dropout_mask = tl.rand(rng_seed, hash_vals) > dropout_p # N x N
 		Pij = tl.where(dropout_mask, Pij / (1-dropout_p), 0.0)
 
@@ -659,8 +664,9 @@ class _attn(torch.autograd.Function):
 								1
 							)
 
-		# rng_seed = torch.randint(0, 2**16-1, (1,)).item()
-		rng_seed = 37 # hard code for debugging
+		# generate a rng seed for each batch and head
+		rng_seed = torch.randint(0, 2**16-1, (batch,nheads), device=Q.device)
+		# rng_seed = 37 # hard code for debugging
 
 		# run the kernel
 		_attn_fwd[grid](  	out, out.stride(0), out.stride(1), out.stride(2), out.stride(3), # batch x nheads x N x d_k
@@ -674,17 +680,17 @@ class _attn(torch.autograd.Function):
 							L, L.stride(0), L.stride(1), L.stride(2), # batch x nhead x N
 							mask, mask.stride(0), mask.stride(1), # batch x N
 							context_mask, context_mask.stride(0), context_mask.stride(1),
+							rng_seed, rng_seed.stride(0), rng_seed.stride(1),
 							N, batch, nheads, d_k, max(d_k, 16), softmax_scale, min_rbf,
-							dropout, rng_seed
+							dropout
 						)
 
 		# for backwards pass
-		ctx.save_for_backward(Q, K, V, out, L, coords, spreads, mask, context_mask)
+		ctx.save_for_backward(Q, K, V, out, L, coords, spreads, mask, context_mask, rng_seed)
 		ctx.softmax_scale = softmax_scale
 		ctx.min_rbf = min_rbf
 		ctx.max_rbf = max_rbf
 		ctx.dropout = dropout
-		ctx.rng_seed = rng_seed
 
 
 		return out.to(ctx.Q_dtype)
@@ -693,10 +699,10 @@ class _attn(torch.autograd.Function):
 	def backward(ctx, dO):
 
 		# load saved tensors (should all be float32, expect masks). also should all be contiguous from fwd
-		Q, K, V, O, L, coords, spreads, mask, context_mask = ctx.saved_tensors
+		Q, K, V, O, L, coords, spreads, mask, context_mask, rng_seed = ctx.saved_tensors
 
 		# compute D for dSR calculation
-		D = torch.sum(O*dO, dim=3).to(torch.float32) # Z x H x N x D -> Z x H x N
+		D = torch.sum(O*dO, dim=3).to(torch.float16) # Z x H x N x D -> Z x H x N
 
 		# cast to float16 for matmults
 		dO = dO.to(torch.float16).contiguous()
@@ -739,8 +745,9 @@ class _attn(torch.autograd.Function):
 							max_dists, max_dists.stride(0), max_dists.stride(1), 
 							mask, mask.stride(0), mask.stride(1),
 							context_mask, context_mask.stride(0), context_mask.stride(1),
+							rng_seed, rng_seed.stride(0), rng_seed.stride(1),
 							batch, N, nheads, d_k, max(d_k, 16), ctx.softmax_scale, ctx.min_rbf,
-							ctx.dropout, ctx.rng_seed
+							ctx.dropout
 						 )
 
 		dQ = dQ.to(ctx.Q_dtype)
