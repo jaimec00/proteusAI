@@ -33,21 +33,16 @@ class SpatialEmbedding(nn.Module):
 		self.d_model = d_model
 		self.min_wl = min_wl
 		self.max_wl = max_wl
-		self.min_base = min_base
-		self.max_base = max_base
-
-	def forward(self, coords, wavelengths, key_padding_mask):
-
-		# normalize the weight matrix along the 0th dim, so when dot wavelengths by weights, each sample gets a vector of 
-		# the weighted sums of its sample-specific wavelengths for each d_model//2 index
-		# wavelength_weights_norm = torch.softmax(self.wavelengths_weights, dim=0)
-		# wavelengths = torch.mathmul(wavelengths, wavelength_weights_norm) # Z x d_model//2 @ d_model//2 x d_model//2 --> Z x d_model//2
+		self.base = base
 
 		# compute wavenumbers from wavelengths
-		wavenumbers = 2 * torch.pi / wavelengths
+		self.wavelengths = self.min_wl + (self.max_wl - self.min_wl) * (torch.logspace(0,1,self.d_model//2, self.base) - 1) / (self.base - 1)
+		self.wavenumbers = 2 * torch.pi / wavelengths
+
+	def forward(self, coords, key_padding_mask):
 
 		# convert to wf features if not already precomputed
-		wavefunc = protein_to_wavefunc(coords, wavenumbers, key_padding_mask) # batch x N x 3 --> batch x N x d_model
+		wavefunc = protein_to_wavefunc(coords, self.wavenumbers, key_padding_mask) # batch x N x 3 --> batch x N x d_model
 
 		return wavefunc
 
@@ -58,7 +53,7 @@ class MHA(nn.Module):
 	see the imported function (supports fwd and bwd) triton implementation
 	'''
 
-	def __init__(self, d_model=512, nhead=8, min_rbf=0.1, max_rbf=0.9, min_spread=1, max_spread=30):
+	def __init__(self, d_model=512, nhead=8, min_rbf=0.1, max_rbf=0.9, min_spread=1, max_spread=6, base=20, dropoout=0.1):
 		super(MHA, self).__init__()
 
 		self.nhead = nhead
@@ -72,9 +67,10 @@ class MHA(nn.Module):
 
 		self.min_rbf = min_rbf
 		self.max_rbf = max_rbf
-		self.dropout=0.1
-		# self.min_spread = min_spread
-		# self.max_spread = max_spread
+		self.dropout = dropout
+		self.min_spread = min_spread
+		self.max_spread = max_spread
+		self.base = base
 
 		self.q_proj = nn.Parameter(torch.randn(self.nhead, self.d_model, self.d_k)) # nhead x d_model x d_k
 		self.k_proj = nn.Parameter(torch.randn(self.nhead, self.d_model, self.d_k)) # nhead x d_model x d_k
@@ -85,25 +81,10 @@ class MHA(nn.Module):
 		self.v_layernorm = nn.LayerNorm(self.d_k)
 
 		self.out_proj = nn.Linear(d_model, d_model)
-	
 
-	def forward(self, q, k, v, coords, wavelengths, key_padding_mask=None, context_mask=None, use_checkpoint=False):
+	def forward(self, q, k, v, coords, key_padding_mask=None):
 		'''
-		forward method, wrapper for _forward so can use gradient checkpointing in training
-		'''
-		if use_checkpoint:
-			out = checkpoint(
-				self._forward,
-				q, k, v, coords, wavelengths, key_padding_mask, context_mask
-			)
-		else:
-			out = self._forward(q, k, v, coords, wavelengths, key_padding_mask, context_mask)
-
-		return out
-
-	def _forward(self, q, k, v, coords, wavelengths, key_padding_mask=None, context_mask=None):
-		'''
-		performs scaled dot-product attention weighted by Gaussian RBF 
+		performs scaled dot-product attention weighted by Gaussian RBFs
 		'''
 
 		# make sure shape is compatible
@@ -121,20 +102,11 @@ class MHA(nn.Module):
 		K = self.k_layernorm(K)
 		V = self.v_layernorm(V)
 
-		# softmax along 0th dim of the weights matrix so it sums to one for each head
-		# spread_weights_norm = torch.softmax(self.spread_weights, dim=0) # d_model//2 x H
-
-		# now each head's spread is a weighted avg of the stdevs along the principal axss
-		# also each batch has a customized spread 
-		# spreads = torch.matmul(wavelengths, spread_weights_norm) # Z x d_model//2 @ d_model//2 x H --> Z x H
-		spreads = 3 + (5 - 3) * (torch.logspace(0,1,self.nhead, 20, device=Q.device) - 1) / (20 - 1)
-		# spreads = wavelengths[:, ::(wavelengths.size(1)//self.nhead)]
-		# spreads = torch.full([Q.size(0), Q.size(1)], 4, device=Q.device)
-		# spreads = torch.logspace
+		spreads = self.min_spread + (self.max_spread - self.min_spread) * (torch.logspace(0,1,self.nhead, self.base, device=Q.device) - 1) / (self.base - 1)
 
 		# perform attention
 		dropout = self.dropout if self.training else 0.0
-		out = attn(Q, K, V, coords, spreads.to(Q.device), mask=key_padding_mask, context_mask=context_mask, min_rbf=self.min_rbf, max_rbf=self.max_rbf, dropout=dropout)  # batch x nhead x N x d_k
+		out = attn(Q, K, V, coords, spreads.to(Q.device), mask=key_padding_mask, min_rbf=self.min_rbf, max_rbf=self.max_rbf, dropout=dropout)  # batch x nhead x N x d_k
 
 		out = out.permute(0,2,3,1) # batch x N x d_k x nhead
 		out = out.reshape(batch, N, self.d_model) # batch x N x d_k x nhead --> batch x N x d_model
@@ -145,22 +117,49 @@ class MHA(nn.Module):
 		# return
 		return out # batch x N x d_model
 
-class Decoder(nn.Module):
-	'''
-	decoder module, contains self-attention, normalization, dropout, feed-forward network, and residual connections
-	'''
+class Attention(nn.Module):
+	def __init__(self, d_model=512, nhead=8, dim_feedforward=1024, min_rbf=0.1, max_rbf=0.9, min_spread=1, max_spread=6, base=20, dropout=0.0):
+		super(Attention, self).__init__()
 
-	def __init__(self, d_model=512, nhead=8, dim_feedforward=1024, dropout=0.1, min_rbf=0.1, max_rbf=0.9, min_spread=1, max_spread=30):
-		super(Decoder, self).__init__()
-
-		# Self-attention layers
-		self.self_attn = MHA(d_model, nhead, min_rbf=min_rbf, max_rbf=max_rbf, min_spread=min_spread, max_spread=max_spread)
-
+		self.mha = MHA(d_model, nhead, min_rbf=min_rbf, max_rbf=max_rbf, min_spread=min_spread, max_spread=max_spread, base=base, dropout=dropout)
+		
 		# Separate normalization layers
 		self.norm = nn.LayerNorm(d_model)
-		
+
 		# Separate dropout layers
 		self.dropout = nn.Dropout(dropout)
+
+	def forward(self, q, k, v, coords, key_padding_mask=None):
+		
+		# multi-head gaussian attention
+		o = self.mha(	q, k, v,
+						coords=coords,
+						key_padding_mask=key_padding_mask,
+					)
+
+		# residual connection with dropout
+		o = v + self.dropout(o)
+
+		# norm
+		o = self.norm(o)
+
+		return o
+
+class DualCoder(nn.Module):
+	'''
+	interleaved cross-attention module, structure queries sequence to update self, sequence queries structure to update itself
+	'''
+
+	def __init__(self, d_model=512, nhead=8, dim_feedforward=1024, min_rbf=0.1, max_rbf=0.9, min_spread=1, max_spread=6, base=20, dropout=0.0):
+		super(DualCoder, self).__init__()
+
+		# Self-attention layers
+		self.wf_self_attn = Attention(d_model, nhead, min_rbf=min_rbf, max_rbf=max_rbf, min_spread=min_spread, max_spread=max_spread, base=base, dropout=dropout)
+		self.aa_self_attn = Attention(d_model, nhead, min_rbf=min_rbf, max_rbf=max_rbf, min_spread=min_spread, max_spread=max_spread, base=base, dropout=dropout)
+		
+		# cross attention layers
+		self.wf_cross_attn = Attention(d_model, nhead, min_rbf=min_rbf, max_rbf=max_rbf, min_spread=min_spread, max_spread=max_spread, base=base, dropout=dropout)
+		self.aa_cross_attn = Attention(d_model, nhead, min_rbf=min_rbf, max_rbf=max_rbf, min_spread=min_spread, max_spread=max_spread, base=base, dropout=dropout)
 
 		# Feed-forward network
 		self.feedforward_norm = nn.LayerNorm(d_model)
@@ -168,89 +167,40 @@ class Decoder(nn.Module):
 		self.linear1 = nn.Linear(d_model, dim_feedforward)
 		self.linear2 = nn.Linear(dim_feedforward, d_model)
 
-		# module list to store learnable parameters, to easily freeze and unfreeze them
-		self.learnable = nn.ModuleList([self.self_attn, self.norm, self.feedforward_norm, self.linear1, self.linear2])
+	def forward(self, wf, aas, coords, key_padding_mask=None):
+
+		#### wf self attention ####
+		wf2 = self.wf_self_attn(	wf, wf, wf,
+									coords=coords,
+									key_padding_mask=key_padding_mask,
+								)
 		
-	def modify_weights(self, requires_grad=True):
-		'''
-		modifies decoder weights, so that stage one of training (no aa-context) complements
-		stage 2, where freeze decoder weights so that only aa embeddings, qkv of context module
-		and output embeddings are learnable. forces model to build off of learned spatial
-		representation, rather than completely rewrite it
-		'''
-		# method to (un)freeze weights to have model learn aa representations
-		for module in self.learnable:
-			for param in module.parameters():
-				param.requires_grad = requires_grad
+		#### aa self attention ####
+		aas2 = self.aa_self_attn(	aas, aas, aas,
+									coords=coords,
+									key_padding_mask=key_padding_mask,
+								)
 
-	def forward(self, wavefunc, coords, wavelengths, key_padding_mask=None, use_checkpoint=False):
+		#### aa as K cross attention ####
+		wf = self.wf_cross_attn(	wf2, aas2, wf2,
+									coords=coords,
+									key_padding_mask=key_padding_mask,
+								)
 
-		# full self-attention
-		wavefunc2 = self.self_attn(wavefunc, wavefunc, wavefunc,
-						coords=coords,
-						wavelengths=wavelengths,
-						key_padding_mask=key_padding_mask,
-						context_mask=None,
-						use_checkpoint=use_checkpoint
-						)
-
-		# residual connection with dropout
-		wavefunc = wavefunc + self.dropout(wavefunc2)
-
-		# norm
-		wavefunc = self.norm(wavefunc)
-		
-		# Feed-forward network (with dropout)
-		wavefunc2 = self.linear2(self.feedforward_dropout(F.gelu(self.linear1(wavefunc))))
-		
-		# add (with dropout) and norm
-		wavefunc = wavefunc + self.feedforward_dropout(wavefunc2)
-		wavefunc = self.feedforward_norm(wavefunc)
-
-		return wavefunc
-
-
-class ContextModule(Decoder):
-	'''
-	Performs masked self attention so that the environments query the amino acid identities,
-	but masked so that only predicted positions with AA context are queried, but not 
-	non-context positions. acts as a way to distribute the AA context before
-	full self attention in decoder 
-
-	same as decoder but forward method accounts for when some samples in a 
-	batch have no context (all masked) but the rest only have some, avoids 
-	numerical instability
-	'''
-	def __init__(self, d_model=512, nhead=8, dim_feedforward=1024, dropout=0.1, min_rbf=0.1, max_rbf=0.9, min_spread=1, max_spread=30):
-		super(ContextModule, self).__init__(d_model, nhead, dim_feedforward, dropout, min_rbf, max_rbf, min_spread, max_spread)
-
-								                    # vvvvvvvvvv repetive, as can do single mask, but just for clarity
-	def forward(self, wavefunc, coords, aa_context, aa_context_mask=None, key_padding_mask=None, use_checkpoint=False):
-
-		# masked attention; update Ca envs based on predicted positions env with AA context
-		context_wavefunc2 = self.self_attn(wavefunc, aa_context, wavefunc,
-							coords=coords,
-							key_padding_mask=key_padding_mask,
-							context_mask=(aa_context_mask | key_padding_mask),
-							use_checkpoint=use_checkpoint)
-
-		# residual connection with dropout
-		context_wavefunc = wavefunc + self.dropout(context_wavefunc2)
-		# norm
-		context_wavefunc = self.norm(context_wavefunc)
+		#### wf as K cross attention ####
+		aas = self.aa_cross_attn(	aas2, wf2, aas2,
+									coords=coords,
+									key_padding_mask=key_padding_mask,
+								)
 
 		# Feed-forward network (with dropout)
-		context_wavefunc2 = self.linear2(self.feedforward_dropout(F.gelu(self.linear1(context_wavefunc))))
+		wf2 = self.linear2(self.feedforward_dropout(F.gelu(self.linear1(wf))))
 		
 		# add (with dropout) and norm
-		context_wavefunc = context_wavefunc + self.feedforward_dropout(context_wavefunc2)
-		context_wavefunc = self.feedforward_norm(context_wavefunc)
+		wf = wf + self.feedforward_dropout(wf2)
+		wf = self.feedforward_norm(wf)
 
-		# only include context module for samples in the batch with already predicted positions
-		has_context = torch.any(~(aa_context_mask | key_padding_mask), dim=-1).unsqueeze(-1).unsqueeze(-1) # batch x 1 x 1
-		wavefunc = torch.where(has_context, context_wavefunc, wavefunc)
-
-		return wavefunc
+		return wf
 
 class proteusAI(nn.Module):
 	'''
@@ -271,9 +221,9 @@ class proteusAI(nn.Module):
 	'''
 	
 	def __init__(self, 	d_model, n_head, decoder_layers, hidden_linear_dim, dropout, 
-						min_wl=1, max_wl=50, min_base=20, max_base=80, min_rbf=0.05, max_rbf=0.99, 
+						min_wl=1, max_wl=50, base=20, min_rbf=0.05, max_rbf=0.99, 
 						min_spread=1, max_spread=30, 
-						active_decoders=-1, use_probs=False, include_ncaa=False
+						use_probs=False, include_ncaa=False
 					):
 
 		super(proteusAI, self).__init__()
@@ -282,22 +232,17 @@ class proteusAI(nn.Module):
 		self.d_model = d_model
 		self.n_head = n_head
 		self.use_probs = use_probs
-		self.active_decoders = active_decoders if active_decoders != -1 else decoder_layers
 
 		# wavefunc
-		self.spatial_embedding = SpatialEmbedding(d_model, min_wl, max_wl, min_base, max_base)
-
-		# wavefunc norm
-		# self.wavefunc_norm = nn.LayerNorm(d_model)
-		# self.wavefunc_proj = nn.Linear(d_model, d_model)
+		self.spatial_embedding = SpatialEmbedding(d_model, min_wl, max_wl, base)
 
 		# context
 		num_aas = 20 if not include_ncaa else 21
 		self.aa_embedding = nn.Linear(num_aas, d_model)
-		self.context_module = ContextModule(d_model, n_head, hidden_linear_dim, dropout, min_rbf, max_rbf, min_spread, max_spread)
 
 		# decoder
 		self.decoders = nn.ModuleList([Decoder(d_model, n_head, hidden_linear_dim, dropout, min_rbf, max_rbf, min_spread, max_spread) for _ in range(decoder_layers)])
+		self.encoders = nn.ModuleList([Encoder(d_model, n_head, hidden_linear_dim, dropout, min_rbf, max_rbf, min_spread, max_spread) for _ in range(decoder_layers)])
 
 		# map to aa probs
 		self.linear = nn.Linear(d_model, num_aas)
@@ -305,44 +250,6 @@ class proteusAI(nn.Module):
 
 	def get_wavelengths(self, coords, key_padding_mask):
 
-		# # do PCA to determine the stdevs along the principle axes 
-
-		# # compute valid tokens for manual mean and std calculations
-		# valid_mask = (~key_padding_mask.unsqueeze(2)) & coords.isfinite().all(dim=2, keepdims=True) # Z x N x 1
-		# valid_toks = valid_mask.to(torch.float32).sum(dim=1, keepdims=True) # Z x 1 x 1
-
-		# # coords must be fp64 for this part, or else eigenvalues suffer over/under flow. save coords dtype to convert back later
-		# coords_dtype = coords.dtype
-		# coords = torch.where(valid_mask, coords, 0.0).to(torch.float64) # Z x N x 3
-
-		# # center coordinates around origin
-		# coords_mean = coords.sum(dim=1, keepdim=True) / valid_toks # Z x 1 x 3
-		# coords_centered = (coords - coords_mean) # Z x N x 3
-
-		# # scale so stdev is 1 (for numerical stability)
-		# coords_std = torch.sqrt( torch.sum(coords_centered**2, dim=1, keepdim=True) / valid_toks) # Z x 1 x 3
-		# coords_scaled = coords_centered / (coords_std + 1e-6) # Z x N x 3
-
-		# # compute covariance matrix
-		# covariance_mat = torch.matmul(coords_scaled.transpose(1, 2), coords_scaled) / torch.where(valid_toks>1, valid_toks - 1, 1)  # Z x 3 x N @ Z x N x 3--> Z x 3 x 3
-
-		# # scale back up 
-		# covariance_mat = coords_std.transpose(1,2) * covariance_mat * coords_std # Z x N x 3
-
-		# # compute the eigenvalues ie the variances
-		# eigenvalues = torch.linalg.eigh(covariance_mat).eigenvalues # Z x 3
-
-		# # compute stdevs and convert back to original dtype	
-		# stdevs = torch.sqrt(eigenvalues).to(coords_dtype) # Z x 3
-		
-		# # fully padded samples withing a batch result in nan, so make them 3 as a dummy value for the kernels (wavelengths are div by base -1, so cant do dummy val of 1)
-		# # dont do isnan() in case something else causes nans, this explicitly only replaces fully padded samples
-		# stdevs = torch.where(valid_mask.squeeze(2).any(axis=1, keepdim=True).expand(-1, 3), stdevs, 22.0) # Z x 3
-
-		# # get the highest std and treat that as the max wavelength
-		# also set it to the base, so that higher stdevs result in similar samples of low wavelengths, and only sparsely
-		# sample the higher wavelengths
-		# max_wl = stdevs.max(dim=1, keepdim=True).values # Z x 1
 		max_wl = 8.0 #torch.full((coords.size(0), 1), 10.0, device=torch.device)
 		base = 20 # hard code base for testing
 		min_wl =  1 # for testing
@@ -354,54 +261,6 @@ class proteusAI(nn.Module):
 
 		return wavelengths
 
-	def add_decoder(self, new_decoders=1):
-		'''
-		method to dynamicaly add decoders, probably wont use, but might be useful in future
-		'''
-		
-		for new_decoder in new_decoders:
-			if len(self.decoders) > self.active_decoders:
-
-				# load new decoder with prev decoder weights
-				last_decoder = self.decoders[self.active_decoders-1]
-				new_decoder = self.decoders[self.active_decoders]
-				new_decoder.load_state_dict(last_decoder.state_dict())
-
-				self.active_decoders += 1
-
-	def alter_decoder_weights(self, requires_grad=True):
-		'''
-		method to alter decoder weights, so can freeze spatial components and have
-		aa context components be learnable only
-		'''
-
-		for decoder in self.decoders:
-			decoder.modify_weights(requires_grad)
-
-	def contextualize(self, wavefunc, coords, aa_onehot, key_padding_mask=None):
-
-		# map the predicted aas to target feature space, non-predicted positions are all 0, so linear layer retains the zero vector for these
-		aa_context = self.aa_embedding(aa_onehot) # batch x N x 20 --> batch x N x d_model
-
-		# used for masked MHA to ignore keys with no context
-		aa_context_mask = ~(aa_onehot.any(dim=-1))# batch x N
-
-		# masked MHA to update all positions by ONLY the new context
-		wavefunc = self.context_module(wavefunc, coords, aa_context, aa_context_mask, key_padding_mask)
-
-		return wavefunc
-
-	def decode(self, wavefunc, coords, wavelengths, key_padding_mask=None):
-
-		for decoder_layer in self.decoders[:self.active_decoders]:
-			
-			# decode the updated environments
-			wavefunc = decoder_layer(wavefunc, coords, wavelengths, key_padding_mask) # batch x N x d_model
-
-		# map the decoded environment to aa probabilities
-		seq_probs = self.linear(wavefunc) # batch x N x d_model --> batch x N x 20
-
-		return seq_probs
 
 	def auto_regressive(self, wavefunc, coords, aa_onehot, key_padding_mask=None, temp=0.1):
 
@@ -478,19 +337,14 @@ class proteusAI(nn.Module):
 			wavefunc = features
 			
 
-		# wavefunc = self.wavefunc_norm(wavefunc)
-		# wavefunc = self.wavefunc_proj(wavefunc)
-
-		# contextualize environment with AAs if any sequence has context
-		has_context = (aa_onehot.any(dim=-1) & (~key_padding_mask)).any() # 1,
-		if has_context:
-			wavefunc = self.contextualize(wavefunc, coords, aa_onehot, key_padding_mask) # batch x N x d_model
-
 		# note auto-regression breaks the computational chain, do not implement during training
-		if auto_regressive:
-			seq_probs = self.auto_regressive(wavefunc, coords, aa_onehot, key_padding_mask, temp=temp) # batch x N x 20 (returns one-hot tensor)
-		else: 
-			seq_probs = self.decode(wavefunc, coords, wavelengths, key_padding_mask) # batch x N x 20 (returns aa probability logits)
+		# if auto_regressive:
+		# 	seq_probs = self.auto_regressive(wavefunc, coords, aa_onehot, key_padding_mask, temp=temp) # batch x N x 20 (returns one-hot tensor)
+		# else: 
+		wavefunc = self.decode(wavefunc, coords, wavelengths, key_padding_mask) # batch x N x 20 (returns aa probability logits)
+
+		aas = self.aa_embedding(aa_onehot)
+		seq_probs = self.encode(wavefunc, aas, coords, wavelengths, key_padding_mask)
 
 
 		return seq_probs

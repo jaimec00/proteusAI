@@ -472,8 +472,8 @@ class Epoch():
 					new_decoders = num_decoders - self.training_run_parent.model.active_decoders
 					self.model.add_decoder(new_decoders)
 
-		elif self.training_run_parent.training_parameters.training_type == "onehot":
-			self.training_run_parent.model.alter_decoder_weights(requires_grad=self.phase)
+		# elif self.training_run_parent.training_parameters.training_type == "onehot":
+		# 	self.training_run_parent.model.alter_decoder_weights(requires_grad=self.phase)
 
 		self.training_run_parent.output.log_epoch(self, self.training_run_parent.optim, self.training_run_parent.model, self.input_perturbations)
 
@@ -498,7 +498,8 @@ class Batch():
 		if self.use_probs:
 			self.predictions = torch.full(self.labels.shape, 1/num_aas).unsqueeze(-1).expand(-1,-1,num_aas)
 		else:
-			self.predictions = torch.zeros(self.labels.shape).unsqueeze(-1).expand(-1,-1,num_aas)
+			# self.predictions = torch.zeros(self.labels.shape).unsqueeze(-1).expand(-1,-1,num_aas)
+			self.predictions = torch.full(self.labels.shape, 1/num_aas).unsqueeze(-1).expand(-1,-1,num_aas)
 
 		self.key_padding_mask = key_padding_mask
 		self.onehot_mask = torch.zeros(self.key_padding_mask.shape, dtype=torch.bool)

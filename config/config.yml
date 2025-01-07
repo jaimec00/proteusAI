@@ -9,7 +9,7 @@ max_rbf: 0.99  # maximum rbf scaling factor in gaussian mha
 min_spread: 1
 max_spread: 30
 num_heads: 8  # number of attention heads to perform the training with
-decoder_layers: 8 # number of decoder layers
+decoder_layers: 4 # number of decoder layers
 hidden_linear_dim: 1024  # intermediate dimensions of decoder feed forward layer
 temperature: 0.1  # temperature for autoregressive inference (for testing)
 max_tokens: 10000  # maximum number of tokens
@@ -27,7 +27,7 @@ epochs: 20  # number of epochs
 # want as few combinations as possible to speed up triton autotuning
 batch_sizes: [1, 2, 4, 8, 16, 32, 64, 128]  # possible samples per batch
 seq_sizes: [128, 256, 512, 1024, 2048, 4096, 8192, 10000] # possible sequence lengths
-batch_size: 20000 # number of valid tokens per batch 
+batch_size: 10000 # number of valid tokens per batch 
 autotune_wf: False # whether to perform triton autotuning on protein_to_wavefunc
 autotune_mha: False # whether to perform triton autotuning on attn
 
@@ -47,7 +47,7 @@ lr_patience: 2  # LR patience for scaling down after plateau
 # model_checkpoints:
 
 # Training type
-training_type: "wf" # choices: wf, onehot, probs, or self_supervised
+training_type: "onehot" # choices: wf, onehot, probs, or self_supervised
 # if wf, phase 1 is progressive decoder expansion (if specified), phase 2 is normal learning
 # if onehot, phase 1 has decoder weights frozes, and phase 2 is normal learning (everything unfrozen)
 # if probs, phase 1 also has decoder weights frozen (allow context to adapt to current weights), phase 2 is normal

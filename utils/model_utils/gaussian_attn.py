@@ -65,7 +65,6 @@ def _attn_fwd(
 	max_dists_ptr, stride_max_dists_Z, stride_max_dists_H,
 	L_ptr, stride_L_Z, stride_L_H, stride_L_N,
 	mask_ptr, stride_mask_Z, stride_mask_N,
-	context_mask_ptr, stride_context_mask_Z, stride_context_mask_N,
 	rng_seed_ptr, stride_rng_seed_Z, stride_rng_seed_H,
 
 	tot_N: tl.constexpr, tot_Z: tl.constexpr, nheads: tl.constexpr,
@@ -150,35 +149,37 @@ def _attn_fwd(
 
 	# create K/V column mask pointer (loaded in the next loop)
 	mask_j_ptr = tl.make_block_ptr( # N,
-		base=context_mask_ptr + (offs_Z*stride_context_mask_Z),
+		base=mask_ptr + (offs_Z*stride_mask_Z),
 		shape=(tot_N, ),
-		strides=(stride_context_mask_N, ),
+		strides=(stride_mask_N, ),
 		offsets=(0, ),
 		block_shape=(BLOCK_J, ),
 		order=(0, )
 	)
 
-	# create a dropout block for rand num generation. each Z, H combo has its own rng
-	# so only I, J should have a unique index
+	# create a dropout block for rand num generation. each Z, H combo has its own rng seed
+	# so need to compute random numbers for I, J indexes for the dropout mask to be reproducable in the bwd pass
 	# in the worst case (for my setup),  I,J = 10,000
-	# I and J each require 14 bits,
-	# meaning would need a minimum of 14 + 14 = 28 bits, to represent all
-	# possible combinations, so 32 bit int is required. 
+	# I and J each require 14 bits, meaning would need a minimum of 14 + 14 = 28 bits, 
+	# to represent all possible combinations uniquely, so 32 bit int is required for true uniqueness
 
 	# instead we will hash this to a 16 bit integer using two 16 bit integers as input.
-	# there will be a non-negligible amount of collisions, but better than the alternative
-	# of either no dropout, or significant training speed decrease. if still slow, 
-	# will generate a single 16 bit integer per element instead
+	# there will be a non-negligible amount of collisions, but only need an approximation
+	# of uniqueness for this purpose, and hashing reduces correlations between collisions anyways,
+	# essentially simulating randomness
+
+	# this assumes I and J idxs fits in 16 bits. if it doesnt, code still works, just 
+	# that there will be more collisions in dropout, but this is generally acceptable
+	# given the alternative of using larger dtypes
 
 	# load rng seed for this batch head combo
 	rng_seed = tl.load(rng_seed_ptr + (offs_Z*stride_rng_seed_Z) + (offs_H*stride_rng_seed_H))
 
-	# this assumes I and J fits in 16 bits. if it doesnt, code still works, just 
-	# that there will be more collisions in dropout, but this is generally acceptable
-	# given the alternative of using larger dtypes
+	# compute the i indexes used in this tile and extract the 16 LSB
 	I_bytes = offs_I + tl.arange(0, BLOCK_I)[:, None]
 	I_bytes = (I_bytes & 0xFFFF).to(tl.uint16) 
 
+	# init J_idxs, which will be incremented in the loop to compute the hashes
 	J_idxs = tl.arange(0, BLOCK_J)[None, :].to(tl.uint16)
 	J_inc = tl.full([1,BLOCK_J], BLOCK_J, dtype=tl.uint16)
 
@@ -249,11 +250,17 @@ def _attn_fwd(
 		li = (alpha*li + tl.sum(Pij, axis=1)).to(tl.float16) # N, (fp32)
 
 		# apply dropout mask
-		# hash the three numbers (ZH, I, J) to get a pseudo unique number for each element	
+		# hash the two numbers (I, J) to get a pseudo unique number for each element	
 		hash_vals = ((I_bytes) ^ (J_idxs & 0xFFFF)) # XORs
 		hash_vals = (hash_vals ^ (hash_vals >> 4)) & 0xFFFF # mixing
 		hash_vals = (hash_vals ^ (hash_vals << 4)) & 0xFFFF # mixing
+
+		# now each IJ combo in the current block has a pseudo-unique number associated
+		# with it, along with the corresponding batch+head random seed, simulating 
+		# randomness while still allowing deterministic computation in the bwd pass
 		dropout_mask = (tl.rand(rng_seed, hash_vals) > dropout_p).to(tl.int1) # N x N
+		
+		# apply dropout
 		Pij = tl.where(dropout_mask, Pij / (1-dropout_p), 0.0).to(tl.float16)
 
 		# load Vj compute output. convert Pij to fp16, Vj is already in fp16. output is in fp32
@@ -268,7 +275,7 @@ def _attn_fwd(
 		coords_J_ptr = tl.advance(coords_J_ptr, (BLOCK_J, 0))
 		mask_j_ptr = tl.advance(mask_j_ptr, (BLOCK_J, ))
 		
-		# modify dropout idxs for nect iter
+		# increment J_idxs for the hash compuation of the next iteration
 		J_idxs += J_inc 
 
 	# epilogue
@@ -323,7 +330,6 @@ def _attn_bwd(
 	min_dists_ptr, stride_min_dists_Z, stride_min_dists_H,
 	max_dists_ptr, stride_max_dists_Z, stride_max_dists_H,
 	mask_ptr, stride_mask_Z, stride_mask_N,
-	context_mask_ptr, stride_context_mask_Z, stride_context_mask_N,
 	rng_seed_ptr, stride_rng_seed_Z, stride_rng_seed_H,
 	
 	tot_Z: tl.constexpr, tot_N: tl.constexpr, nheads: tl.constexpr, 
@@ -377,9 +383,9 @@ def _attn_bwd(
 
 	# initialize mask pointer for j columns 
 	mask_j_ptr = tl.make_block_ptr( # N 
-		base=context_mask_ptr + (offs_Z*stride_context_mask_Z),
+		base=mask_ptr + (offs_Z*stride_mask_Z),
 		shape=(tot_N, ),
-		strides=(stride_context_mask_N, ),
+		strides=(stride_mask_N, ),
 		offsets=(offs_J, ),
 		block_shape=(BLOCK_J, ),
 		order=(0, )
@@ -601,15 +607,15 @@ def _attn_bwd(
 	d_spread_ptr = d_spreads_ptr + (offs_Z*stride_d_spreads_Z) + (offs_H*stride_d_spreads_H)
 	tl.atomic_add(d_spread_ptr, d_spread)
 
-def attn(Q, K, V, coords, spreads, mask=None, context_mask=None, min_rbf=0.1, max_rbf=0.9, dropout=0.0):
+def attn(Q, K, V, coords, spreads, mask=None, min_rbf=0.1, max_rbf=0.9, dropout=0.0):
 	'''wrapper for attn so can call it with kwargs'''
 
-	return _attn.apply(Q, K, V, coords, spreads, mask, context_mask, min_rbf, max_rbf, dropout)
+	return _attn.apply(Q, K, V, coords, spreads, mask, min_rbf, max_rbf, dropout)
 
 class _attn(torch.autograd.Function):
 
 	@staticmethod
-	def forward(ctx, Q, K, V, coords, spreads, mask=None, context_mask=None, min_rbf=0.1, max_rbf=0.9, dropout=0.0):
+	def forward(ctx, Q, K, V, coords, spreads, mask=None, min_rbf=0.1, max_rbf=0.9, dropout=0.0):
 		
 		# checks
 		assert (Q.shape == K.shape) and (K.shape == V.shape), f"Q, K, and V projection shapes must match, but got {Q.shape=}, {K.shape=}, {V.shape=}"
@@ -632,35 +638,26 @@ class _attn(torch.autograd.Function):
 		ctx.spreads_dtype = spreads.dtype
 
 		# matmults done in fp16
-		Q = Q.to(torch.float16)
-		K = K.to(torch.float16)
-		V = V.to(torch.float16)
+		Q = Q.to(torch.float16).contiguous()
+		K = K.to(torch.float16).contiguous()
+		V = V.to(torch.float16).contiguous()
 
-		# rbfs in fp32
-		coords = coords.to(torch.float16)
-		spreads = spreads.to(torch.float16) # this is now Z x H, need to update everything (forward and back)
+		# rbfs in fp32 and make sure everything is contiguous
+		coords = coords.to(torch.float16).contiguous()
+		spreads = spreads.to(torch.float16).contiguous() # this is now Z x H, need to update everything (forward and back)
 
 		# initialize mask, output, and logsumexp tensors
-		mask = (torch.ones(batch, N, dtype=torch.bool, device=Q.device) if mask is None else ~mask).contiguous() # batch x N
-		context_mask = (mask if context_mask is None else ~context_mask).contiguous() # batch x N
-		
+		mask = (torch.ones(batch, N, dtype=torch.bool, device=Q.device) if mask is None else ~mask).contiguous() # batch x N		
 		out = torch.zeros(batch, nheads, N, d_k, dtype=torch.float16, device=Q.device).contiguous() # batch x N x d_model
 		L = torch.zeros(batch, nheads, N, dtype=torch.float16, device=Q.device).contiguous() # batch x nheads x N
 		
-		# in fp32
+		# define min dists (clamped to 0.0) and max dists (clamped to inf)
 		min_dists = torch.sqrt(2*(spreads**2)*math.log(1/max_rbf)).contiguous()
 		max_dists = torch.sqrt(2*(spreads**2)*math.log(1/min_rbf)).contiguous()
 
-		# make sure everything is contiguous
-		Q = Q.contiguous()
-		K = K.contiguous()
-		V = V.contiguous()
-		coords = coords.contiguous()
-		spreads = spreads.contiguous()
-		
 		# define the grid
 		grid = lambda args: (   triton.cdiv(args["tot_N"], args["BLOCK_I"]), 
-								args["tot_Z"]*args["nheads"],
+								args["tot_Z"]*args["nheads"],	
 								1
 							)
 
@@ -679,19 +676,17 @@ class _attn(torch.autograd.Function):
 							max_dists, max_dists.stride(0), max_dists.stride(1), # nhead, 
 							L, L.stride(0), L.stride(1), L.stride(2), # batch x nhead x N
 							mask, mask.stride(0), mask.stride(1), # batch x N
-							context_mask, context_mask.stride(0), context_mask.stride(1),
 							rng_seed, rng_seed.stride(0), rng_seed.stride(1),
 							N, batch, nheads, d_k, max(d_k, 16), softmax_scale, min_rbf,
 							dropout
 						)
 
 		# for backwards pass
-		ctx.save_for_backward(Q, K, V, out, L, coords, spreads, mask, context_mask, rng_seed)
+		ctx.save_for_backward(Q, K, V, out, L, coords, spreads, mask, rng_seed)
 		ctx.softmax_scale = softmax_scale
 		ctx.min_rbf = min_rbf
 		ctx.max_rbf = max_rbf
 		ctx.dropout = dropout
-
 
 		return out.to(ctx.Q_dtype)
 
@@ -699,7 +694,7 @@ class _attn(torch.autograd.Function):
 	def backward(ctx, dO):
 
 		# load saved tensors (should all be float32, expect masks). also should all be contiguous from fwd
-		Q, K, V, O, L, coords, spreads, mask, context_mask, rng_seed = ctx.saved_tensors
+		Q, K, V, O, L, coords, spreads, mask, rng_seed = ctx.saved_tensors
 
 		# compute D for dSR calculation
 		D = torch.sum(O*dO, dim=3).to(torch.float16) # Z x H x N x D -> Z x H x N
@@ -744,7 +739,6 @@ class _attn(torch.autograd.Function):
 							min_dists, min_dists.stride(0), min_dists.stride(1), 
 							max_dists, max_dists.stride(0), max_dists.stride(1), 
 							mask, mask.stride(0), mask.stride(1),
-							context_mask, context_mask.stride(0), context_mask.stride(1),
 							rng_seed, rng_seed.stride(0), rng_seed.stride(1),
 							batch, N, nheads, d_k, max(d_k, 16), ctx.softmax_scale, ctx.min_rbf,
 							ctx.dropout
