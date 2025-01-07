@@ -659,7 +659,8 @@ class _attn(torch.autograd.Function):
 								1
 							)
 
-		rng_seed = torch.randint(0, 2**16-1, (1,)).item()
+		# rng_seed = torch.randint(0, 2**16-1, (1,)).item()
+		rng_seed = 37 # hard code for debugging
 
 		# run the kernel
 		_attn_fwd[grid](  	out, out.stride(0), out.stride(1), out.stride(2), out.stride(3), # batch x nheads x N x d_k
