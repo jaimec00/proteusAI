@@ -36,25 +36,6 @@ class SpatialEmbedding(nn.Module):
 		self.min_base = min_base
 		self.max_base = max_base
 
-		# initialize spreadparameters so that they are distributed evenly in logspace after softplus squash
-		# first define target percentages
-		# normalize by base+1 so not fully 1
-		# init_minwl_pct = 0.1
-		# init_maxwl_pct = 0.5
-		# init_base_pct = 0.5
-
-		# # inverse softplus squash to get target spread parameters. add eps bc sps never reaches zero, also friendlier gradients
-		# init_spread_params = torch.log(torch.exp(init_spread_pct/(1-init_spread_pct))-1)
-
-
-		# self.min_wl_param = nn.Parameter(torch.randn(1))
-		# self.max_wl_param = nn.Parameter(torch.randn(1))
-		# self.base_param = nn.Parameter(torch.randn(1))
-
-		# self.wavelengths_params = nn.Parameter(torch.randn(d_model//2))
- 
-		# self.wavelengths_weights = nn.Parameter(torch.randn((d_model//2, d_model//2)))
-
 	def forward(self, coords, wavelengths, key_padding_mask):
 
 		# normalize the weight matrix along the 0th dim, so when dot wavelengths by weights, each sample gets a vector of 
@@ -145,8 +126,10 @@ class MHA(nn.Module):
 		# now each head's spread is a weighted avg of the stdevs along the principal axss
 		# also each batch has a customized spread 
 		# spreads = torch.matmul(wavelengths, spread_weights_norm) # Z x d_model//2 @ d_model//2 x H --> Z x H
-		# spreads = 3.7 + (22 - 3.7) * (torch.logspace(0,1,self.nhead, 20) - 1) / (20 - 1)
-		spreads = wavelengths[:, ::(wavelengths.size(1)//self.nhead)]
+		spreads = 3 + (6 - 3) * (torch.logspace(0,1,self.nhead, 20, device=Q.device) - 1) / (20 - 1)
+		# spreads = wavelengths[:, ::(wavelengths.size(1)//self.nhead)]
+		# spreads = torch.full([Q.size(0), Q.size(1)], 4, device=Q.device)
+		# spreads = torch.logspace
 
 		# perform attention
 		out = attn(Q, K, V, coords, spreads.to(Q.device), mask=key_padding_mask, context_mask=context_mask, min_rbf=self.min_rbf, max_rbf=self.max_rbf)  # batch x nhead x N x d_k
@@ -322,50 +305,50 @@ class proteusAI(nn.Module):
 
 		# # do PCA to determine the stdevs along the principle axes 
 
-		# compute valid tokens for manual mean and std calculations
-		valid_mask = (~key_padding_mask.unsqueeze(2)) & coords.isfinite().all(dim=2, keepdims=True) # Z x N x 1
-		valid_toks = valid_mask.to(torch.float32).sum(dim=1, keepdims=True) # Z x 1 x 1
+		# # compute valid tokens for manual mean and std calculations
+		# valid_mask = (~key_padding_mask.unsqueeze(2)) & coords.isfinite().all(dim=2, keepdims=True) # Z x N x 1
+		# valid_toks = valid_mask.to(torch.float32).sum(dim=1, keepdims=True) # Z x 1 x 1
 
-		# coords must be fp64 for this part, or else eigenvalues suffer over/under flow. save coords dtype to convert back later
-		coords_dtype = coords.dtype
-		coords = torch.where(valid_mask, coords, 0.0).to(torch.float64) # Z x N x 3
+		# # coords must be fp64 for this part, or else eigenvalues suffer over/under flow. save coords dtype to convert back later
+		# coords_dtype = coords.dtype
+		# coords = torch.where(valid_mask, coords, 0.0).to(torch.float64) # Z x N x 3
 
-		# center coordinates around origin
-		coords_mean = coords.sum(dim=1, keepdim=True) / valid_toks # Z x 1 x 3
-		coords_centered = (coords - coords_mean) # Z x N x 3
+		# # center coordinates around origin
+		# coords_mean = coords.sum(dim=1, keepdim=True) / valid_toks # Z x 1 x 3
+		# coords_centered = (coords - coords_mean) # Z x N x 3
 
-		# scale so stdev is 1 (for numerical stability)
-		coords_std = torch.sqrt( torch.sum(coords_centered**2, dim=1, keepdim=True) / valid_toks) # Z x 1 x 3
-		coords_scaled = coords_centered / (coords_std + 1e-6) # Z x N x 3
+		# # scale so stdev is 1 (for numerical stability)
+		# coords_std = torch.sqrt( torch.sum(coords_centered**2, dim=1, keepdim=True) / valid_toks) # Z x 1 x 3
+		# coords_scaled = coords_centered / (coords_std + 1e-6) # Z x N x 3
 
-		# compute covariance matrix
-		covariance_mat = torch.matmul(coords_scaled.transpose(1, 2), coords_scaled) / torch.where(valid_toks>1, valid_toks - 1, 1)  # Z x 3 x N @ Z x N x 3--> Z x 3 x 3
+		# # compute covariance matrix
+		# covariance_mat = torch.matmul(coords_scaled.transpose(1, 2), coords_scaled) / torch.where(valid_toks>1, valid_toks - 1, 1)  # Z x 3 x N @ Z x N x 3--> Z x 3 x 3
 
-		# scale back up 
-		covariance_mat = coords_std.transpose(1,2) * covariance_mat * coords_std # Z x N x 3
+		# # scale back up 
+		# covariance_mat = coords_std.transpose(1,2) * covariance_mat * coords_std # Z x N x 3
 
-		# compute the eigenvalues ie the variances
-		eigenvalues = torch.linalg.eigh(covariance_mat).eigenvalues # Z x 3
+		# # compute the eigenvalues ie the variances
+		# eigenvalues = torch.linalg.eigh(covariance_mat).eigenvalues # Z x 3
 
-		# compute stdevs and convert back to original dtype	
-		stdevs = torch.sqrt(eigenvalues).to(coords_dtype) # Z x 3
+		# # compute stdevs and convert back to original dtype	
+		# stdevs = torch.sqrt(eigenvalues).to(coords_dtype) # Z x 3
 		
-		# fully padded samples withing a batch result in nan, so make them 3 as a dummy value for the kernels (wavelengths are div by base -1, so cant do dummy val of 1)
-		# dont do isnan() in case something else causes nans, this explicitly only replaces fully padded samples
-		stdevs = torch.where(valid_mask.squeeze(2).any(axis=1, keepdim=True).expand(-1, 3), stdevs, 3.0) # Z x 3
+		# # fully padded samples withing a batch result in nan, so make them 3 as a dummy value for the kernels (wavelengths are div by base -1, so cant do dummy val of 1)
+		# # dont do isnan() in case something else causes nans, this explicitly only replaces fully padded samples
+		# stdevs = torch.where(valid_mask.squeeze(2).any(axis=1, keepdim=True).expand(-1, 3), stdevs, 22.0) # Z x 3
 
 		# # get the highest std and treat that as the max wavelength
 		# also set it to the base, so that higher stdevs result in similar samples of low wavelengths, and only sparsely
 		# sample the higher wavelengths
-		max_wl = stdevs.max(dim=1, keepdim=True).values # Z x 1
-		base = max_wl # hard code base for testing
-		min_wl =  3.7 # for testing
+		# max_wl = stdevs.max(dim=1, keepdim=True).values # Z x 1
+		max_wl = 8.0 #torch.full((coords.size(0), 1), 10.0, device=torch.device)
+		base = 20 # hard code base for testing
+		min_wl =  1 # for testing
 
 		# # samples wavelengths near the average more frequently than those far away. max wl is twice the avg
-		wavelengths = min_wl + (max_wl - min_wl) * ((base ** (torch.arange(0, self.d_model//2, device=max_wl.device, dtype=torch.float32)/(self.d_model//2))) - 1) / (base - 1)
-		if wavelengths.isnan().any():
-			print(wavelengths.isnan().any(axis=1))
-			print(valid_mask.squeeze(2).any(axis=1))
+		wavelengths = min_wl + (max_wl - min_wl) * ((base ** (torch.arange(0, self.d_model//2, device=coords.device, dtype=torch.float32)/(self.d_model//2))) - 1) / (base - 1)
+		if wavelengths.dim() < 2:
+			wavelengths = wavelengths.unsqueeze(0).expand(coords.size(0), -1)
 
 		return wavelengths
 

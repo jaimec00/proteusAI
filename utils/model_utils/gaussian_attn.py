@@ -70,7 +70,7 @@ def _attn_fwd(
 	tot_N: tl.constexpr, tot_Z: tl.constexpr, nheads: tl.constexpr,
 	d_k: tl.constexpr, min_d_k: tl.constexpr, # max(16, d_k) bc tl.dot requires dim>=16
 	softmax_scale: tl.constexpr, eps:tl.constexpr,
-	dropout: tl.constexpr, rng_seed: tl.constexpr,
+	# dropout: tl.constexpr, rng_seed: tl.constexpr,
 
 	BLOCK_I: tl.constexpr, # block sizes
 	BLOCK_J: tl.constexpr,
@@ -158,14 +158,14 @@ def _attn_fwd(
 	)
 
 	# create a dropout block for rand num generation. each Z, H, I, J should have a unique index
-	num_blocks_I = triton.cdiv(tot_N, BLOCK_I)
-	num_blocks_J = triton.cdiv(tot_N, BLOCK_J)
-	dropout_idxs = (
-			(
-				(offs_Z*nheads + offs_H) * num_blocks_I + (offs_I + tl.arange(0, BLOCK_I)[:, None])
-			)*num_blocks_J
-		) + tl.arange(0, BLOCK_J)[None, :] # NI x NJ
-	dropout_increment = BLOCK_J
+	# num_blocks_I = triton.cdiv(tot_N, BLOCK_I)
+	# num_blocks_J = triton.cdiv(tot_N, BLOCK_J)
+	# dropout_idxs = (
+	# 		(
+	# 			(offs_Z*nheads + offs_H) * num_blocks_I + (offs_I + tl.arange(0, BLOCK_I)[:, None])
+	# 		)*num_blocks_J
+	# 	) + tl.arange(0, BLOCK_J)[None, :] # NI x NJ
+	# dropout_increment = BLOCK_J
 	
 	# get pointers for spreads, min and max distances for this head
 	spread_ptr = spreads_ptr + (offs_Z*stride_spreads_Z) + (offs_H*stride_spreads_H)
@@ -234,8 +234,8 @@ def _attn_fwd(
 
 		# apply dropout mask
 		# need to compute based on indices for consistent results
-		dropout_mask = tl.rand(rng_seed, dropout_idxs) > dropout # N x N
-		Pij = tl.where(dropout_mask, Pij / (1-dropout), 0.0)
+		# dropout_mask = tl.rand(rng_seed, dropout_idxs) > dropout # N x N
+		# Pij = tl.where(dropout_mask, Pij / (1-dropout), 0.0)
 
 		# load Vj compute output. convert Pij to fp16, Vj is already in fp16. output is in fp32
 		Oi = tl.dot(Pij.to(tl.float16), tl.load(Vj_block_ptr, boundary_check=(0,1), padding_option="zero"), acc=Oi*alpha[:, None], out_dtype=tl.float32) # N x d_k
@@ -248,7 +248,7 @@ def _attn_fwd(
 		Vj_block_ptr = tl.advance(Vj_block_ptr, (BLOCK_J, 0))
 		coords_J_ptr = tl.advance(coords_J_ptr, (BLOCK_J, 0))
 		mask_j_ptr = tl.advance(mask_j_ptr, (BLOCK_J, ))
-		dropout_idxs += dropout_increment
+		# dropout_idxs += dropout_increment
 
 	# epilogue
 
@@ -306,7 +306,7 @@ def _attn_bwd(
 
 	tot_Z: tl.constexpr, tot_N: tl.constexpr, nheads: tl.constexpr, 
 	d_k: tl.constexpr, min_d_k: tl.constexpr, softmax_scale: tl.constexpr, eps:tl.constexpr,
-	dropout: tl.constexpr, rng_seed: tl.constexpr,
+	# dropout: tl.constexpr, rng_seed: tl.constexpr,
 
 	BLOCK_I: tl.constexpr, BLOCK_J: tl.constexpr
 ):
@@ -424,12 +424,12 @@ def _attn_bwd(
 	)
 
 	# create a dropout block for rand num generation. each Z, H, I, J should have a unique index
-	num_blocks_I = triton.cdiv(tot_N, BLOCK_I)
-	num_blocks_J = triton.cdiv(tot_N, BLOCK_J)
-	dropout_idxs = (
-				(offs_Z*nheads + offs_H) * num_blocks_I + tl.arange(0, BLOCK_I)[:, None]
-			)*num_blocks_J + (offs_J + tl.arange(0, BLOCK_J)[None, :]) # NI x NJ
-	dropout_increment = BLOCK_I*num_blocks_J
+	# num_blocks_I = triton.cdiv(tot_N, BLOCK_I)
+	# num_blocks_J = triton.cdiv(tot_N, BLOCK_J)
+	# dropout_idxs = (
+	# 			(offs_Z*nheads + offs_H) * num_blocks_I + tl.arange(0, BLOCK_I)[:, None]
+	# 		)*num_blocks_J + (offs_J + tl.arange(0, BLOCK_J)[None, :]) # NI x NJ
+	# dropout_increment = BLOCK_I*num_blocks_J
 
 	# load the spread and dists assigned to this block (based on the head it was assigned), and j coordinates
 	spread = tl.load(spread_ptr)
@@ -494,8 +494,8 @@ def _attn_bwd(
 		Pij = tl.exp(tl.where(attn_mask, SRij - Li[:, None], -inf)) # N x N (fp32)
 
 		# apply dropout
-		dropout_mask = tl.rand(rng_seed, dropout_idxs) > dropout
-		Pij = tl.where(dropout_mask, Pij / (1-dropout), 0.0)
+		# dropout_mask = tl.rand(rng_seed, dropout_idxs) > dropout
+		# Pij = tl.where(dropout_mask, Pij / (1-dropout), 0.0)
 
 		# load gradient w.r.t output (fp16)
 		dOi = tl.load(dOi_block_ptr, boundary_check=(0, 1), padding_option="zero") # N x d_k
@@ -544,7 +544,7 @@ def _attn_bwd(
 		Di_block_ptr = tl.advance(Di_block_ptr, (BLOCK_I, ))
 		coords_i_ptr = tl.advance(coords_i_ptr, (BLOCK_I, 0))
 		mask_i_ptr = tl.advance(mask_i_ptr, (BLOCK_I, ))
-		dropout_idxs += dropout_increment
+		# dropout_idxs += dropout_increment
 
 	# initialize dK and dV pointers to write output
 	dKj_block_ptr = tl.make_block_ptr( # N x d_k
@@ -573,15 +573,15 @@ def _attn_bwd(
 	d_spread_ptr = d_spreads_ptr + (offs_Z*stride_d_spreads_Z) + (offs_H*stride_d_spreads_H)
 	tl.atomic_add(d_spread_ptr, d_spread)
 
-def attn(Q, K, V, coords, spreads, mask=None, context_mask=None, min_rbf=0.1, max_rbf=0.9, dropout=0.0):
+def attn(Q, K, V, coords, spreads, mask=None, context_mask=None, min_rbf=0.1, max_rbf=0.9):
 	'''wrapper for attn so can call it with kwargs'''
 
-	return _attn.apply(Q, K, V, coords, spreads, mask, context_mask, min_rbf, max_rbf, dropout)
+	return _attn.apply(Q, K, V, coords, spreads, mask, context_mask, min_rbf, max_rbf)
 
 class _attn(torch.autograd.Function):
 
 	@staticmethod
-	def forward(ctx, Q, K, V, coords, spreads, mask=None, context_mask=None, min_rbf=0.1, max_rbf=0.9, dropout=0.0):
+	def forward(ctx, Q, K, V, coords, spreads, mask=None, context_mask=None, min_rbf=0.1, max_rbf=0.9):
 		
 		# checks
 		assert (Q.shape == K.shape) and (K.shape == V.shape), f"Q, K, and V projection shapes must match, but got {Q.shape=}, {K.shape=}, {V.shape=}"
@@ -636,12 +636,6 @@ class _attn(torch.autograd.Function):
 								1
 							)
 
-		# hard code rng seed for testing
-		# rng_seed = 37
-
-		# for implementation, generate a seed each pass. saved for bwd to be consistent
-		rng_seed = torch.randint(0, 2**32 - 1, (1,)).item()
-
 		# run the kernel
 		_attn_fwd[grid](  	out, out.stride(0), out.stride(1), out.stride(2), out.stride(3), # batch x nheads x N x d_k
 							Q, Q.stride(0), Q.stride(1), Q.stride(2), Q.stride(3), # batch x nhead x N x d_k
@@ -655,7 +649,6 @@ class _attn(torch.autograd.Function):
 							mask, mask.stride(0), mask.stride(1), # batch x N
 							context_mask, context_mask.stride(0), context_mask.stride(1),
 							N, batch, nheads, d_k, max(d_k, 16), softmax_scale, min_rbf,
-							dropout, rng_seed
 						)
 
 		# for backwards pass
@@ -663,8 +656,7 @@ class _attn(torch.autograd.Function):
 		ctx.softmax_scale = softmax_scale
 		ctx.min_rbf = min_rbf
 		ctx.max_rbf = max_rbf
-		ctx.dropout = dropout
-		ctx.rng_seed = rng_seed
+
 
 		return out
 
@@ -719,7 +711,6 @@ class _attn(torch.autograd.Function):
 							mask, mask.stride(0), mask.stride(1),
 							context_mask, context_mask.stride(0), context_mask.stride(1),
 							batch, N, nheads, d_k, max(d_k, 16), ctx.softmax_scale, ctx.min_rbf,
-							ctx.dropout, ctx.rng_seed
 						 )
 
 		dQ = dQ.to(ctx.Q_dtype)

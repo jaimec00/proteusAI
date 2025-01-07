@@ -9,7 +9,7 @@ max_rbf: 0.99  # maximum rbf scaling factor in gaussian mha
 min_spread: 1
 max_spread: 30
 num_heads: 8  # number of attention heads to perform the training with
-decoder_layers: 4 # number of decoder layers
+decoder_layers: 8 # number of decoder layers
 hidden_linear_dim: 1024  # intermediate dimensions of decoder feed forward layer
 temperature: 0.1  # temperature for autoregressive inference (for testing)
 max_tokens: 10000  # maximum number of tokens
