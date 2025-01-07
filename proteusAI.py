@@ -72,6 +72,7 @@ class MHA(nn.Module):
 
 		self.min_rbf = min_rbf
 		self.max_rbf = max_rbf
+		self.dropout=0.1
 		# self.min_spread = min_spread
 		# self.max_spread = max_spread
 
@@ -126,13 +127,14 @@ class MHA(nn.Module):
 		# now each head's spread is a weighted avg of the stdevs along the principal axss
 		# also each batch has a customized spread 
 		# spreads = torch.matmul(wavelengths, spread_weights_norm) # Z x d_model//2 @ d_model//2 x H --> Z x H
-		spreads = 3 + (6 - 3) * (torch.logspace(0,1,self.nhead, 20, device=Q.device) - 1) / (20 - 1)
+		spreads = 3 + (5 - 3) * (torch.logspace(0,1,self.nhead, 20, device=Q.device) - 1) / (20 - 1)
 		# spreads = wavelengths[:, ::(wavelengths.size(1)//self.nhead)]
 		# spreads = torch.full([Q.size(0), Q.size(1)], 4, device=Q.device)
 		# spreads = torch.logspace
 
 		# perform attention
-		out = attn(Q, K, V, coords, spreads.to(Q.device), mask=key_padding_mask, context_mask=context_mask, min_rbf=self.min_rbf, max_rbf=self.max_rbf)  # batch x nhead x N x d_k
+		dropout = self.dropout if self.training else 0.0
+		out = attn(Q, K, V, coords, spreads.to(Q.device), mask=key_padding_mask, context_mask=context_mask, min_rbf=self.min_rbf, max_rbf=self.max_rbf, dropout=dropout)  # batch x nhead x N x d_k
 
 		out = out.permute(0,2,3,1) # batch x N x d_k x nhead
 		out = out.reshape(batch, N, self.d_model) # batch x N x d_k x nhead --> batch x N x d_model
