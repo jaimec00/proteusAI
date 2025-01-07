@@ -55,7 +55,7 @@ def main():
 	print("forward pass:\n")
 
 	# max number of floats is the intermediate attn tensor 
-	num_floats = batch * nheads * N * N  
+	num_floats = batch * nheads * N * N  * 2
 	num_bytes = num_floats * 4 # assume fp32
 	max_bytes = 20 * (1024**3) # 20 GB
 	if num_bytes >= max_bytes:
