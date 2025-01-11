@@ -94,10 +94,10 @@ def keep_fwd(conf):
 				 restore_value=["out_ptr"] # make sure autotuning resets the outputs of this function for each configuration
 ) 
 @triton.jit
-def _protein_to_wavefunc_fwd(
+def _wf_embedding_fwd(
 		out_ptr, stride_out_Z, stride_out_N, stride_out_D,
 		coords_ptr, stride_coords_Z, stride_coords_N, stride_coords_space,
-		wavenumber_ptr, stride_wavenumber_Z, stride_wavenumber_K,
+		wavenumber_ptr, stride_wavenumber_K,
 		cos_sums_ptr, stride_cos_sums_Z, stride_cos_sums_N, stride_cos_sums_K,
 		sin_sums_ptr, stride_sin_sums_Z, stride_sin_sums_N, stride_sin_sums_K,
 		mask_ptr, stride_mask_Z, stride_mask_N,
@@ -153,9 +153,6 @@ def _protein_to_wavefunc_fwd(
 		block_shape=(BLOCK_NJ, ),
 		order=(0, )
 	)
-
-	# move the pointer to the first wavenumber in the batch
-	wavenumber_ptr = wavenumber_ptr + (Z*stride_wavenumber_Z)
 
 	# initilize output pointer. atomic add does not support block pointers
 	NI_out = NI_offs + tl.arange(0, BLOCK_NI)[:, None] # NI, 1
@@ -217,13 +214,13 @@ def _protein_to_wavefunc_fwd(
 		sin_sum_ptr += 1*stride_sin_sums_K
 		out_ptr += 2*stride_out_D
 
-def protein_to_wavefunc(coords, wavenumbers, mask=None):
+def wf_embedding(coords, wavenumbers, mask=None):
 	'''wrapper to call protein_to_wavefunc w/ kwargs'''
 
-	return _protein_to_wavefunc.apply(coords, wavenumbers, mask)
+	return _wf_embedding.apply(coords, wavenumbers, mask)
 
 
-class _protein_to_wavefunc(torch.autograd.Function):
+class _wf_embedding(torch.autograd.Function):
 
 	@staticmethod # might make wavelengths learnable and make a backward pass, but focusing on MHA kernel first
 	def forward(ctx, coords, wavenumbers, mask=None):
@@ -254,8 +251,6 @@ class _protein_to_wavefunc(torch.autograd.Function):
 		# checks
 		assert (coords.dim() == 3) and (coords.size(2) == 3), f"coords must be of shape (batch x N x 3), not {coords.shape}"
 		batch, N, space = coords.shape # input dimensions
-		if wavenumbers.dim() < 2: # if doing static wavenumbers for all batches, just broadcast the batch dim
-			wavenumbers = wavenumbers.unsqueeze(0).expand(batch, -1)
 		num_wn = wavenumbers.size(1)
 		d_model = num_wn * 2
 		
@@ -279,9 +274,9 @@ class _protein_to_wavefunc(torch.autograd.Function):
 							)
 
 		# run the kernel
-		_protein_to_wavefunc_fwd[grid](  	out, out.stride(0), out.stride(1), out.stride(2),
+		_wf_embedding_fwd[grid](  	out, out.stride(0), out.stride(1), out.stride(2),
 											coords, coords.stride(0), coords.stride(1), coords.stride(2),
-											wavenumbers, wavenumbers.stride(0), wavenumbers.stride(1),
+											wavenumbers, wavenumbers.stride(0),
 											cos_sums, cos_sums.stride(0),cos_sums.stride(1), cos_sums.stride(2),
 											sin_sums, sin_sums.stride(0),sin_sums.stride(1), sin_sums.stride(2),
 											mask, mask.stride(0), mask.stride(1),
@@ -295,9 +290,9 @@ class _protein_to_wavefunc(torch.autograd.Function):
 	@staticmethod
 	def backward(ctx, dO):
 
-		# dont even need triton for bwd
-		# also masks already applied to O and phases, masked vals are zero, 
-		# so mult with dO ensures non valid positions dont contribute to the gradients
+		# note, masks already applied to O and cos and sin sums, masked vals are zero, 
+		# so multiplication ensures non valid positions dont contribute to the gradients
+		# i.e. don't need to save mask for bwd
 
 		# load saved tensors from bwd
 		cos_sums, sin_sums = ctx.saved_tensors
@@ -309,7 +304,7 @@ class _protein_to_wavefunc(torch.autograd.Function):
 
 		# compute grad wrt wavenumbers
 		# dO_2i=l+1 * sum_j(cos(K|ri-rj|)) - dO_2l * sum(sin(K|ri-rj|))
-		# sum the Z dim and N dim, to accumulate gradients, as wavenumbers is a tensor of shape Z x d_model//2
-		dk = ((imag_dO*cos_sums) - (real_dO*sin_sums)).sum(dim=1) # Z x d_model//2
+		# sum the Z dim and N dim, to accumulate gradients, as wavenumbers is a tensor of shape d_model//2
+		dk = ((imag_dO*cos_sums) - (real_dO*sin_sums)).sum(dim=1).sum(dim=0) # d_model//2
 
 		return None, dk, None 
