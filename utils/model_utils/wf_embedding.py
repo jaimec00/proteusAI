@@ -251,7 +251,7 @@ class _wf_embedding(torch.autograd.Function):
 		# checks
 		assert (coords.dim() == 3) and (coords.size(2) == 3), f"coords must be of shape (batch x N x 3), not {coords.shape}"
 		batch, N, space = coords.shape # input dimensions
-		num_wn = wavenumbers.size(1)
+		num_wn = wavenumbers.size(0)
 		d_model = num_wn * 2
 		
 		# prepare data

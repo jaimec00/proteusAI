@@ -1,7 +1,7 @@
 
 
 import torch
-from utils.model_utils.featurization import protein_to_wavefunc 
+from utils.model_utils.wf_embedding import wf_embedding 
 
 import triton
 import triton.language as tl
@@ -22,14 +22,13 @@ def main():
 	# num_wl = int(d_model//2) # define the number of wave functions to compute
 	# wavelengths = (min_wl + (torch.logspace(0, 1, num_wl, base=base, device=coords.device, dtype=torch.float32) - 1) / (base - 1) * (max_wl - min_wl))
 	# wavenumbers = (2 * torch.pi / wavelengths).contiguous()
-	wavenumbers = torch.randint(1,10,(batch, d_model//2), device=coords.device, dtype=torch.float32, requires_grad=True)
-	print(wavenumbers.shape)
+	wavenumbers = torch.randint(1,10,(d_model//2,), device=coords.device, dtype=torch.float32, requires_grad=True)
 	# torch.linspace(1,3,d_model//2, device=coords.device, dtype=torch.float32, requires_grad=True)
 
 	params = [coords, wavenumbers, mask]
 
 	# for autotuning
-	protein_to_wavefunc(*params)
+	wf_embedding(*params)
 
 	# wavenumbers.grad.zero_()
 
@@ -38,8 +37,8 @@ def main():
 	end_event = torch.cuda.Event(enable_timing=True)
 	atol, rtol = 1e-4, 0
 
-	triton_out, triton_time, triton_memory = profile_func(protein_to_wavefunc, params, start_event, end_event)
-	torch_out, torch_time, torch_memory = profile_func(protein_to_wavefunc_torch, params, start_event, end_event)
+	triton_out, triton_time, triton_memory = profile_func(wf_embedding, params, start_event, end_event)
+	torch_out, torch_time, torch_memory = profile_func(wf_embedding_torch, params, start_event, end_event)
 
 	rel_error, abs_error = calculate_error(torch_out, triton_out)
 	print(f"triton implementation is correct: {torch.allclose(triton_out, torch_out, atol=atol, rtol=rtol, equal_nan=False)}")
@@ -77,17 +76,17 @@ def main():
 def autotune_wf():
 	pass
 
-def protein_to_wavefunc_torch(coords, wavenumbers, mask=None):
+def wf_embedding_torch(coords, wavenumbers, mask=None):
 
 	# get shape
 	batch, N, _ = coords.shape
-	num_wn = wavenumbers.size(1)
+	num_wn = wavenumbers.size(0)
 	d_model = num_wn*2
 	mask = mask if mask is not None else torch.zeros(batch, N, dtype=torch.bool, device=coords.device)
 
 	dists = torch.sqrt(torch.sum((coords[:, :, None, :] - coords[:, None, :, :])**2, dim=3)) # Z x N x N
 	
-	phases = dists[:, :, :, None] * wavenumbers[:, None, None, :] # Z x N x N x w
+	phases = dists[:, :, :, None] * wavenumbers[None, None, None, :] # Z x N x N x w
 	mask = mask[:, :, None] | mask[:, None, :] | (dists==0)
 	magnitudes = 1 / torch.where(mask, float("inf"), dists)[:, :, :, None] # Z x N x N x 1
 
