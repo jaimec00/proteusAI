@@ -39,7 +39,7 @@ def keep_fwd(conf):
 	if autotune == "1":
 		return (BLOCK_I * BLOCK_J) <= 1024
 	else:
-		return ((BLOCK_I == 64) and (BLOCK_J == 16) and (conf.num_warps==4))
+		return ((BLOCK_I == 16) and (BLOCK_J == 64) and (conf.num_warps==4))
 
 def keep_bwd(conf):
 	autotune = os.environ.get("ATTN_AUTOTUNE")
@@ -48,7 +48,7 @@ def keep_bwd(conf):
 	if autotune == "1":
 		return (BLOCK_I * BLOCK_J) <= 1024
 	else:
-		return ((BLOCK_I == 16) and (BLOCK_J == 32) and (conf.num_warps==4))
+		return ((BLOCK_I == 16) and (BLOCK_J == 64) and (conf.num_warps==4))
 
 @triton.autotune(list(filter(keep_fwd, configs)),
 				 key=['tot_N', 'tot_Z', 'nheads', 'min_d_k'], # triton will not recompile if these inputs are the same (size of input tensor)
@@ -177,11 +177,11 @@ def _attn_fwd(
 
 	# compute the i indexes used in this tile and extract the 16 LSB
 	I_bytes = offs_I + tl.arange(0, BLOCK_I)[:, None]
-	I_bytes = (I_bytes & 0xFFFF).to(tl.uint16) 
+	I_bytes = (I_bytes & 0xFFFF).to(tl.uint32) << 16
 
 	# init J_idxs, which will be incremented in the loop to compute the hashes for each i j pair
-	J_idxs = tl.arange(0, BLOCK_J)[None, :].to(tl.uint16)
-	J_inc = tl.full([1,BLOCK_J], BLOCK_J, dtype=tl.uint16)
+	J_idxs = tl.arange(0, BLOCK_J)[None, :].to(tl.uint32)
+	J_inc = tl.full([1,BLOCK_J], BLOCK_J, dtype=tl.uint32)
 
 	# get pointers for spreads, min and max distances for this head
 	spread_ptr = spreads_ptr + (offs_H*stride_spreads_H)
@@ -192,10 +192,10 @@ def _attn_fwd(
 	Qi = tl.load(Qi_block_ptr, boundary_check=(0,1), padding_option="zero") # N x d_k (fp16)
 
 	# initialize output and statistics block, all in fp32
-	Oi = tl.zeros((BLOCK_I, min_d_k), dtype=tl.float16)
-	li = tl.zeros((BLOCK_I, ), dtype=tl.float16)
+	Oi = tl.zeros((BLOCK_I, min_d_k), dtype=tl.float32)
+	li = tl.zeros((BLOCK_I, ), dtype=tl.float32)
 	inf = float("inf") # convenience
-	mi = (tl.zeros_like(li) - inf).to(tl.float16)
+	mi = (tl.zeros_like(li) - inf)
 
 	# load spreads, min and max dist, and coords for rbf computation (fp32)
 	spread = tl.load(spread_ptr)
@@ -210,7 +210,7 @@ def _attn_fwd(
 	for j in tl.range(0, triton.cdiv(tot_N, BLOCK_J), 1):
 
 		# compute attn: QK^T/sqrt(d_k). # both in fp16, dot outputs fp32
-		Sij = tl.dot(Qi, tl.load(KjT_block_ptr, boundary_check=(0,1), padding_option="zero"), out_dtype=tl.float16) * tl.full((1,), softmax_scale, dtype=tl.float16) # N x N
+		Sij = tl.dot(Qi, tl.load(KjT_block_ptr, boundary_check=(0,1), padding_option="zero")) * softmax_scale # N x N
 
 		# load coordinates and compute distances (fp32)
 		dists_raw = (coords_I[:, None, :] - tl.load(coords_J_ptr, boundary_check=(0,1), padding_option="zero")[None, :, :]) # N x N x 4
@@ -250,26 +250,19 @@ def _attn_fwd(
 
 		# apply dropout mask
 		# hash the two numbers (I, J) to get a pseudo unique number for each element
-		J_bytes = J_idxs & 0xFFFF
-		hash_vals = ((I_bytes) ^ (J_bytes)) # XORs
-		# asymmetric mixing of I and J to make sure hash(i,j) != hash(j,i)
-		I_bytes2 = (I_bytes << 8) ^ (I_bytes) # 8 LSB XOR 16 MSB
-		J_bytes2 = (J_bytes >> 8) ^ (J_bytes) # 8 MSB XOR 16 MSB
-		hash_vals2 = (I_bytes2) ^ (J_bytes2)
-		hash_vals = (hash_vals) ^ (hash_vals2)
-		hash_vals = (hash_vals ^ (hash_vals >> 4)) & 0xFFFF # mixing
-		hash_vals = (hash_vals ^ (hash_vals << 4)) & 0xFFFF # mixing
+		J_bytes = (J_idxs & 0xFFFF)
+		hash_vals = ((I_bytes) | (J_bytes)) # XORs
 
 		# now each IJ combo in the current block has a pseudo-unique number associated
 		# with it, along with the corresponding batch+head random seed, simulating 
 		# randomness while still allowing deterministic computation in the bwd pass
-		dropout_mask = (tl.rand(rng_seed, hash_vals) > dropout_p).to(tl.int1) # N x N
+		dropout_mask = (tl.rand(rng_seed, hash_vals) >= dropout_p).to(tl.int1) # N x N
 		
 		# apply dropout
 		Pij = tl.where(dropout_mask, Pij / (1-dropout_p), 0.0)
 
 		# load Vj compute output. convert Pij to fp16, Vj is already in fp16. output is in fp32
-		Oi = tl.dot(Pij, tl.load(Vj_block_ptr, boundary_check=(0,1), padding_option="zero"), acc=(Oi*alpha[:, None]).to(tl.float16), out_dtype=tl.float16) # N x d_k
+		Oi = tl.dot(Pij.to(tl.float16), tl.load(Vj_block_ptr, boundary_check=(0,1), padding_option="zero"), acc=(Oi*alpha[:, None])) # N x d_k
 
 		# update statistics for next iteration
 		mi = mij
@@ -286,10 +279,10 @@ def _attn_fwd(
 	# epilogue
 
 	# normalize output. li==0 means that all columns in that row are masked out
-	Oi = tl.where(li[:, None]!=0, Oi / li[:, None], 0.0).to(tl.float16)
+	Oi = tl.where(li[:, None]!=0, Oi / li[:, None], 0.0)
 
 	# compute log sum exponential (li==0 --> mi + log(li) = -inf)
-	mi += tl.log(li.to(tl.float32)).to(tl.float16)
+	mi += tl.log(li)
 
 	# create output block pointer
 	Oi_block_ptr = tl.make_block_ptr( # N x d_k
@@ -461,9 +454,9 @@ def _attn_bwd(
 
 	# prepare bytes for dropout
 	J_bytes = offs_J + tl.arange(0, BLOCK_J)[None, :]
-	J_bytes = (J_bytes & 0xFFFF).to(tl.uint16) 
-	I_idxs = tl.arange(0, BLOCK_I)[:, None].to(tl.uint16)
-	I_inc = tl.full([BLOCK_I, 1], BLOCK_I, dtype=tl.uint16)
+	J_bytes = (J_bytes & 0xFFFF).to(tl.uint32) 
+	I_idxs = tl.arange(0, BLOCK_I)[:, None].to(tl.uint32)
+	I_inc = tl.full([BLOCK_I, 1], BLOCK_I, dtype=tl.uint32)
 
 	# load the spread and dists assigned to this block (based on the head it was assigned), and j coordinates
 	spread = tl.load(spread_ptr)
@@ -475,8 +468,8 @@ def _attn_bwd(
 	mask_j = tl.load(mask_j_ptr, boundary_check=(0, ), padding_option="zero").to(tl.int1)
 
 	# initialize dKj and dVj and d_spread(scalar), in fp32
-	dKj = tl.zeros((BLOCK_J, min_d_k), dtype=tl.float16)
-	dVj = tl.zeros((BLOCK_J, min_d_k), dtype=tl.float16)
+	dKj = tl.zeros((BLOCK_J, min_d_k), dtype=tl.float32)
+	dVj = tl.zeros((BLOCK_J, min_d_k), dtype=tl.float32)
 	d_spread = 0.0
 
 	# load KjT and Vj (load as fp16 for matmul)
@@ -529,55 +522,49 @@ def _attn_bwd(
 
 		# apply dropout mask
 		# note that shifting I one bit to the left, already shifted J one bit to the right outside the loop
-		I_bytes = I_idxs & 0xFFFF
-		hash_vals = ((I_bytes) ^ (J_bytes)) # XORs
-		I_bytes2 = (I_bytes << 8) ^ (I_bytes)
-		J_bytes2 = (J_bytes >> 8) ^ (J_bytes)
-		hash_vals2 = I_bytes2 ^ J_bytes2
-		hash_vals = hash_vals ^ hash_vals2
-		hash_vals = (hash_vals ^ (hash_vals >> 4)) & 0xFFFF # mixing
-		hash_vals = (hash_vals ^ (hash_vals << 4)) & 0xFFFF # mixing
-		dropout_mask = tl.rand(rng_seed, hash_vals) > dropout_p # N x N
+		I_bytes = (I_idxs & 0xFFFF) << 16
+		hash_vals = ((I_bytes) | (J_bytes)) # XORs
+		dropout_mask = tl.rand(rng_seed, hash_vals) >= dropout_p # N x N
 		Pij = tl.where(dropout_mask, Pij / (1-dropout_p), 0.0)
 
 		# load gradient w.r.t output (fp16)
 		dOi = tl.load(dOi_block_ptr, boundary_check=(0, 1), padding_option="zero") # N x d_k
 
 		# compute gradient wrt Vj (dOi already in fp16, out is in fp32)
-		dVj += tl.where(mask_j[:, None], tl.dot(tl.permute(Pij, (1,0)).to(tl.float16), dOi, out_dtype=tl.float16), 0.0).to(tl.float16) # N x d_k
+		dVj += tl.where(mask_j[:, None], tl.dot(tl.permute(Pij, (1,0)).to(tl.float16), dOi), 0.0) # N x d_k
 
 		# compute gradient wrt Pij (dOi and Vj already in fp16)
-		dPij = tl.dot(dOi, tl.permute(Vj, (1,0)), out_dtype=tl.float16) # N x N
+		dPij = tl.dot(dOi, tl.permute(Vj, (1,0))) # N x N
 
 		# load Di = rowsum(O*dO) to compute gradient wrt SRij (grad of loss wrt Sij*rbf)
-		dSRij = Pij * (dPij -  tl.load(Di_block_ptr, boundary_check=(0, ), padding_option="zero")[:, None]).to(tl.float16) # N x N
+		dSRij = Pij * (dPij -  tl.load(Di_block_ptr, boundary_check=(0, ), padding_option="zero")[:, None]) # N x N
 
 		# compute dSij, ie grad wrt Sij. note the direct communication between dSij and Rij
-		dSij = (dSRij * Rij).to(tl.float16) # N x N
+		dSij = dSRij * Rij # N x N
 
 		# compute gradient wrt rbfs. also direct communication between dRij and Sij
-		dRij = (dSRij * Sij).to(tl.float16)
+		dRij = dSRij * Sij
 
 		# compute the gradient wrt the spread of this head 
 		# 		d_rbfs/dspreads  = d/dspreads exp(-(d^2)/(2*sigma^2)) 
 		# 		= [d/dspreads -(d^2)/(2*sigma^2)] * exp(-(d^2)/(2*sigma^2))
 		# 		= [d/dspreads -(d^2)/(2*sigma^2)] * rbfs
 		# 		= [(d^2)/(sigma^3)] * rbfs
-		d_spread_factor = (dists*dists)/(spread*spread*spread).to(tl.float16)
-		d_spread_exp = tl.where(Sij < 0, Rij - 2 - eps, Rij-1).to(tl.float16) 	# get rid of the artifacts from adding 1 and/or inverting, 
+		d_spread_factor = (dists*dists)/(spread*spread*spread)
+		d_spread_exp = tl.where(Sij < 0, Rij - 2 - eps, Rij-1) 	# get rid of the artifacts from adding 1 and/or inverting, 
 																# since addition of constants is not relevant to gradient
 																# note that if have negative logits, Rij is negative
 		
 		# accumulate the gradients for this head's spread
-		d_spread += tl.sum(tl.where(attn_mask, dRij * d_spread_exp * d_spread_factor , 0.0)).to(tl.float16)
+		d_spread += tl.sum(tl.where(attn_mask, dRij * d_spread_exp * d_spread_factor , 0.0))
 
 		# compute gradient wrt Qij and perform atomic add to communicate between thread blocks (Kj already in fp16)
-		dQi = tl.dot(dSij.to(tl.float16), tl.permute(KjT, (1,0)), out_dtype=tl.float16) * tl.full((1,), softmax_scale, dtype=tl.float16) # N x d_k		
+		dQi = tl.dot(dSij.to(tl.float16), tl.permute(KjT, (1,0))) * softmax_scale # N x d_k		
 		dQi_mask = mask_i[:, None] & (tl.arange(0,min_d_k)[None, :] < d_k)
 		tl.atomic_add(dQi_block_ptr, dQi, mask=dQi_mask)
 
 		# compute gradients wrt Kj (Qi already in fp16)
-		dKj += tl.where(mask_j[:, None], tl.dot(tl.permute(dSij, (1,0)).to(tl.float16), Qi, out_dtype=tl.float16) * tl.full((1,),softmax_scale, dtype=tl.float16), 0.0).to(tl.float16)   # N x d_k
+		dKj += tl.where(mask_j[:, None], tl.dot(tl.permute(dSij, (1,0)).to(tl.float16), Qi) * softmax_scale, 0.0)   # N x d_k
 
 		# advance the pointers
 		Qi_block_ptr = tl.advance(Qi_block_ptr, (BLOCK_I, 0))
@@ -659,6 +646,7 @@ class _geometric_attn(torch.autograd.Function):
 		L = torch.zeros(batch, nheads, N, dtype=torch.float32, device=Q.device).contiguous() # batch x nheads x N
 		
 		# define min dists (clamped to 0.0) and max dists (clamped to inf)
+
 		min_dists = torch.sqrt(2*(spreads**2)*math.log(1/max_rbf)).contiguous()
 		max_dists = torch.sqrt(2*(spreads**2)*math.log(1/min_rbf)).contiguous()
 
@@ -669,9 +657,10 @@ class _geometric_attn(torch.autograd.Function):
 							)
 
 		# generate a rng seed for each batch and head
-		rng_seed = torch.randint(0, 2**16-1, (batch,nheads), device=Q.device)
-		# rng_seed = 37 # hard code for debugging
+		# rng_seed = torch.randint(0, 2**16-1, (batch,nheads), device=Q.device)
+		rng_seed = torch.ones(batch,nheads, device=Q.device) # hard code for debugging
 
+		
 		# run the kernel
 		_attn_fwd[grid](  	out, out.stride(0), out.stride(1), out.stride(2), out.stride(3), # batch x nheads x N x d_k
 							Q, Q.stride(0), Q.stride(1), Q.stride(2), Q.stride(3), # batch x nhead x N x d_k
@@ -718,10 +707,10 @@ class _geometric_attn(torch.autograd.Function):
 		batch, nheads, N, d_k = Q.shape 
 
 		# initialize dQ, dK, and dV, all fp32
-		dQ = torch.zeros_like(Q).to(torch.float16).contiguous()
-		dK = torch.zeros_like(K).to(torch.float16).contiguous()
-		dV = torch.zeros_like(V).to(torch.float16).contiguous()
-		d_spreads = torch.zeros_like(spreads).to(torch.float16).contiguous()
+		dQ = torch.zeros_like(Q).to(torch.float32).contiguous()
+		dK = torch.zeros_like(K).to(torch.float32).contiguous()
+		dV = torch.zeros_like(V).to(torch.float32).contiguous()
+		d_spreads = torch.zeros_like(spreads).to(torch.float32).contiguous()
 		
 		# define the grid
 		grid = lambda args: (

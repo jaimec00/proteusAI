@@ -3,7 +3,7 @@ import math
 import torch
 import torch.nn.functional as F
 from utils.test_utils import calculate_error, profile_func, profile_bwd
-from utils.model_utils.gaussian_attn import attn
+from utils.model_utils.geometric_attn import geometric_attn
 import os
 
 def main():
@@ -22,7 +22,7 @@ def main():
 	coords = 3.7 * torch.normal(mean=0, std=1, size=(batch, N, 1), dtype=torch.float32, device=device).expand(batch, N, 3) # batch x N x 3
 	# spreads = torch.logspace(0, 1, nheads, base, dtype=torch.float32, device=coords.device, requires_grad=True).unsqueeze(0).expand(batch, -1)
 
-	spreads = torch.full((batch, nheads), 3, device=coords.device, dtype=torch.float32, requires_grad=True)
+	spreads = torch.full((nheads, ), 3, device=coords.device, dtype=torch.float32, requires_grad=True)
 
 	mask = torch.rand((batch, N), device=coords.device) > 1 # batch x N
 	context_mask = torch.rand((batch, N), device=coords.device) > 1 # batch x N
@@ -30,7 +30,7 @@ def main():
 	K = torch.normal(mean=0, std=1, size=(batch, nheads, N, d_k), device=device, dtype=torch.float32, requires_grad=True) # batch x nhead x N x d_k 
 	V = torch.normal(mean=0, std=1, size=(batch, nheads, N, d_k), device=device, dtype=torch.float32, requires_grad=True) # batch x nhead x N x d_k 
 	
-	params = [Q, K, V, coords, spreads, mask, context_mask, min_rbf, max_rbf]
+	params = [Q, K, V, coords, spreads, mask, min_rbf, max_rbf]
 
 	# prepare for recording mem and time
 	torch.cuda.synchronize()  
@@ -44,7 +44,7 @@ def main():
 	# log autotuning
 	os.environ["TRITON_PRINT_AUTOTUNING"] = "1"
 
-	autotune(attn, params)
+	autotune(geometric_attn, params)
 
 	# zero grads
 	Q.grad.zero_()
@@ -60,11 +60,11 @@ def main():
 	max_bytes = 20 * (1024**3) # 20 GB
 	if num_bytes >= max_bytes:
 		print("skipping torch implementation because intermediate tensor is too large")
-		torch_func = attn # rerun with kernel instead of using torch
+		torch_func = geometric_attn # rerun with kernel instead of using torch
 	else:
 		torch_func = torch_attn
 
-	torch_out, triton_out = test_fwd(torch_func, attn, params, start_event, end_event, atol, rtol)
+	torch_out, triton_out = test_fwd(torch_func, geometric_attn, params, start_event, end_event, atol, rtol)
 
 	print("\nbackward pass:\n")
 
@@ -75,13 +75,17 @@ def main():
 	V.grad.zero_()
 	spreads.grad.zero_()
 
-	print("testing with dropout: \n")
+	print("\ntesting with dropout: \n")
 
 	# need seperate test for dropout, simply to ensure the mask is reproducible. not the best test but just run the kernel
 	# twice and see if get the same results
 	dropout = 0.1 # note that for practice rng seed is dynamically generated, make sure you hard code it in the fwd pass to test this
 	dropout_params = params + [dropout]
-	run1_fwd, run2_fwd = test_fwd(attn, attn, dropout_params, start_event, end_event, atol, rtol)
+	
+	print("dropout forward: \n")
+	run1_fwd, run2_fwd = test_fwd(geometric_attn, geometric_attn, dropout_params, start_event, end_event, atol, rtol)
+	print("\ndropout bwd: \n")
+
 	test_bwd(run1_fwd.sum(), run2_fwd.sum(), Q, K, V, spreads, start_event, end_event, atol, rtol)
 
 def autotune(func, params):
@@ -159,7 +163,7 @@ def test_bwd(torch_loss, triton_loss, Q, K, V, spreads_p, start_event, end_event
 def test_dropout():
 	pass
 
-def torch_attn(Q, K, V, coords, spreads, mask=None, context_mask=None, min_rbf=0.1, max_rbf=0.9):
+def torch_attn(Q, K, V, coords, spreads, mask=None, min_rbf=0.1, max_rbf=0.9):
 
 	assert (Q.shape == K.shape) and (K.shape == V.shape), f"Q, K, and V projection shapes must match, but got {Q.shape=}, {K.shape=}, {V.shape=}"
 	batch, nheads, N, d_k = Q.shape
@@ -169,10 +173,9 @@ def torch_attn(Q, K, V, coords, spreads, mask=None, context_mask=None, min_rbf=0
 	
 	assert coords.dim() == 3 and coords.size(2) == 3, f"coordinates must be of shape (batch, N, 3), not {coords.shape}" 
 
-	assert spreads.size(1) == nheads, f"number of spreads must be equal to nheads, not {spreads.size(0)=} and {nheads=}"
+	assert spreads.size(0) == nheads, f"number of spreads must be equal to nheads, not {spreads.size(0)=} and {nheads=}"
 	assert torch.all(spreads != 0), f"spreads must be a tensor of non-zero floats, not {spreads}"
 	mask = torch.zeros(batch, N) if mask is None else mask # batch x N
-	context_mask = mask if context_mask is None else context_mask # batch x N
 	min_dists = torch.sqrt(2*(spreads**2)*math.log(1/max_rbf)).contiguous()
 	max_dists = torch.sqrt(2*(spreads**2)*math.log(1/min_rbf)).contiguous()
 
@@ -182,22 +185,19 @@ def torch_attn(Q, K, V, coords, spreads, mask=None, context_mask=None, min_rbf=0
 	coords = coords.contiguous()
 	spreads = spreads.contiguous()
 	mask = mask.contiguous()
-	context_mask = context_mask.contiguous()
 
 	S = torch.matmul(Q, K.transpose(2,3)) / (2*(d_k**0.5)) # batch x nheads x N x N
 
 	dists = torch.sqrt(torch.sum((coords[:, :, None, :] - coords[:, None, :, :])**2, axis=3))[:, None, :, :]
-	dists = torch.where(dists <= min_dists[:, :, None, None], 0.0, dists) # clamp mins to one
-	dists_mask = dists > (max_dists[:, :, None, None])
+	dists = torch.where(dists <= min_dists[None, :, None, None], 0.0, dists) # clamp mins to one
+	dists_mask = dists > (max_dists[None, :, None, None])
 
-	rbfs = torch.exp(-(dists**2)/(2*(spreads[:, :, None, None]**2)))
+	rbfs = torch.exp(-(dists**2)/(2*(spreads[None, :, None, None]**2)))
 	rbfs = torch.where(S<0, (2+min_rbf)-rbfs, rbfs + 1)
 
-	attn_mask = mask[:, None, :, None] | context_mask[:, None, None, :] | dists_mask
+	attn_mask = mask[:, None, :, None] | mask[:, None, None, :] | dists_mask
 	S = torch.where(attn_mask, float("-inf"), S*rbfs)
 
-	# S_max = S.max(dim=-1, keepdim=True).values
-	# P = torch.where(S_max == float("-inf"), 0.0, F.softmax(S-S_max, dim=-1) ) 
 	P = torch.softmax(S, dim=-1)
 
 	out = torch.matmul(P, V) # batch x nheads x N x d_k
