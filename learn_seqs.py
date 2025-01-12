@@ -51,17 +51,26 @@ def init_args():
 	
 	# model 
 	parser.add_argument("--d_model", default=512, type=int, help="dimensionality of input embeddings")
+	
 	parser.add_argument("--min_wl", default=3.7, type=float, help="minimum wavelength to use in wavelength sampling")
 	parser.add_argument("--max_wl", default=20.0, type=float, help="maximum wavelength to use in wavelength sampling")
-	parser.add_argument("--min_base", default=2.0, type=float, help="base to use in wavelength sampling")
-	parser.add_argument("--max_base", default=80.0, type=float, help="base to use in wavelength sampling")
+	parser.add_argument("--wl_base", default=80.0, type=float, help="base to use in wavelength sampling")
+	parser.add_argument("--d_hidden_wl", default=1024, type=int, help="intermediate dimensions of decoder feed forward layer")
+	parser.add_argument("--hidden_layers_wl", default=1024, type=int, help="intermediate dimensions of decoder feed forward layer")
+
+	parser.add_argument("--d_hidden_aa", default=1024, type=int, help="intermediate dimensions of decoder feed forward layer")
+	parser.add_argument("--hidden_layers_aa", default=1024, type=int, help="intermediate dimensions of decoder feed forward layer")
+	
+	parser.add_argument("--dualcoder_layers", default=3, type=int, help="number of decoder layers")
+	parser.add_argument("--num_heads", default=8, type=int, help="number of attention heads to perform the training with")
 	parser.add_argument("--min_spread", default=1.0, type=float, help="base to use in wavelength sampling")
 	parser.add_argument("--max_spread", default=30.0, type=float, help="base to use in wavelength sampling")
+	parser.add_argument("--spread_base", default=80.0, type=float, help="base to use in wavelength sampling")
 	parser.add_argument("--min_rbf", default=0.1, type=float, help="minimum rbf scaling to apply in gaussian mha")
 	parser.add_argument("--max_rbf", default=0.9, type=float, help="maximum rbf scaling to apply in gaussian mha")
-	parser.add_argument("--num_heads", default=8, type=int, help="number of attention heads to perform the training with")
-	parser.add_argument("--decoder_layers", default=3, type=int, help="number of decoder layers")
-	parser.add_argument("--hidden_linear_dim", default=1024, type=int, help="intermediate dimensions of decoder feed forward layer")
+
+	parser.add_argument("--d_hidden_attn", default=1024, type=int, help="intermediate dimensions of decoder feed forward layer")
+	parser.add_argument("--hidden_layers_attn", default=1024, type=int, help="intermediate dimensions of decoder feed forward layer")
 	parser.add_argument("--temperature", default=0.01, type=float, help="temperature for autoregressive inference (for testing)")
 	parser.add_argument("--max_tokens", default=512, type=int, help="maximum number of tokens")
 	parser.add_argument("--include_ncaa", default=False, type=bool, help="if False, masks out non-canonical AA, else X is a valid prediction")
@@ -70,12 +79,13 @@ def init_args():
 	parser.add_argument("--num_train", default=-1, type=int, help="number of training samples to use; -1 means all available")
 	parser.add_argument("--num_val", default=-1, type=int, help="number of validation samples to use; -1 means all available")
 	parser.add_argument("--num_test", default=-1, type=int, help="number of test samples to use; -1 means all available")
+	
 	parser.add_argument("--epochs", default=50, type=int, help="number of epochs")
+	
 	parser.add_argument("--batch_sizes", default=[1, 2, 4, 8, 16], type=list, help="possible number of samples per batch, minimizes triton recompilation overhead")
 	parser.add_argument("--seq_sizes", default=[1024, 4096, 8192, 10000], type=list, help="possible sequence lengths, minimizes triton recompilation overhead")
 	parser.add_argument("--batch_size", default=10000, type=int, help="tokens per batch")
-	parser.add_argument("--autotune_wf", default=False, type=bool, help="whether to perform triton autotuning on protein_to_wavefunc")
-	parser.add_argument("--autotune_mha", default=True, type=bool, help="whether to perform triton autotuning on attn")
+	
 	parser.add_argument("--accumulation_steps", default=2, type=int, help="grad accumulation; how many batches to process before learning step")
 	parser.add_argument("--learning_step", default=0.00005, type=float, help="learning rate")
 	parser.add_argument("--beta1", default=0.9, type=float, help="learning rate")
@@ -89,9 +99,7 @@ def init_args():
 	parser.add_argument("--lr_scale", default=0.1, type=float, help="LR scaling factor")
 	parser.add_argument("--lr_patience", default=5, type=int, help="LR patience for scaling down after plateu")
 	parser.add_argument("--training_type", default="wf", type=str, choices=["wf", "onehot", "probs", "self-supervision"],  help="what type of training")
-	parser.add_argument("--precomputed_features", default=False, type=bool,  help="whether to use the precomputed features")
 	parser.add_argument("--use_amp", default=True, type=bool,  help="whether to use automatic mixed precision")
-	parser.add_argument("--use_checkpoint", default=True, type=bool,  help="whether to use gradient checkpointing for MHA")
 	parser.add_argument("--use_chain_mask", default=True, type=bool,  help="whether to compute loss only for chain representative of the cluster, or the whole biounit")
 
 	# input label smoothing
@@ -124,7 +132,6 @@ def init_args():
 	parser.add_argument("--phase_split", default=0.3, type=float, help="	ratio of progressive learning phase (supervised learning to real-world "\
 																						"inputs (mix of supervision and self-supervision). "\
 																						"also when to finish the decoder layer expansion.")
-	parser.add_argument("--expand_decoders", default=True, type=bool, help="whether to progressively expand the decoders or use all decoders throughout training")
 
 	# output
 	parser.add_argument("--out_path", default="output", type=Path, help="path to store output, such as plots and weights file.")

@@ -179,7 +179,7 @@ def _attn_fwd(
 	I_bytes = offs_I + tl.arange(0, BLOCK_I)[:, None]
 	I_bytes = (I_bytes & 0xFFFF).to(tl.uint16) 
 
-	# init J_idxs, which will be incremented in the loop to compute the hashes
+	# init J_idxs, which will be incremented in the loop to compute the hashes for each i j pair
 	J_idxs = tl.arange(0, BLOCK_J)[None, :].to(tl.uint16)
 	J_inc = tl.full([1,BLOCK_J], BLOCK_J, dtype=tl.uint16)
 
@@ -205,8 +205,7 @@ def _attn_fwd(
 
 	# load mask for rows
 	mask_i = tl.load(mask_i_ptr, boundary_check=(0,), padding_option="zero").to(tl.int1) # N x d_k
-	one = tl.full((1,), 1, dtype=tl.float16) # convenience
-	two = tl.full((1,), 2, dtype=tl.float16) # convenience
+
 	# loop through columns of K and V
 	for j in tl.range(0, triton.cdiv(tot_N, BLOCK_J), 1):
 
@@ -215,43 +214,49 @@ def _attn_fwd(
 
 		# load coordinates and compute distances (fp32)
 		dists_raw = (coords_I[:, None, :] - tl.load(coords_J_ptr, boundary_check=(0,1), padding_option="zero")[None, :, :]) # N x N x 4
-		dists = tl.sqrt(tl.sum(dists_raw * dists_raw, axis=2).to(tl.float32)).to(tl.float16) # N x N
+		dists = tl.sqrt(tl.sum(dists_raw * dists_raw, axis=2)) # N x N
 		
 		# clamp distances less than min dist to 0. min dist is the distance 
 		# calculated to get an rbf of e.g. 0.9. higher rbfs would result in numerical 
 		# instability with exp, so just make those 1 (no scaling)
-		dists = tl.where(dists <= min_dist, tl.full((BLOCK_I, BLOCK_J), 0.0, dtype=tl.float16), dists) # N x N
+		dists = tl.where(dists <= min_dist, 0.0, dists) # N x N
 
 		# compute the rbfs
-		Rij = tl.exp(-(dists*dists) / (two*spread*spread)).to(tl.float16) # N x N (fp32)
+		Rij = tl.exp(-(dists*dists) / (2*spread*spread)) # N x N (fp32)
 
 		# negative logits with close distances should be less negative
 		# eps = min_rbf, so maximum rbf (1) would result in logits of min_rbf
 		# minimum rbf (0.1) would result in logits of 1 (no scaling)
 		# this achieves the goal of inverting the rbf for negative logits
-		Rij = tl.where(Sij < 0, (two+eps)-Rij, Rij + one).to(tl.float16) # N x N (fp32)
+		Rij = tl.where(Sij < 0, (2+eps)-Rij, Rij + 1) # N x N (fp32)
 
 		# set masked positions to -inf, include out of range dists in mask
 		attn_mask = (mask_i[:, None]) & (tl.load(mask_j_ptr, boundary_check=(0,), padding_option="zero").to(tl.int1)[None, :]) & (dists <= max_dist) # N x N
 
 		# scale attention logits by Rij and mask invalid pairs
-		Sij = tl.where(attn_mask, Sij*Rij, -inf).to(tl.float16) # N x N (fp32)
+		Sij = tl.where(attn_mask, Sij*Rij, -inf) # N x N (fp32)
 
 		# max of each row
-		mij = tl.maximum(mi, tl.max(Sij, axis=1)).to(tl.float16) # N,  (fp32)
+		mij = tl.maximum(mi, tl.max(Sij, axis=1)) # N,  (fp32)
 
 		# compute softmax(Sij - mij) = Pij
-		Pij = tl.exp(tl.where(mij[:, None]==-inf, -inf, Sij - mij[:, None])).to(tl.float16) # N x N (fp32)
+		Pij = tl.exp(tl.where(mij[:, None]==-inf, -inf, Sij - mij[:, None])) # N x N (fp32)
 
 		# compute alpha
-		alpha = tl.exp(tl.where((mi==-inf) | (mij==-inf), tl.where((mi==-inf) & (mij==-inf), 0, -inf), mi - mij)).to(tl.float16) # (fp32)
+		alpha = tl.exp(tl.where((mi==-inf) | (mij==-inf), tl.where((mi==-inf) & (mij==-inf), 0, -inf), mi - mij)) # (fp32)
 		
 		# update li
-		li = (alpha*li + tl.sum(Pij, axis=1)).to(tl.float16) # N, (fp32)
+		li = alpha*li + tl.sum(Pij, axis=1) # N, (fp32)
 
 		# apply dropout mask
-		# hash the two numbers (I, J) to get a pseudo unique number for each element	
-		hash_vals = ((I_bytes) ^ (J_idxs & 0xFFFF)) # XORs
+		# hash the two numbers (I, J) to get a pseudo unique number for each element
+		J_bytes = J_idxs & 0xFFFF
+		hash_vals = ((I_bytes) ^ (J_bytes)) # XORs
+		# asymmetric mixing of I and J to make sure hash(i,j) != hash(j,i)
+		I_bytes2 = (I_bytes << 8) ^ (I_bytes) # 8 LSB XOR 16 MSB
+		J_bytes2 = (J_bytes >> 8) ^ (J_bytes) # 8 MSB XOR 16 MSB
+		hash_vals2 = (I_bytes2) ^ (J_bytes2)
+		hash_vals = (hash_vals) ^ (hash_vals2)
 		hash_vals = (hash_vals ^ (hash_vals >> 4)) & 0xFFFF # mixing
 		hash_vals = (hash_vals ^ (hash_vals << 4)) & 0xFFFF # mixing
 
@@ -261,7 +266,7 @@ def _attn_fwd(
 		dropout_mask = (tl.rand(rng_seed, hash_vals) > dropout_p).to(tl.int1) # N x N
 		
 		# apply dropout
-		Pij = tl.where(dropout_mask, Pij / (1-dropout_p), 0.0).to(tl.float16)
+		Pij = tl.where(dropout_mask, Pij / (1-dropout_p), 0.0)
 
 		# load Vj compute output. convert Pij to fp16, Vj is already in fp16. output is in fp32
 		Oi = tl.dot(Pij, tl.load(Vj_block_ptr, boundary_check=(0,1), padding_option="zero"), acc=(Oi*alpha[:, None]).to(tl.float16), out_dtype=tl.float16) # N x d_k
@@ -456,7 +461,7 @@ def _attn_bwd(
 
 	# prepare bytes for dropout
 	J_bytes = offs_J + tl.arange(0, BLOCK_J)[None, :]
-	J_bytes = (J_bytes & 0xFFFF).to(tl.uint16)
+	J_bytes = (J_bytes & 0xFFFF).to(tl.uint16) 
 	I_idxs = tl.arange(0, BLOCK_I)[:, None].to(tl.uint16)
 	I_inc = tl.full([BLOCK_I, 1], BLOCK_I, dtype=tl.uint16)
 
@@ -485,17 +490,17 @@ def _attn_bwd(
 		Qi = tl.load(Qi_block_ptr, boundary_check=(0, 1), padding_option="zero")
 
 		# load Qi and compute attn, ie Sij. inputs are fp16, Sij is fp32
-		Sij = tl.dot(Qi, KjT, out_dtype=tl.float16) * tl.full((1,), softmax_scale, dtype=tl.float16) # N x N
+		Sij = tl.dot(Qi, KjT) * softmax_scale # N x N
 		
 		# load coordinates for i rows and compute distances, in fp32
 		dists_raw = (tl.load(coords_i_ptr, boundary_check=(0,1), padding_option="zero"))[:, None, :] - coords_j[None, :, :] # N x N x 4 
-		dists = tl.sqrt(tl.sum(dists_raw * dists_raw, axis=2).to(tl.float32)).to(tl.float16) # N x N 
+		dists = tl.sqrt(tl.sum(dists_raw * dists_raw, axis=2)) # N x N 
 
 		# clamp small distances to 0. only far distances are masked
-		dists = tl.where(dists <= min_dist, 0.0, dists).to(tl.float16)
+		dists = tl.where(dists <= min_dist, 0.0, dists)
 
 		# compute rbfs (fp32)
-		Rij = tl.exp(-(dists*dists) / (2.0*spread*spread)).to(tl.float16) # N x N (fp32)
+		Rij = tl.exp(-(dists*dists) / (2.0*spread*spread)) # N x N (fp32)
 
 		# for positive logits, scale by 1 + rbf, which is in range (1,2). the multiplication ensures cross
 		# talk between attention weights and the rbfs themselves, and adding 1 to the rbf achieves two goals: 
@@ -505,14 +510,14 @@ def _attn_bwd(
 		# 		to the spatial geometry.
 		# for negative logits, small dists should be scaled to be less negative than for far distances. still range
 		# between 1 and 2, but the rbfs are "inverted", where large distance corresponds to 1 + min_rbf and small distance to 2
-		Rij = tl.where(Sij < 0, (2+eps)-Rij, 1 + Rij).to(tl.float16)
+		Rij = tl.where(Sij < 0, (2+eps)-Rij, 1 + Rij)
 
 		# mask out attention that is not relevant to this head
 		mask_i = tl.load(mask_i_ptr, boundary_check=(0, ), padding_option="zero").to(tl.int1)
 		attn_mask = mask_i[:, None] & (mask_j[None, :]) & (dists <= max_dist) # N x N
 
 		# scale attention logits by RBFs
-		SRij = tl.where(attn_mask, Sij*Rij, -inf).to(tl.float16) # N x N (fp32)
+		SRij = tl.where(attn_mask, Sij*Rij, -inf) # N x N (fp32)
 		
 		# load log sum exp statistics
 		Li = tl.load(Li_block_ptr, boundary_check=(0, ), padding_option="zero") # (fp32)
@@ -520,10 +525,16 @@ def _attn_bwd(
 		# exp(Sij - Lij) = exp(Sij - mi - log(li)) = exp(Sij - mi) / exp(log(li)) 
 		# = exp(Sij - mi) / li
 		# mi is max for the row pre-softmax (for safe softmax), li is the normalizing term (sum of exponentials for that row)
-		Pij = tl.exp(tl.where(attn_mask, SRij - Li[:, None], -inf)).to(tl.float16) # N x N (fp32)
+		Pij = tl.exp(tl.where(attn_mask, SRij - Li[:, None], -inf)) # N x N (fp32)
 
 		# apply dropout mask
-		hash_vals = ((I_idxs & 0xFFFF) ^ (J_bytes)) # XORs
+		# note that shifting I one bit to the left, already shifted J one bit to the right outside the loop
+		I_bytes = I_idxs & 0xFFFF
+		hash_vals = ((I_bytes) ^ (J_bytes)) # XORs
+		I_bytes2 = (I_bytes << 8) ^ (I_bytes)
+		J_bytes2 = (J_bytes >> 8) ^ (J_bytes)
+		hash_vals2 = I_bytes2 ^ J_bytes2
+		hash_vals = hash_vals ^ hash_vals2
 		hash_vals = (hash_vals ^ (hash_vals >> 4)) & 0xFFFF # mixing
 		hash_vals = (hash_vals ^ (hash_vals << 4)) & 0xFFFF # mixing
 		dropout_mask = tl.rand(rng_seed, hash_vals) > dropout_p # N x N
@@ -639,13 +650,13 @@ class _geometric_attn(torch.autograd.Function):
 		V = V.to(torch.float16).contiguous()
 
 		# rbfs in fp32 and make sure everything is contiguous
-		coords = coords.to(torch.float16).contiguous()
-		spreads = spreads.to(torch.float16).contiguous() # this is now Z x H, need to update everything (forward and back)
+		coords = coords.to(torch.float32).contiguous()
+		spreads = spreads.to(torch.float32).contiguous() # this is now Z x H, need to update everything (forward and back)
 
 		# initialize mask, output, and logsumexp tensors
 		mask = (torch.ones(batch, N, dtype=torch.bool, device=Q.device) if mask is None else ~mask).contiguous() # batch x N		
-		out = torch.zeros(batch, nheads, N, d_k, dtype=torch.float16, device=Q.device).contiguous() # batch x N x d_model
-		L = torch.zeros(batch, nheads, N, dtype=torch.float16, device=Q.device).contiguous() # batch x nheads x N
+		out = torch.zeros(batch, nheads, N, d_k, dtype=torch.float32, device=Q.device).contiguous() # batch x N x d_model
+		L = torch.zeros(batch, nheads, N, dtype=torch.float32, device=Q.device).contiguous() # batch x nheads x N
 		
 		# define min dists (clamped to 0.0) and max dists (clamped to inf)
 		min_dists = torch.sqrt(2*(spreads**2)*math.log(1/max_rbf)).contiguous()

@@ -21,8 +21,6 @@ from utils.parameter_utils import (	HyperParameters, TrainingParameters,
 									InputPerturbationParameters, InputPerturbations )
 from utils.io_utils import Output
 from utils.data_utils import DataHolder
-from utils.model_utils.featurization import protein_to_wavefunc
-from utils.model_utils.gaussian_attn import attn
 
 # ----------------------------------------------------------------------------------------------------------------------
 
@@ -116,8 +114,6 @@ class TrainingRun():
 
 		self.output.log_hyperparameters(self.training_parameters, self.hyper_parameters, self.input_perturbation_parameters, self.data)
 
-		# self.autotune_triton(wf=self.training_parameters.autotune_wf, mha=self.training_parameters.autotune_mha)
-
 	def setup_model(self):
 		'''
 		instantiates proteusAI with given Hyper-Parameters, moves it to gpu, and 
@@ -202,37 +198,6 @@ class TrainingRun():
 		self.output.log.info("loading loss function...") 
 		self.loss_function = nn.CrossEntropyLoss(ignore_index=-1, reduction="none", label_smoothing=self.training_parameters.label_smoothing)
 
-	def autotune_triton(self, wf=False, mha=True):
-		'''
-		performs autotuning once with each of the possible input sizes, this allows triton to find best configuration at the beginning and 
-		not recompile each time a new input size is encountered.
-		'''
-
-		# set env vars to tell functions not to autotune (i.e. test a single configuration on the fly)
-		os.environ["ATTN_AUTOTUNE"] = "1" if mha else "0"
-		os.environ["WF_AUTOTUNE"] = "1" if wf else "0"
-
-		self.output.log.info(f"performing triton autotuning for: {'protein_to_wavefunc' if wf else ''}{' and ' if (wf and mha) else ''}{'attn' if mha else ''}")
-		os.environ["TRITON_PRINT_AUTOTUNING"] = "1"
-
-		# these rely on env vars, so have to be evaluated after setting them
-		from utils.model_utils.featurization import protein_to_wavefunc
-		from utils.model_utils.gaussian_attn import attn
-
-		for batch_size in self.data.batch_sizes:
-			for seq_size in self.data.seq_sizes:
-				
-				self.output.log.info(f"testing batch_size: {batch_size}, seq_size: {seq_size}")
-				coords = torch.rand((batch_size, seq_size, 3), dtype=torch.float32, device=self.gpu)
-				mask = torch.zeros(batch_size, seq_size, dtype=torch.bool, device=self.gpu)
-				if wf:
-					protein_to_wavefunc(coords, self.hyper_parameters.d_model, self.hyper_parameters.min_wl, self.hyper_parameters.max_wl, self.hyper_parameters.base, mask)
-				if mha:
-					qkv = torch.rand((batch_size, self.hyper_parameters.num_heads, seq_size, self.hyper_parameters.d_model // self.hyper_parameters.num_heads), dtype=torch.float32, device=self.gpu, requires_grad=True)
-					spreads = self.hyper_parameters.min_wl + (self.hyper_parameters.max_wl-self.hyper_parameters.min_wl)*(torch.logspace(0,1,self.hyper_parameters.num_heads, self.hyper_parameters.base, dtype=torch.float32, device=self.gpu)-1)/(self.hyper_parameters.base-1)
-					out = attn(qkv, qkv, qkv, coords, spreads, mask, mask, self.hyper_parameters.min_rbf, self.hyper_parameters.max_rbf)
-					out.sum().backward()
-
 	def train(self):
 		'''
 		entry point for training the model. loads train and validation data, loops through epochs, plots training, 
@@ -259,11 +224,6 @@ class TrainingRun():
 		
 		# loop through epochs
 		for epoch in range(self.training_parameters.epochs):
-
-			# view current params
-			# i wanna check how wavelengths and spreads are being updated
-			# self.model.print_wavelengths(self.output)
-			# self.model.print_spreads(self.output)
 			
 			epoch = Epoch(epoch, self)
 			epoch.epoch_loop()
@@ -291,16 +251,13 @@ class TrainingRun():
 			input_perturbations = self.get_test_perturbations()
 
 			# loop through validation batches
-			for feature_batch, label_batch, coords_batch, chain_mask, key_padding_mask in self.data.val_data:
+			for label_batch, coords_batch, chain_mask, key_padding_mask in self.data.val_data:
 
 				if not self.training_parameters.use_chain_mask:
 					chain_mask = None
-
-				if not self.training_parameters.precomputed_features:
-					features_batch = None
 					
-				batch = Batch(feature_batch, label_batch, coords_batch, chain_mask, key_padding_mask, 
-							use_probs=self.training_parameters.use_probs, use_amp=False, auto_regressive=False,
+				batch = Batch(label_batch, coords_batch, chain_mask, key_padding_mask, 
+							use_amp=False, auto_regressive=False,
 							loss_type=self.training_parameters.loss_type,
 							loss_sum_norm=self.training_parameters.loss_sum_norm)
 				input_perturbations.apply_perturbations(batch)
@@ -329,15 +286,13 @@ class TrainingRun():
 			input_perturbations = self.get_test_perturbations()
 
 			# loop through testing batches
-			for feature_batch, label_batch, coords_batch, chain_mask, key_padding_mask in self.data.test_data:
+			for label_batch, coords_batch, chain_mask, key_padding_mask in self.data.test_data:
 
 				if not self.training_parameters.use_chain_mask:
 					chain_mask = None
-				if not self.training_parameters.precomputed_features:
-					features_batch = None
 					
-				batch = Batch(feature_batch, label_batch, coords_batch, chain_mask, key_padding_mask, 
-								use_probs=self.training_parameters.use_probs, use_amp=False, 
+				batch = Batch(label_batch, coords_batch, chain_mask, key_padding_mask, 
+								 use_amp=False, 
 								auto_regressive=self.training_parameters.auto_regressive, 
 								temp=self.hyper_parameters.temperature, loss_type=self.training_parameters.loss_type,
 								loss_sum_norm=self.training_parameters.loss_sum_norm)

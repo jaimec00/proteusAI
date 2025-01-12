@@ -34,6 +34,9 @@ from utils.model_utils.featurization import protein_to_wavefunc
 
 # ----------------------------------------------------------------------------------------------------------------------
 
+# preprocessed data uses these
+torch.serialization.add_safe_globals([defaultdict, list])
+
 class DataHolder():
 
 	'''
@@ -42,7 +45,6 @@ class DataHolder():
 
 	def __init__(self, data_path, num_train, num_val, num_test, max_size=10000, batch_sizes=[1], seq_sizes=[10000], batch_size=10000, feature_path="3.7_20.0_20.0", include_ncaa=False):
 
-		torch.serialization.add_safe_globals([defaultdict, list])
 
 		self.data_path = data_path
 		self.batch_sizes = batch_sizes
@@ -107,28 +109,27 @@ class Data():
 		
 		def process_pdb(pdb):
 			
-			pdb_features = self.clusters[pdb.at["BIOUNIT"]]["features"]
 			pdb_coords = self.clusters[pdb.at["BIOUNIT"]]["coords"]
 			pdb_labels = self.clusters[pdb.at["BIOUNIT"]]["labels"]
 			pdb_chain_idxs = self.clusters[pdb.at["BIOUNIT"]]["chain_idxs"]
 
-			if not pdb_features:
-				pdb_features, pdb_labels, pdb_coords, pdb_chain_idxs = self.add_data(pdb)
-				if None in [pdb_features, pdb_labels, pdb_coords, pdb_chain_idxs]: 
+			if not pdb_labels:
+				pdb_labels, pdb_coords, pdb_chain_idxs = self.add_data(pdb)
+				if None in [pdb_labels, pdb_coords, pdb_chain_idxs]: 
 					return None
 			else:
-				pdb_features, pdb_labels, pdb_coords, pdb_chain_idxs = pdb_features[0], pdb_labels[0], pdb_coords[0], pdb_chain_idxs[0]
+				pdb_labels, pdb_coords, pdb_chain_idxs = pdb_labels[0], pdb_coords[0], pdb_chain_idxs[0]
 
 			# create a chain mask for loss compuation
 			pdb_chain_idxs = pdb_chain_idxs[pdb.at["CHAINID"].split("_")[-1]]
 
-			return pdb_features, pdb_labels, pdb_coords, pdb_chain_idxs
+			return pdb_labels, pdb_coords, pdb_chain_idxs
 
 		# get random cluster representative chains
 		sampled_pdbs = self.clusters_df.groupby("CLUSTER").sample(n=1)
 
 		# initialize list for this epoch
-		features, labels, coords, chain_idxs = [], [], [], []
+		labels, coords, chain_idxs = [], [], []
 
 		# init progress bar
 		load_pbar = tqdm(total=len(sampled_pdbs), desc="data loading progress", unit="step")
@@ -144,16 +145,13 @@ class Data():
 
 				result = future.result()
 				if result is not None:  # Ignore failed results
-					pdb_features, pdb_labels, pdb_coords, pdb_chain_idxs = result
-					if pdb_features.isnan().any() or pdb_features.isinf().any(): continue
-					features.append(pdb_features)
+					pdb_labels, pdb_coords, pdb_chain_idxs = result
 					labels.append(pdb_labels)
 					coords.append(pdb_coords)
 					chain_idxs.append(pdb_chain_idxs)
 				load_pbar.update(1)
 
 		# store for next epoch
-		self.features = features
 		self.labels = labels
 		self.coords = coords
 		self.chain_idxs = chain_idxs
@@ -167,7 +165,6 @@ class Data():
 
 		if pdb_path.exists():
 			pdb_data = torch.load(pdb_path, weights_only=True, map_location=self.device)
-			pdb_features = pdb_data["features"]
 			pdb_labels = pdb_data["labels"]
 			if not self.include_ncaa: # mask out non-canonical amino acids
 				pdb_labels = torch.where(pdb_labels==20, -1, pdb_labels)	
@@ -176,14 +173,13 @@ class Data():
 
 			if pdb_labels.size(0) <= self.max_size:
 		
-				self.clusters[pdb.at["BIOUNIT"]]["features"].append(pdb_features)
 				self.clusters[pdb.at["BIOUNIT"]]["labels"].append(pdb_labels)
 				self.clusters[pdb.at["BIOUNIT"]]["coords"].append(pdb_coords)
 				self.clusters[pdb.at["BIOUNIT"]]["chain_idxs"].append(pdb_chain_idxs)
 		
-				return pdb_features, pdb_labels, pdb_coords, pdb_chain_idxs
+				return pdb_labels, pdb_coords, pdb_chain_idxs
 
-		return None, None, None, None
+		return None, None, None
 
 	def batch_data(self):
 
@@ -245,13 +241,11 @@ class Data():
 			seq_next_pow2 = 2**math.ceil(math.log(max(i[1] for i in batch), 2)) # next power of 2
 			seq_size = max(min_size, min(max_size, seq_next_pow2))
 
-			features = []
 			labels = []
 			coords = []
 			chain_masks = []
 
 			for idx, _ in batch:
-				features.append(self.features[idx])
 				labels.append(self.labels[idx])
 				coords.append(self.coords[idx])
 				
@@ -263,18 +257,16 @@ class Data():
 			batch_next_pow2 = 2**math.ceil(math.log(len(batch), 2)) # next power of 2
 			batch_pads = range(batch_next_pow2 - len(batch))
 			for extra_batch in batch_pads:
-				features.append(torch.zeros(seq_size, features[0].size(1), dtype=features[0].dtype, device=self.device))
 				labels.append(-torch.ones(seq_size, dtype=labels[0].dtype, device=self.device))
 				coords.append(torch.zeros(seq_size, 3, dtype=coords[0].dtype, device=self.device) + float("inf"))
 				chain_masks.append(torch.zeros(seq_size, dtype=chain_masks[0].dtype, device=self.device))
 
-			features = self.pad_and_batch(features, pad_val="zero", max_size=seq_size)
 			labels = self.pad_and_batch(labels, pad_val="-one", max_size=seq_size)
 			coords = self.pad_and_batch(coords, pad_val="zero", max_size=seq_size)
 			chain_masks = self.pad_and_batch(chain_masks, pad_val="one", max_size=seq_size).to(torch.bool)
 			key_padding_masks = labels==-1
 
-			yield features, labels, coords, chain_masks, key_padding_masks
+			yield labels, coords, chain_masks, key_padding_masks
 
 
 	def pad_and_batch(self, tensor_list, pad_val="zero", max_size=10000):

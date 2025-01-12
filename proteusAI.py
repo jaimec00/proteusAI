@@ -3,7 +3,7 @@
 author: 		jaime cardenas
 title:  		proteusAI.py
 description:	predicts the amino acid sequence of a protein, based on 
-				alpha carbon coordinates
+				alpha carbon coordinates. uses wave function embedding and geometric attention
 '''
 # ----------------------------------------------------------------------------------------------------------------------
 
@@ -18,10 +18,10 @@ from utils.model_utils.geometric_attn import geometric_attn
 
 class MLP(nn.Module):
 	'''
-	base mlp class for use by other modules
+	base mlp class for use by other modules. uses gelu
 	'''
 
-	def __init__(self, d_in=512, d_out=512, d_hidden=1024, hidden_layers=0, activation_func="gelu", dropout=0.1):
+	def __init__(self, d_in=512, d_out=512, d_hidden=1024, hidden_layers=0, dropout=0.1):
 		super(MLP, self).__init__()
 
 		self.in_proj = nn.Linear(d_in, d_hidden)
@@ -31,12 +31,10 @@ class MLP(nn.Module):
 		self.in_dropout = nn.Dropout(dropout)
 		self.hidden_dropout = nn.ModuleList([nn.Dropout(dropout) for layer in range(hidden_layers)])
 
-		self.activation = F.gelu if activation_func == "gelu" else F.relu
-
 	def forward(self, x):
-		x = self.in_dropout(self.activation(self.in_proj(x)))
+		x = self.in_dropout(F.gelu(self.in_proj(x)))
 		for hidden, dropout in zip(self.hidden_proj, self.hidden_dropout):
-			x = dropout(self.activation(hidden(x)))
+			x = dropout(F.gelu(hidden(x)))
 		x = self.out_proj(x) # no activation or dropout on output
 
 		return x
@@ -51,24 +49,49 @@ class WavefunctionEmbedding(nn.Module):
 	serve as a generalization of positional encoding for irregularly spaced tokens in arbitrary dimensions. 
 	also includes mlp after the embedding layer
 	'''
-	def __init__(self, d_model=512, d_hidden=1024, hidden_layers=0, min_wl=3.7, max_wl=20, base=20, activation_func="gelu", dropout=0.1):
+	def __init__(self, d_model=512, min_wl=3.7, max_wl=20, base=20, d_hidden=1024, hidden_layers=0, dropout=0.1):
 		super(WavefunctionEmbedding, self).__init__()
 
 		# compute wavenumbers from wavelengths
 		self.wavelengths = min_wl + (max_wl - min_wl) * (torch.logspace(0,1,d_model//2, base) - 1) / (base - 1)
-		self.wavenumbers = 2 * torch.pi / wavelengths
 
-		self.mlp = MLP(d_model, d_model, d_hidden, hidden_layers, activation_func, dropout)
+		# compute the values to initialize the weights, so that post softmax, the diagonals have the most weight (close to 0.67 for d_model=512)
+		# and the farther a column index is from the diagonal, the less weight it receives (farthest is about 5e-6, for d_model=512)
+		idxs = torch.arange(0, d_model//2) # just the index of each wavenumber
+		diag_idx = idxs.unsqueeze(1).expand(-1, d_model//2) # the index of the corresponding diagonal for each row (same for all columns)
+		col_idx = idxs.unsqueeze(0).expand(d_model//2, -1)# the index of each column, same for each row
+		dist = (diag_idx - col_idx).abs() # how far an index is from the diagonal of its corresponding row
+		dist_pct = dist / (d_model//2) # as a percentage
+		inv_dist_pct = 1 - (dist_pct**(1/d_model)) # invert by subtracting pct from 1, also take the d_model root to emphasize the diagonals more
+		log_inv = torch.log(inv_dist_pct) # take the log to prepare it for softmax
+		self.wavelength_weights = nn.Parameter(log_inv)# initialize the learnable weight matrix
+		# note that will be doing a weighted sum of wavelengths, not wavenumbers, compute the wavenumbers after computing weighted sum 
+		# of wavelengths, to ensure the wavelengths are always within min wavelength and max wavelength		
+
+		self.mlp = MLP(d_model, d_model, d_hidden, hidden_layers, dropout)
+		self.norm = nn.LayerNorm(d_model)
+		self.dropout = nn.Dropout(dropout)
 
 	def forward(self, coords, key_padding_mask):
 
+		# each feature index will be a weighted sum of the allowed wavelengths, it is initialized to be almost
+		# an identity after softmax so that at the start, each index is basically just taking into account the
+		# wavelength of its corresponding index
+		wavelength_weights = torch.softmax(self.wavelength_weights, dim=1)
+		wavelengths = torch.matmul(wavelength_weights, self.wavelengths.unsqueeze(1)).squeeze(1) # d_model//2 x d_model//2 @ d_model//2 x 1 -> d_model//2
+		wavenumbers = 2 * torch.pi / wavelengths
+
 		# convert to wf features if not already precomputed
-		wf = wf_embedding(coords, self.wavenumbers, key_padding_mask) # batch x N x 3 --> batch x N x d_model
+		wf = wf_embedding(coords, wavenumbers.to(coords.device), key_padding_mask) # batch x N x 3 --> batch x N x d_model
 
 		# pass through ffn
-		wf = self.mlp(wf)
+		wf2 = self.mlp(wf)
 
-		return wavefunc
+		# add and norm w dropout
+		wf = wf + self.dropout(wf2)
+		wf = self.norm(wf)
+
+		return wf
 
 class GeoAttention(nn.Module):
 	'''
@@ -131,7 +154,7 @@ class GeoAttention(nn.Module):
 		
 		# get spread for each head, which is a learnable weighted sum of the allowed spreads
 		spread_weights = torch.softmax(self.spread_weights, dim=1) 
-		spreads = torch.matmul(spread_weights, self.spreads.unsqueeze(1)).squeeze(0) # nhead x nhead @ nhead x 1 -> nhead
+		spreads = torch.matmul(spread_weights, self.spreads.unsqueeze(1)).squeeze(1) # nhead x nhead @ nhead x 1 -> nhead
 		
 		# perform attention
 		out = geometric_attn(Q, K, V, coords, spreads.to(Q.device), mask=key_padding_mask, min_rbf=self.min_rbf, max_rbf=self.max_rbf, dropout=dropout)  # batch x nhead x N x d_k
@@ -149,7 +172,7 @@ class GeoAttention_Unit(nn.Module):
 	def __init__(self, d_model=512, nhead=8, dim_feedforward=1024, min_rbf=0.1, max_rbf=0.9, min_spread=1, max_spread=6, base=20, dropout=0.0):
 		super(GeoAttention_Unit, self).__init__()
 
-		self.mha = GeoAttention(d_model, nhead, min_rbf=min_rbf, max_rbf=max_rbf, min_spread=min_spread, max_spread=max_spread, base=base, dropout=dropout)
+		self.aatn = GeoAttention(d_model, nhead, min_rbf=min_rbf, max_rbf=max_rbf, min_spread=min_spread, max_spread=max_spread, base=base, dropout=dropout)
 		
 		# Separate normalization layers
 		self.norm = nn.LayerNorm(d_model)
@@ -160,7 +183,7 @@ class GeoAttention_Unit(nn.Module):
 	def forward(self, q, k, v, coords, key_padding_mask=None):
 		
 		# multi-head gaussian attention
-		o = self.mha(	q, k, v,
+		o = self.attn(	q, k, v,
 						coords=coords,
 						key_padding_mask=key_padding_mask,
 					)
@@ -178,16 +201,16 @@ class DualCoder(nn.Module):
 	interleaved cross-attention module, structure queries sequence to update self, sequence queries structure to update itself
 	'''
 
-	def __init__(self, d_model=512, nhead=8, dim_feedforward=1024, min_rbf=0.1, max_rbf=0.9, min_spread=1, max_spread=6, base=20, dropout=0.0):
+	def __init__(self, d_model=512, d_hidden=1024, hidden_layers=0, nhead=8, min_spread=1, max_spread=6, base=20, min_rbf=0.1, max_rbf=0.9, dropout=0.0):
 		super(DualCoder, self).__init__()
 
 		# Self-attention layers
-		self.wf_self_attn = GeoAttention_Unit(d_model, nhead, min_rbf=min_rbf, max_rbf=max_rbf, min_spread=min_spread, max_spread=max_spread, base=base, dropout=dropout)
-		self.aa_self_attn = GeoAttention_Unit(d_model, nhead, min_rbf=min_rbf, max_rbf=max_rbf, min_spread=min_spread, max_spread=max_spread, base=base, dropout=dropout)
+		self.wf_self_attn = GeoAttention_Unit(d_model, nhead, min_spread=min_spread, max_spread=max_spread, base=base, min_rbf=min_rbf, max_rbf=max_rbf, dropout=dropout)
+		self.aa_self_attn = GeoAttention_Unit(d_model, nhead, min_spread=min_spread, max_spread=max_spread, base=base, min_rbf=min_rbf, max_rbf=max_rbf, dropout=dropout)
 		
 		# cross attention layers
-		self.wf_cross_attn = GeoAttention_Unit(d_model, nhead, min_rbf=min_rbf, max_rbf=max_rbf, min_spread=min_spread, max_spread=max_spread, base=base, dropout=dropout)
-		self.aa_cross_attn = GeoAttention_Unit(d_model, nhead, min_rbf=min_rbf, max_rbf=max_rbf, min_spread=min_spread, max_spread=max_spread, base=base, dropout=dropout)
+		self.wf_cross_attn = GeoAttention_Unit(d_model, nhead, min_spread=min_spread, max_spread=max_spread, base=base, min_rbf=min_rbf, max_rbf=max_rbf, dropout=dropout)
+		self.aa_cross_attn = GeoAttention_Unit(d_model, nhead, min_spread=min_spread, max_spread=max_spread, base=base, min_rbf=min_rbf, max_rbf=max_rbf, dropout=dropout)
 
 		# Feed-forward network
 		self.wf_ffn = MLP(d_model, d_hidden=dim_feedforward, activation_func="gelu", dropout=dropout)
@@ -226,13 +249,13 @@ class DualCoder(nn.Module):
 								)
 
 		# Feed-forward network for wavefunction
-		wf = self.wf_ffn(wf)
+		wf2 = self.wf_ffn(wf)
 		wf = wf + self.wf_ffn_dropout(wf2)
 		wf = self.wf_ffn_norm(wf)
 
 		# Feed-forward network for AAs
-		aas = self.aa_ffn(aas)
-		aas = aas + self.aa_ffn_dropout(aas)
+		aas2 = self.aa_ffn(aas)
+		aas = aas + self.aa_ffn_dropout(aas2)
 		aas = self.aa_ffn_norm(aas)
 		
 		return wf, aas
@@ -240,40 +263,42 @@ class DualCoder(nn.Module):
 class proteusAI(nn.Module):
 	'''
 
-	proteusAI. 
-
-	converts 3D coords to wavefunction features (wf), and one hot amino acid tensors into aa embeddings. performs masked 
-	cross gaussian attention (lots of words) via the ContextModule, with wf as Q and V, and AA embeddings as K. Gaussian weighting is
-	done based on pair-wise distance based RBFs. then go through all decoder layers. decoder layer and context module are essentially the same
-	just the q, k, and v matrices vary. these are a stack of multi-scale gaussian attention layers, with each head operating at a 
-	different scale, by varying the spread of the RBF for that head. after self-attention, do add + norm, FFN, and residual connection. 
-	the subspace (d_k) each head operates at is close to the scale of the spread, since each feature in d_k (and d_model, where d_model=d_k*nhead) 
-	corresponds to a distinct wavelength (and thus k in Green's function), with low index features corresponding to small wavelengths 
-	and large index features to large wavelengths. the final decoder layer output goes through a linear layer that converts the 
-	d_model feature space to a 20-d feature space (20 AAs). softmax is applied to get probabilities and 
-	sample from the distribution autoregressively (during inference).
+	proteusAI.
 
 	'''
 	
-	def __init__(self, 	d_model, 
-						n_head, dualcoder_layers, hidden_linear_dim, dropout, 
-						min_wl=3.7, max_wl=20, base=20, 
+	def __init__(self, 	d_model, # model dimension
+
+						# wf embedding + wf mlp
+						min_wl=3.7, max_wl=20, base_wl=20, 
+						d_hidden_wl=1024, hidden_layers_wl=0, 
+
+						# aa mlp
+						d_hidden_aa=1024, hidden_layers_aa=0,
+
+						# geometric attn + ffn
+						dualcoder_layers=4,
+						n_head=4, dropout=0.05,
+
+						min_spread=3.7, max_spread=7, base_spreads=20, 
 						min_rbf=0.05, max_rbf=0.99, 
-						min_spread=3.7, max_spread=7, 
+						d_hidden_attn=1024, hidden_layers_attn=0,
+						
+						# include non-canonical AAs
 						include_ncaa=False
 					):
 
 		super(proteusAI, self).__init__()
 
 		# wavefunc
-		self.wf_embedding = WavefunctionEmbedding(d_model, min_wl, max_wl, base)
+		self.wf_embedding = WavefunctionEmbedding(d_model, min_wl, max_wl, base_wl, d_hidden_wl, hidden_layers_wl, dropout)
 
 		# amino acids
 		num_aas = 20 if not include_ncaa else 21
-		self.aa_embedding = MLP(num_aas, d_model, d_hidden_aa, hidden_layers_aa, activation_func, dropout)
+		self.aa_embedding = MLP(num_aas, d_model, d_hidden_aa, hidden_layers_aa, dropout)
 
 		# dual coders
-		self.dual_coders = nn.ModuleList([DualCoder(d_model, n_head, hidden_linear_dim, min_rbf, max_rbf, min_spread, max_spread, base, dropout) for _ in range(dualcoder_layers)])
+		self.dual_coders = nn.ModuleList([DualCoder(d_model, d_hidden_attn, hidden_layers_attn, n_head, min_spread, max_spread, base_spreads, min_rbf, max_rbf, dropout) for _ in range(dualcoder_layers)])
 
 		# map to aa probs
 		self.out_proj = nn.Linear(d_model, num_aas)
@@ -283,15 +308,26 @@ class proteusAI(nn.Module):
 		for dual_coder in self.dual_coders:
 			wf, aas = dual_coder(wf, aas, coords, key_padding_mask)
 
-		return aas
+		seq_probs = self.out_proj(aas)
 
-	def auto_regressive(self, wf, aas, coords, key_padding_mask=None, temp=0.1):
+		return seq_probs
+
+	def auto_regressive(self, coords, aas, key_padding_mask=None, temp=0.1):
 
 		# auto regressively sample AAs at most confident position
-		for position in range(aa_onehot.size(1)):
+		wf = self.wf_embedding(coords, key_padding_mask)
+
+		# extract the already fixed positions
+		aa_onehot = (aas == 1).any(dim=2) | key_padding_mask
+
+		for position in range(aas.size(1)):
+
+			# aas = torch.where()
+			
+			aa_embedded = self.aa_embedding(aas)
 
 			# decode the wavefunction
-			seq_probs = self.dualcode(wf, aas, coords, key_padding_mask) # batch x N x 512 --> batch x N X 20 
+			seq_probs = self.dualcode(wf, aa_embedded, coords, key_padding_mask) # batch x N x 512 --> batch x N X 20 
 			
 			# convert to probability distribution
 			seq_probs = F.softmax(seq_probs, dim=-1) # batch x N x 20
@@ -300,7 +336,7 @@ class proteusAI(nn.Module):
 			aa_onehot = self.update_most_confident(seq_probs, aa_onehot, key_padding_mask, temp)
 
 			# if all positions predicted, stop
-			if torch.all(aa_onehot.any(dim=-1)):
+			if torch.all(aa_onehot.any(dim=2)):
 				break	
 
 		return aa_onehot
@@ -308,7 +344,7 @@ class proteusAI(nn.Module):
 	def update_most_confident(self, seq_probs, aa_onehot, key_padding_mask=None, temp=0.1):
 		
 		# mask for predicted positions
-		predicted_positions_mask = aa_onehot.any(dim=-1) | key_padding_mask # batch x N
+		predicted_positions_mask = (aa_onehot==1).any(dim=2) | key_padding_mask # batch x N
 
 		# get the most confident position in each batch by calculating entropy
 		entropy = -torch.sum(seq_probs * torch.log(seq_probs + 1e-5), dim=-1) # batch x N
@@ -346,6 +382,9 @@ class proteusAI(nn.Module):
 		# coords: batch x N x 3 (or batch x N x d_model if self.as_coords is False)
 		# aa_onehot: batch x N x 20
 
+		if auto_regressive:
+			return self.auto_regressive(coords, aas, key_padding_mask, temp)
+
 		# wave function embedding (replaces positional encoding)
 		wf = self.wf_embedding(coords, key_padding_mask) # batch x N x 3 --> batch x N x d_model
 
@@ -353,10 +392,7 @@ class proteusAI(nn.Module):
 		aas = self.aa_embedding(aas)
 
 		# dual coder to communicate structure and sequence
-		aas = self.dualcode(wf, aas, coords, key_padding_mask) # batch x N x 20 (returns aa probability logits)
-
-		# get to output feature space (Z x N x 20), loss function automatically does softmax
-		seq_probs = self.out_proj(aas)
+		seq_probs = self.dualcode(wf, aas, coords, key_padding_mask) # batch x N x d_model (returns aa probability logits)
 
 		return seq_probs
 
