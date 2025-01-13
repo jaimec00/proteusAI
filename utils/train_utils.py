@@ -257,6 +257,7 @@ class TrainingRun():
 
 			input_perturbations = self.get_test_perturbations()
 
+			val_pbar = tqdm(total=len(self.data.val_data), desc="val_progress", unit="step")
 			# loop through validation batches
 			for label_batch, coords_batch, chain_mask, key_padding_mask in self.data.val_data:
 
@@ -273,6 +274,8 @@ class TrainingRun():
 				# store losses
 				loss, seq_sim = batch.outputs.losses["output"].get_avg()
 				val_losses.add_losses(float(loss.item()), seq_sim)
+
+				val_pbar.update(1)
 
 		self.val_losses.add_losses(*val_losses.get_avg())
 		self.output.log_val_losses(val_losses)
@@ -292,6 +295,7 @@ class TrainingRun():
 
 			input_perturbations = self.get_test_perturbations()
 
+			test_pbar = tqdm(total=len(self.data.test_data), desc="test_progress", unit="step")
 			# loop through testing batches
 			for label_batch, coords_batch, chain_mask, key_padding_mask in self.data.test_data:
 
@@ -313,6 +317,8 @@ class TrainingRun():
 				test_losses.append(float(loss.item()) )
 				test_seq_sims.append(seq_sim)
 				test_ar_seq_sims.append(ar_seq_sim)
+
+				test_pbar.update(1)
 		
 		self.output.log.info(f"testing loss: {sum(test_losses) / len(test_losses)}")
 		self.output.log.info(f"test sequence similarity: {sum(test_seq_sims) / len(test_seq_sims)}")

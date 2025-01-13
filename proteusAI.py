@@ -307,7 +307,7 @@ class proteusAI(nn.Module):
 		for dual_coder in self.dual_coders:
 			wf, aas = dual_coder(wf, aas, coords, key_padding_mask)
 
-		seq_probs = self.out_proj(aas)
+		seq_probs = self.out_proj(wf)
 
 		return seq_probs
 
@@ -327,10 +327,10 @@ class proteusAI(nn.Module):
 			seq_probs = F.softmax(seq_probs, dim=2) # batch x N x 20
 
 			# select aa at most confident position
-			seq_probs, aa_onehot = self.update_most_confident(seq_probs, aa_onehot, key_padding_mask, temp)
+			aas, aa_onehot = self.update_most_confident(seq_probs, aa_onehot, key_padding_mask, temp)
 
 			# if all positions predicted, stop
-			if torch.all(aa_onehot.any(dim=2)):
+			if torch.all(aa_onehot.any(dim=2) | key_padding_mask):
 				break
 
 		return aa_onehot
