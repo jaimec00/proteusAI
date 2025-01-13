@@ -278,12 +278,14 @@ class proteusAI(nn.Module):
 
 						# geometric attn + ffn
 						dualcoder_layers=4,
-						n_head=4, dropout=0.05,
-
+						n_head=4,
 						min_spread=3.7, max_spread=7, base_spreads=20, 
 						min_rbf=0.05, max_rbf=0.99, 
 						d_hidden_attn=1024, hidden_layers_attn=0,
 						
+						# dropout
+						dropout=0.00,
+
 						# include non-canonical AAs
 						include_ncaa=False
 					):
@@ -312,17 +314,12 @@ class proteusAI(nn.Module):
 
 		return seq_probs
 
-	def auto_regressive(self, coords, aas, key_padding_mask=None, temp=0.1):
-
-		# auto regressively sample AAs at most confident position
-		wf = self.wf_embedding(coords, key_padding_mask)
+	def auto_regressive(self, wf, coords, aas, key_padding_mask=None, temp=0.1):
 
 		# extract the already fixed positions
 		aa_onehot = (aas == 1).any(dim=2) | key_padding_mask
 
 		for position in range(aas.size(1)):
-
-			# aas = torch.where()
 			
 			aa_embedded = self.aa_embedding(aas)
 
@@ -330,14 +327,14 @@ class proteusAI(nn.Module):
 			seq_probs = self.dualcode(wf, aa_embedded, coords, key_padding_mask) # batch x N x 512 --> batch x N X 20 
 			
 			# convert to probability distribution
-			seq_probs = F.softmax(seq_probs, dim=-1) # batch x N x 20
+			seq_probs = F.softmax(seq_probs, dim=2) # batch x N x 20
 
 			# select aa at most confident position
-			aa_onehot = self.update_most_confident(seq_probs, aa_onehot, key_padding_mask, temp)
+			seq_probs, aa_onehot = self.update_most_confident(seq_probs, aa_onehot, key_padding_mask, temp)
 
 			# if all positions predicted, stop
 			if torch.all(aa_onehot.any(dim=2)):
-				break	
+				break
 
 		return aa_onehot
 
@@ -373,7 +370,9 @@ class proteusAI(nn.Module):
 		aa_onehot_temp = aa_onehot.scatter(1, most_confident_idx, one_hot_samples.unsqueeze(1))
 		aa_onehot = torch.where((predicted_positions_mask.unsqueeze(-1).expand(-1, -1, aa_onehot.size(-1))), aa_onehot, aa_onehot_temp)
 		
-		return aa_onehot
+		seq_probs = torch.where((aa_onehot==1).any(dim=2, keepdim=True), aa_onehot, seq_probs)
+
+		return seq_probs, aa_onehot
 
 	def forward(self, coords, aas, key_padding_mask=None, auto_regressive=False, temp=0.1):
 		"""
@@ -382,11 +381,11 @@ class proteusAI(nn.Module):
 		# coords: batch x N x 3 (or batch x N x d_model if self.as_coords is False)
 		# aa_onehot: batch x N x 20
 
-		if auto_regressive:
-			return self.auto_regressive(coords, aas, key_padding_mask, temp)
-
 		# wave function embedding (replaces positional encoding)
 		wf = self.wf_embedding(coords, key_padding_mask) # batch x N x 3 --> batch x N x d_model
+
+		if auto_regressive:
+			return self.auto_regressive(wf, coords, aas, key_padding_mask, temp)
 
 		# simple mlp to get aas to target feature space
 		aas = self.aa_embedding(aas)

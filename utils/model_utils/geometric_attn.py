@@ -1,8 +1,8 @@
 # ----------------------------------------------------------------------------------------------------------------------
 '''
 author:			jaime cardenas
-title:			gaussian_attn.py
-description:	multi-scale gaussian flash attention kernel written in triton. 
+title:			geometric_attn.py
+description:	multi-scale geometric flash attention kernel written in triton. 
 				kernel based on:
 					FlashAttention2 paper: https://arxiv.org/abs/2307.08691
 					Triton Implementation: https://github.com/triton-lang/triton/blob/main/python/tutorials/06-fused-attention.py
@@ -14,7 +14,8 @@ description:	multi-scale gaussian flash attention kernel written in triton.
 				the RBFs, The spreads are learnable, and they interact multiplicitavely with the attention weights, allowing
 				direct communication in both the forward and backward passes between RBFs and Q,K.  
 
-				Forward and backward passes are fully implemented, including reproducable dropout masks with RNG seeds for consistent bwd pass
+				Forward and backward passes are fully implemented, including reproducable dropout masks with RNG seeds 
+				for consistent bwd pass
 '''
 # ----------------------------------------------------------------------------------------------------------------------
 
@@ -657,8 +658,8 @@ class _geometric_attn(torch.autograd.Function):
 							)
 
 		# generate a rng seed for each batch and head
-		# rng_seed = torch.randint(0, 2**16-1, (batch,nheads), device=Q.device)
-		rng_seed = torch.ones(batch,nheads, device=Q.device) # hard code for debugging
+		rng_seed = torch.randint(0, 2**16-1, (batch,nheads), device=Q.device)
+		# rng_seed = torch.ones(batch,nheads, device=Q.device) # hard code for debugging
 
 		
 		# run the kernel

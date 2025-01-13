@@ -54,21 +54,22 @@ class TrainingRun():
 
 		self.hyper_parameters = HyperParameters(args.d_model,
 												args.min_wl, args.max_wl, 
-												args.min_base, args.max_base,
-												args.min_rbf, args.max_rbf, 
+												args.base_wl, 
+												args.d_hidden_wl, args.hidden_layers_wl, 
+												args.d_hidden_aa, args.hidden_layers_aa,
+												args.dualcoder_layers, args.num_heads,
 												args.min_spread, args.max_spread, 
-												args.num_heads, args.decoder_layers, 
-												args.hidden_linear_dim, args.temperature, 
-												args.max_tokens, args.use_model )
+												args.min_rbf, args.max_rbf, 
+												args.d_hidden_attn, args.hidden_layers_attn, 
+												args.temperature, args.use_model )
 		
-		self.training_parameters = TrainingParameters(  args.epochs, args.batch_sizes, args.seq_sizes, args.batch_size, 
+		self.training_parameters = TrainingParameters(  args.epochs, args.batch_sizes, args.seq_sizes, args.batch_tokens, 
 														args.accumulation_steps, args.learning_step, 
 														args.beta1, args.beta2, args.epsilon, 
 														args.dropout, args.label_smoothing, args.include_ncaa,
 														args.loss_type, args.loss_sum_norm, args.lr_scale, args.lr_patience,
-														args.phase_split, args.expand_decoders, args.training_type, args.precomputed_features,
 														args.use_amp, args.use_checkpoint, args.use_chain_mask,
-														args.autotune_wf, args.autotune_mha )
+														)
 		
 		self.input_perturbation_parameters = InputPerturbationParameters(	args.initial_min_lbl_smooth_mean, args.final_min_lbl_smooth_mean, 
 																			args.max_lbl_smooth_mean, args.min_lbl_smooth_stdev, args.max_lbl_smooth_stdev, 
@@ -77,10 +78,10 @@ class TrainingRun():
 																			args.initial_max_one_hot_injection_mean, args.final_max_one_hot_injection_mean, 
 																			args.min_one_hot_injection_mean, args.one_hot_injection_stdev, 
 																			args.one_hot_injection_cycle_length,
-																			self.training_parameters.use_onehot, self.training_parameters.use_probs ) 
+																		) 
 		
 		feature_path = f"3.7_20.0_20.0" # this is irrelevant now, since not precomputing features, but will update later
-		self.data = DataHolder(args.data_path, args.num_train, args.num_val, args.num_test, args.max_tokens, args.batch_sizes, args.seq_sizes, args.batch_size, feature_path, args.include_ncaa)
+		self.data = DataHolder(args.data_path, args.num_train, args.num_val, args.num_test, args.max_tokens, args.batch_sizes, args.seq_sizes, args.batch_tokens, feature_path, args.include_ncaa)
 		self.output = Output(args.out_path, args.loss_plot, args.seq_plot, args.weights_path, args.write_dot)
 
 		self.train_losses = {
@@ -129,20 +130,26 @@ class TrainingRun():
 		self.output.log.info("loading model...")
 		
 		self.model = proteusAI(	self.hyper_parameters.d_model, 
-								self.hyper_parameters.num_heads, 
-								self.hyper_parameters.decoder_layers,
-								self.hyper_parameters.hidden_linear_dim,
-								self.training_parameters.dropout,
 								self.hyper_parameters.min_wl,
 								self.hyper_parameters.max_wl,
-								self.hyper_parameters.min_base,
-								self.hyper_parameters.max_base,
+								self.hyper_parameters.base_wl,
+								self.hyper_parameters.d_hidden_wf,
+								self.hyper_parameters.hidden_layers_wf,
+
+								self.hyper_parameters.d_hidden_aa,
+								self.hyper_parameters.hidden_layers_aa,
+
+								self.hyper_parameters.dualcoder_layers,
+								self.hyper_parameters.num_heads, 
 								self.hyper_parameters.min_rbf,
 								self.hyper_parameters.max_rbf,
 								self.hyper_parameters.min_spread,
 								self.hyper_parameters.max_spread,
-								active_decoders=-1**(not self.training_parameters.expand_decoders), # -1 for no expansion (use all), 1 for expansion (start with one)
-								use_probs=self.training_parameters.use_probs,
+								self.hyper_parameters.base_spread,
+								self.hyper_parameters.d_hidden_attn,
+								self.hyper_parameters.hidden_layers_attn,
+
+								self.training_parameters.dropout,
 								include_ncaa=self.training_parameters.include_ncaa
 							)
 		self.model.to(self.gpu)
@@ -314,16 +321,15 @@ class TrainingRun():
 
 	def get_test_perturbations(self):
 
-		mean_onehot, stdev_onehot, mean_lbl_smooth, stdev_lbl_smooth, stdev_noise = [None] * 5
-		self_supervised_pct = 0.0
-
-		if self.training_parameters.use_onehot:
-			mean_onehot = 0.1
-			stdev_onehot = 0.0
+		mean_onehot = 0.1
+		stdev_onehot = 0.0
+		mean_lbl_smooth = None
+		stdev_lbl_smooth = None
+		stdev_noise = None
 
 		input_perturbations = InputPerturbations(mean_onehot, stdev_onehot, stdev_noise,
 											mean_lbl_smooth, stdev_lbl_smooth,
-											self_supervised_pct)
+											)
 
 		return input_perturbations
 
@@ -341,12 +347,6 @@ class Epoch():
 								"output": Losses()
 		}
 		
-		self.phase_split = self.training_run_parent.training_parameters.phase_split
-		self.phase = self.stage < self.phase_split
-		self.phase_i_epochs = (self.phase_split * self.epochs)
-		self.phase_ii_epochs = self.epochs - self.phase_i_epochs
-
-		self.phase_stage = self.epoch / (self.phase_ii_epochs if self.phase else self.phase_i_epochs)
 
 		self.input_perturbations = self.training_run_parent.input_perturbation_parameters.get_input_perturbations(self)
 
@@ -366,20 +366,17 @@ class Epoch():
 		self.training_run_parent.model.train()
 
 		# setup the epoch
-		self.setup_epoch()
+		self.training_run_parent.output.log_epoch(self, self.training_run_parent.optim, self.training_run_parent.model, self.input_perturbations)
 
 		# loop through batches
 		epoch_pbar = tqdm(total=len(self.training_run_parent.data.train_data), desc="epoch_progress", unit="step")
-		for b_idx, (feature_batch, label_batch, coords_batch, chain_mask, key_padding_mask) in enumerate(self.training_run_parent.data.train_data):
+		for b_idx, (label_batch, coords_batch, chain_mask, key_padding_mask) in enumerate(self.training_run_parent.data.train_data):
 
 			if not self.training_run_parent.training_parameters.use_chain_mask:
 				chain_mask = None
-			if not self.training_run_parent.training_parameters.precomputed_features:
-				features_batch = None
-
 					
-			batch = Batch(feature_batch, label_batch, coords_batch, chain_mask, key_padding_mask, 
-						b_idx=b_idx, epoch=self, use_probs=self.training_run_parent.training_parameters.use_probs, 
+			batch = Batch(label_batch, coords_batch, chain_mask, key_padding_mask, 
+						b_idx=b_idx, epoch=self, 
 						use_amp=self.training_run_parent.training_parameters.use_amp, include_ncaa=self.training_run_parent.training_parameters.include_ncaa,
 						use_checkpoint=self.training_run_parent.training_parameters.use_checkpoint, loss_type=self.training_run_parent.training_parameters.loss_type,
 						loss_sum_norm=self.training_run_parent.training_parameters.loss_sum_norm)
@@ -404,64 +401,30 @@ class Epoch():
 			self.training_run_parent.output.log.info("loading next epoch's training data...")
 			self.training_run_parent.data.train_data.rotate_data()
 
-	def setup_epoch(self):
-		'''
-		sets up the appropriate parameters, particular the input perturbations, 
-		depending on the configuration and training stage
-
-		Args:
-			None
-
-		Returns:
-			None
-
-		Raises:
-			ValueError: when self.training_parameters.training_type not valid
-		
-		'''
-		
-		if self.training_run_parent.training_parameters.training_type == "wf":
-			if self.training_run_parent.training_parameters.expand_decoders:
-				if not self.phase:
-					num_decoders = round(((self.epoch + 1) / self.phase_i_epochs) * len(self.training_run_parent.model.decoders))
-					new_decoders = num_decoders - self.training_run_parent.model.active_decoders
-					self.model.add_decoder(new_decoders)
-
-		# elif self.training_run_parent.training_parameters.training_type == "onehot":
-		# 	self.training_run_parent.model.alter_decoder_weights(requires_grad=self.phase)
-
-		self.training_run_parent.output.log_epoch(self, self.training_run_parent.optim, self.training_run_parent.model, self.input_perturbations)
 
 	def gather_batch_losses(self, batch, normalize=False):
 		self.train_losses["input"].extend_losses(batch.outputs.losses["input"], normalize)
-		self.train_losses["output"].extend_losses(batch.outputs.losses["self_output" if batch.self_supervised else "output"], normalize)
+		self.train_losses["output"].extend_losses(batch.outputs.losses["output"], normalize)
 
 class Batch():
-	def __init__(self, features, labels, coords, chain_mask, key_padding_mask, 
-					b_idx=None, epoch=None, use_probs=False, 
+	def __init__(self, labels, coords, chain_mask, key_padding_mask, 
+					b_idx=None, epoch=None,
 					use_amp=True, auto_regressive=False, temp=0.1, include_ncaa=False,
 					use_checkpoint=True, loss_type="sum", loss_sum_norm=2000):
 
-		self.features = features
 		self.labels = labels
 		self.coords = coords 
 		self.chain_mask = chain_mask if chain_mask is not None else torch.zeros(labels.shape, dtype=torch.bool, device=labels.device) 
-		self.use_probs = use_probs
 		self.use_amp = use_amp
 		self.use_checkpoint = use_checkpoint
 		num_aas = 20 if not include_ncaa else 21
-		if self.use_probs:
-			self.predictions = torch.full(self.labels.shape, 1/num_aas).unsqueeze(-1).expand(-1,-1,num_aas)
-		else:
-			# self.predictions = torch.zeros(self.labels.shape).unsqueeze(-1).expand(-1,-1,num_aas)
-			self.predictions = torch.full(self.labels.shape, 1/num_aas).unsqueeze(-1).expand(-1,-1,num_aas)
+		self.predictions = torch.full(self.labels.shape, 1/num_aas).unsqueeze(-1).expand(-1,-1,num_aas)
 
 		self.key_padding_mask = key_padding_mask
 		self.onehot_mask = torch.zeros(self.key_padding_mask.shape, dtype=torch.bool)
 
 		self.b_idx = b_idx
 		self.epoch_parent = epoch
-		self.self_supervised = torch.rand(1) < self.epoch_parent.input_perturbations.self_supervised_pct if epoch is not None else False
 
 		self.use_amp = use_amp
 		self.auto_regressive = auto_regressive
@@ -474,7 +437,6 @@ class Batch():
 
 	def move_to(self, device):
 
-		self.features = self.features.to(device)
 		self.predictions = self.predictions.to(device)
 		self.labels = self.labels.to(device)
 		self.coords = self.coords.to(device)
@@ -572,45 +534,25 @@ class Batch():
 		# cant compute cel with one hot vector, this is only for testing
 		with torch.no_grad():
 			if self.auto_regressive: 
-				ar_output_prediction = model(self.coords, self.predictions, features=self.features, key_padding_mask=self.key_padding_mask, 
-											auto_regressive=self.auto_regressive, temp=self.temp, use_checkpoint=False)
+				ar_output_prediction = model(self.coords, self.predictions, key_padding_mask=self.key_padding_mask, 
+											auto_regressive=self.auto_regressive, temp=self.temp)
 			else:
 				ar_output_prediction = None
 
 		# compute one shot also
 
-		output_prediction = model(self.coords, self.predictions, features=self.features, key_padding_mask=self.key_padding_mask, auto_regressive=False, use_checkpoint=self.use_checkpoint)
+		output_prediction = model(self.coords, self.predictions, key_padding_mask=self.key_padding_mask, auto_regressive=False)
 
-		# use the outputs as the inputs also
-		if self.self_supervised:
-
-			# detach from computational graph
-			self_prediction_batch = output_prediction.detach()
-
-			# get percentages
-			self_prediction_batch = torch.softmax(self_prediction_batch, dim=-1)
-
-			# replace with original one hots
-			self_prediction_batch = torch.where((self.onehot_mask | self.key_padding_mask).unsqueeze(-1), self.predictions, self_prediction_batch)
-
-			# run the model
-			self_output_prediction = model(self.coords, self_prediction_batch, features=self.features, key_padding_mask=self.key_padding_mask, auto_regressive=False, use_checkpoint=self.use_checkpoint)
-			
-		else:
-
-			self_output_prediction = None
-
-		return ModelOutputs(output_prediction, self_output_prediction, ar_output_prediction, 
+		return ModelOutputs(output_prediction, ar_output_prediction, 
 							self.predictions, self.labels)
 
 class ModelOutputs():
 
-	def __init__(self, output_predictions, self_output_predictions, ar_output_predictions, input_predictions, 
+	def __init__(self, output_predictions, ar_output_predictions, input_predictions, 
 				labels):
 		
 		self.input_predictions = input_predictions
 		self.output_predictions = output_predictions
-		self.self_output_predictions = self_output_predictions
 		self.ar_output_predictions = ar_output_predictions
 
 		self.labels = labels
@@ -620,7 +562,6 @@ class ModelOutputs():
 		self.losses = {
 			"input": Losses(),
 			"output": Losses(), 
-			"self_output": Losses(), 
 			"ar_output": Losses()
 		}
 
@@ -689,7 +630,6 @@ class ModelOutputs():
 
 		seq_sim = self.compute_seq_sim(prediction)
 
-
 		return cel, seq_sim
 
 	def get_valid(self):
@@ -698,11 +638,9 @@ class ModelOutputs():
 	def get_losses(self, loss_function, loss_type="sum", sum_norm=2000):
 
 		for prediction, prediction_loss in zip(	
-												[self.input_predictions, self.output_predictions,
-												self.self_output_predictions, self.ar_output_predictions], 
+												[self.input_predictions, self.output_predictions, self.ar_output_predictions], 
 												
-												[self.losses["input"], self.losses["output"], 
-												self.losses["self_output"], self.losses["ar_output"]]
+												[self.losses["input"], self.losses["output"], self.losses["ar_output"]]
 											):
 
 			# for some reason gives tuple to cel and None to seq sim if do 'cel, seq_sim = self.compute...'

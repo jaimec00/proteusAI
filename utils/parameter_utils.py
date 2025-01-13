@@ -22,7 +22,7 @@ class InputPerturbationParameters():
 						initial_max_one_hot_injection_mean, final_max_one_hot_injection_mean, 
 						min_one_hot_injection_mean, one_hot_injection_stdev, 
 						one_hot_injection_cycle_length ,
-						use_onehot, use_probs):
+					):
 
 		# input label smoothing
 		self.initial_min_lbl_smooth_mean = initial_min_lbl_smooth_mean
@@ -50,8 +50,6 @@ class InputPerturbationParameters():
 		# cycle length of one-hot injection
 		self.one_hot_injection_cycle_length = one_hot_injection_cycle_length
 
-		self.use_onehot = use_onehot
-		self.use_probs = use_probs
 
 	def calculate_stage(self, epoch, cycle_length, min_value, max_value, phase_shift=0):
 		"""
@@ -121,18 +119,13 @@ class InputPerturbationParameters():
 
 	def get_input_perturbations(self, epoch):
 
-		mean_onehot, stdev_onehot, stdev_noise, mean_lbl_smooth, stdev_lbl_smooth = [None] * 5
-		if self.use_onehot:
-			mean_onehot, stdev_onehot = self.get_onehot_params(epoch)
-		if self.use_probs:
-			mean_lbl_smooth, stdev_lbl_smooth = self.get_lbl_smooth_params(epoch)
-			stdev_noise = self.get_noise_params(epoch)
-
-		self_supervised_pct = 0.0 if (epoch.training_run_parent.training_parameters.training_type!='self-supervised') else (epoch.phase_stage if epoch.phase else 0.0)
+		mean_onehot, stdev_onehot = self.get_onehot_params(epoch)
+		mean_lbl_smooth, stdev_lbl_smooth = self.get_lbl_smooth_params(epoch)
+		stdev_noise = self.get_noise_params(epoch)
 
 		input_perturbations = InputPerturbations(mean_onehot, stdev_onehot, stdev_noise,
 												mean_lbl_smooth, stdev_lbl_smooth,
-												self_supervised_pct)
+												)
 
 		return input_perturbations
 
@@ -141,20 +134,16 @@ class InputPerturbations():
 
 	def __init__(self,  onehot_injection_mean, onehot_injection_stdev,
 						noise_stdev, lbl_smooth_mean, lbl_smooth_stdev,
-						self_supervised_pct):
+					):
 		
 		self.lbl_smooth_mean = lbl_smooth_mean
 		self.lbl_smooth_stdev = lbl_smooth_stdev
-		
 		self.noise_stdev = noise_stdev
-
 		self.onehot_injection_mean = onehot_injection_mean
 		self.onehot_injection_stdev = onehot_injection_stdev 
 
-		self.lbl_smooth_noise = None not in [self.lbl_smooth_mean, self.lbl_smooth_stdev, self.noise_stdev]
-		self.one_hot = None not in [self.onehot_injection_mean, self.onehot_injection_stdev]
-
-		self.self_supervised_pct = self_supervised_pct
+		self.apply_onehot = None in [one_hot_injection_mean, onehot_injection_stdev]
+		self.apply_lbl_smooth = None in [lbl_smooth_mean, lbl_smooth_stdev]
 
 	def smooth_and_noise_labels(self, label_batch, num_classes=20):
 		"""
@@ -270,34 +259,49 @@ class InputPerturbations():
 
 	def apply_perturbations(self, batch):
 		
-		if self.lbl_smooth_noise: # overwrites prediction
+		if self.apply_onehot:
 			batch.predictions = self.smooth_and_noise_labels(batch.labels)
-		if self.one_hot:
+		if self.apply_lbl_smooth:
 			batch.predictions, batch.onehot_mask = self.one_hot_injection(batch.predictions, batch.labels, batch.key_padding_mask)
 
 class HyperParameters():
 
-	def __init__(self, d_model, min_wl, max_wl, min_base, max_base, min_rbf, max_rbf, min_spread, max_spread, num_heads, decoder_layers, hidden_linear_dim, temperature, max_tokens, use_model):
+	def __init__(self, 	d_model,
+						min_wl, max_wl, 
+						base_wl, 
+						d_hidden_wl, hidden_layers_wl, 
+						d_hidden_aa, hidden_layers_aa,
+						dualcoder_layers, num_heads,
+						min_spread, max_spread, 
+						min_rbf, max_rbf, 
+						d_hidden_attn, hidden_layers_attn, 
+						temperature, use_model ):
 		self.d_model = d_model
 		self.min_wl = min_wl
 		self.max_wl = max_wl
-		self.min_base = min_base
-		self.max_base = max_base
+		self.base_wl = base_wl 
+		self.d_hidden_wl = d_hidden_wl
+		self.hidden_layers_wl = hidden_layers_wl 
+		self.d_hidden_aa = d_hidden_aa
+		self.hidden_layers_aa = hidden_layers_aa
+		self.dualcoder_layers = dualcoder_layers
+		self.num_heads = num_heads
+		self.min_spread = min_spread
+		self.max_spread = max_spread 
 		self.min_rbf = min_rbf
 		self.max_rbf = max_rbf 
-		self.min_spread = min_spread
-		self.max_spread = max_spread
-		self.num_heads = num_heads
-		self.decoder_layers = decoder_layers
-		self.hidden_linear_dim = hidden_linear_dim
+		self.d_hidden_attn = d_hidden_attn
+		self.hidden_layers_attn = hidden_layers_attn 
 		self.temperature = temperature
-		self.max_tokens = max_tokens
 		self.use_model = use_model
 
 class TrainingParameters():
 
-	def __init__(self, epochs, batch_sizes, seq_sizes, batch_size, accumulation_steps, learning_step, beta1, beta2, epsilon, dropout, label_smoothing, include_ncaa, 
-				loss_type, loss_sum_norm, lr_scale, lr_patience, phase_split, expand_decoders, training_type, precomputed_features, use_amp, use_checkpoint, use_chain_mask, autotune_wf, autotune_mha
+	def __init__(self, 	epochs, batch_sizes, seq_sizes, batch_size, 
+						accumulation_steps, learning_step, beta1, beta2, epsilon, 
+						dropout, label_smoothing, include_ncaa, 
+						loss_type, loss_sum_norm, lr_scale, lr_patience, 
+						use_amp, use_checkpoint, use_chain_mask
 				):
 		self.epochs = epochs
 		self.batch_sizes = batch_sizes
@@ -315,18 +319,8 @@ class TrainingParameters():
 		self.loss_sum_norm = loss_sum_norm
 		self.lr_scale = lr_scale
 		self.lr_patience = lr_patience
-		self.phase_split = phase_split
-		self.expand_decoders = expand_decoders
-		self.training_type = training_type
-		self.precomputed_features = precomputed_features
 		self.use_amp = use_amp
 		self.use_checkpoint = use_checkpoint
 		self.use_chain_mask = use_chain_mask
-		self.autotune_wf = autotune_wf
-		self.autotune_mha = autotune_mha
-
-		self.use_onehot = self.training_type != "wf"
-		self.use_probs = self.training_type in ["probs", "self-supervised"]
-		self.auto_regressive = self.training_type != "wf"
 
 # ----------------------------------------------------------------------------------------------------------------------

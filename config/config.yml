@@ -2,21 +2,24 @@
 d_model: 512  # dimensionality of input embeddings
 min_wl: 3.7  # minimum wl to use in wavelength sampling
 max_wl: 22.0  # maximum wl to use in wavelength sampling
-min_base: 20.0  # minimum base to use in wavelength sampling
-max_base: 20.0  # base to use in wavelength sampling
+base_wl: 20.0  # minimum base to use in wavelength sampling
+d_hidden_wl: 1024
+hidden_layers_wf: 0
+
+d_hidden_aa: 1024
+hidden_layers_aa: 0
+
+dualcoder_layers: 4 # number of decoder layers
+num_heads: 8  # number of attention heads to perform the training with
+min_spread: 3
+max_spread: 7
+base_spread: 20
 min_rbf: 0.05  # minimum rbf scaling factor in gaussian mha
 max_rbf: 0.99  # maximum rbf scaling factor in gaussian mha
-min_spread: 1
-max_spread: 30
-num_heads: 8  # number of attention heads to perform the training with
-decoder_layers: 4 # number of decoder layers
-hidden_linear_dim: 1024  # intermediate dimensions of decoder feed forward layer
+d_hidden_attn: 1024  # intermediate dimensions of decoder feed forward layer
+hidden_layers_attn: 0
+
 temperature: 0.1  # temperature for autoregressive inference (for testing)
-max_tokens: 10000  # maximum number of tokens
-include_ncaa: False # whether to include non-canonical amino acids in loss calculation
-use_amp: True  # whether to use automatic mixed precision
-use_checkpoint: False # whether to use gradient checkpointing for the MHA module
-use_chain_mask: True # whether to mask all chains except the sequence cluster representative
 
 # Training configuration
 num_train: -1  # number of training samples to use; -1 means all available
@@ -27,9 +30,9 @@ epochs: 20  # number of epochs
 # want as few combinations as possible to speed up triton autotuning
 batch_sizes: [1, 2, 4, 8, 16, 32, 64, 128]  # possible samples per batch
 seq_sizes: [128, 256, 512, 1024, 2048, 4096, 8192, 10000] # possible sequence lengths
-batch_size: 10000 # number of valid tokens per batch 
-autotune_wf: False # whether to perform triton autotuning on protein_to_wavefunc
-autotune_mha: False # whether to perform triton autotuning on attn
+batch_tokens: 10000 # number of valid tokens per batch 
+max_tokens: 10000  # maximum number of tokens
+include_ncaa: False # whether to include non-canonical amino acids in loss calculation
 
 accumulation_steps: 1  # grad accumulation; how many batches to process before learning step
 learning_step: 0.00005  # learning rate
@@ -42,19 +45,11 @@ loss_type: "mean"  # whether to use the 'sum' or the 'mean' for CEL
 loss_sum_norm: 2000
 lr_scale: 0.1  # LR scaling factor
 lr_patience: 2  # LR patience for scaling down after plateau
+use_chain_mask: True # whether to mask all chains except the sequence cluster representative
+use_amp: True  # whether to use automatic mixed precision
 
 # early_stopping: 
 # model_checkpoints:
-
-# Training type
-training_type: "onehot" # choices: wf, onehot, probs, or self_supervised
-# if wf, phase 1 is progressive decoder expansion (if specified), phase 2 is normal learning
-# if onehot, phase 1 has decoder weights frozes, and phase 2 is normal learning (everything unfrozen)
-# if probs, phase 1 also has decoder weights frozen (allow context to adapt to current weights), phase 2 is normal
-# if self-supervised, phase 1 has progressively increasing amounts of self-supervision, phase 2 is full self-supervision
-phase_split: 0.5  # ratio of progressive learning phase
-expand_decoders: False
-precomputed_features: False
 
 # ------------------------------------------------------------------------------
 # these only apply to probs/self_supervised training type
