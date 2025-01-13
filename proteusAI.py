@@ -264,7 +264,7 @@ class proteusAI(nn.Module):
 
 	'''
 	
-	def __init__(self, 	d_model, # model dimension
+	def __init__(self, 	d_model=512, # model dimension
 
 						# wf embedding + wf mlp
 						min_wl=3.7, max_wl=20, base_wl=20, 
@@ -314,7 +314,7 @@ class proteusAI(nn.Module):
 	def auto_regressive(self, wf, coords, aas, key_padding_mask=None, temp=0.1):
 
 		# extract the already fixed positions
-		aa_onehot = torch.where((aas == 1).any(dim=2, keep_dim=True), aas, 0)
+		aa_onehot = torch.where((aas == 1).any(dim=2, keepdim=True), aas, 0)
 
 		for position in range(aas.size(1)):
 			
