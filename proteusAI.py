@@ -53,7 +53,7 @@ class WavefunctionEmbedding(nn.Module):
 		super(WavefunctionEmbedding, self).__init__()
 
 		# compute wavenumbers from wavelengths
-		self.wavelengths = min_wl + (max_wl - min_wl) * (torch.logspace(0,1,d_model//2, base) - 1) / (base - 1)
+		self.register_buffer("wavelengths", min_wl + (max_wl - min_wl) * (torch.logspace(0,1,d_model//2, base) - 1) / (base - 1))
 
 		# compute the values to initialize the weights, so that post softmax, the diagonals have the most weight (close to 0.67 for d_model=512)
 		# and the farther a column index is from the diagonal, the less weight it receives (farthest is about 5e-6, for d_model=512)
@@ -78,11 +78,11 @@ class WavefunctionEmbedding(nn.Module):
 		# an identity after softmax so that at the start, each index is basically just taking into account the
 		# wavelength of its corresponding index
 		wavelength_weights = torch.softmax(self.wavelength_weights, dim=1)
-		wavelengths = torch.matmul(wavelength_weights, self.wavelengths.unsqueeze(1)).squeeze(1) # d_model//2 x d_model//2 @ d_model//2 x 1 -> d_model//2
+		wavelengths = torch.matmul(wavelength_weights, self.wavelengths.to().unsqueeze(1)).squeeze(1) # d_model//2 x d_model//2 @ d_model//2 x 1 -> d_model//2
 		wavenumbers = 2 * torch.pi / wavelengths
 
 		# convert to wf features if not already precomputed
-		wf = wf_embedding(coords, wavenumbers.to(coords.device), key_padding_mask) # batch x N x 3 --> batch x N x d_model
+		wf = wf_embedding(coords, wavenumbers, key_padding_mask) # batch x N x 3 --> batch x N x d_model
 
 		# pass through ffn
 		wf2 = self.mlp(wf)
@@ -101,7 +101,7 @@ class GeoAttention(nn.Module):
 	see the imported function (supports fwd and bwd) triton implementation
 	'''
 
-	def __init__(self, d_model=512, nhead=8, min_rbf=0.1, max_rbf=0.9, min_spread=1, max_spread=6, base=20, dropoout=0.1):
+	def __init__(self, d_model=512, nhead=8, min_spread=1, max_spread=6, base=20, min_rbf=0.1, max_rbf=0.9, dropout=0.1):
 		super(GeoAttention, self).__init__()
 
 		self.nhead = nhead
@@ -110,13 +110,12 @@ class GeoAttention(nn.Module):
 		if self.d_model % self.nhead != 0: raise ValueError(f"number of dimensions ({self.d_model}) must be divisible by number of attention heads ({self.nhead})")
 		self.d_k = self.d_model // self.nhead
 
-
 		self.min_rbf = min_rbf
 		self.max_rbf = max_rbf
 		self.dropout = dropout
 
 		# define spreads and spread weights matrix so each head's spread is a weighted sum of the allowed spreads
-		self.spreads = min_spread + (max_spread - min_spread) * (torch.logspace(0,1,nhead, base) - 1) / (base - 1)
+		self.register_buffer("spreads", min_spread + (max_spread - min_spread) * (torch.logspace(0,1,nhead, base) - 1) / (base - 1))
 		self.spread_weights = nn.Parameter(torch.randn([self.nhead, self.nhead])) 
 
 		self.q_proj = nn.Parameter(torch.randn(self.nhead, self.d_model, self.d_k)) # nhead x d_model x d_k
@@ -157,7 +156,7 @@ class GeoAttention(nn.Module):
 		spreads = torch.matmul(spread_weights, self.spreads.unsqueeze(1)).squeeze(1) # nhead x nhead @ nhead x 1 -> nhead
 		
 		# perform attention
-		out = geometric_attn(Q, K, V, coords, spreads.to(Q.device), mask=key_padding_mask, min_rbf=self.min_rbf, max_rbf=self.max_rbf, dropout=dropout)  # batch x nhead x N x d_k
+		out = geometric_attn(Q, K, V, coords, spreads, mask=key_padding_mask, min_rbf=self.min_rbf, max_rbf=self.max_rbf, dropout=dropout)  # batch x nhead x N x d_k
 
 		out = out.permute(0,2,3,1) # batch x N x d_k x nhead
 		out = out.reshape(batch, N, self.d_model) # batch x N x d_k x nhead --> batch x N x d_model
@@ -169,15 +168,13 @@ class GeoAttention(nn.Module):
 		return out # batch x N x d_model
 
 class GeoAttention_Unit(nn.Module):
-	def __init__(self, d_model=512, nhead=8, dim_feedforward=1024, min_rbf=0.1, max_rbf=0.9, min_spread=1, max_spread=6, base=20, dropout=0.0):
+	def __init__(self, d_model=512, nhead=8,  min_spread=1, max_spread=6, base=20, min_rbf=0.1, max_rbf=0.9, dropout=0.0):
 		super(GeoAttention_Unit, self).__init__()
-
-		self.aatn = GeoAttention(d_model, nhead, min_rbf=min_rbf, max_rbf=max_rbf, min_spread=min_spread, max_spread=max_spread, base=base, dropout=dropout)
-		
-		# Separate normalization layers
+		'''
+		utility class that combines attention and add+norm w/ dropout
+		'''
+		self.attn = GeoAttention(d_model, nhead, min_spread=min_spread, max_spread=max_spread, base=base, min_rbf=min_rbf, max_rbf=max_rbf, dropout=dropout)
 		self.norm = nn.LayerNorm(d_model)
-
-		# Separate dropout layers
 		self.dropout = nn.Dropout(dropout)
 
 	def forward(self, q, k, v, coords, key_padding_mask=None):
@@ -213,8 +210,8 @@ class DualCoder(nn.Module):
 		self.aa_cross_attn = GeoAttention_Unit(d_model, nhead, min_spread=min_spread, max_spread=max_spread, base=base, min_rbf=min_rbf, max_rbf=max_rbf, dropout=dropout)
 
 		# Feed-forward network
-		self.wf_ffn = MLP(d_model, d_hidden=dim_feedforward, activation_func="gelu", dropout=dropout)
-		self.aas_ffn = MLP(d_model, d_hidden=dim_feedforward, activation_func="gelu", dropout=dropout)
+		self.wf_ffn = MLP(d_model, d_model, d_hidden=d_hidden, hidden_layers=hidden_layers, dropout=dropout)
+		self.aa_ffn = MLP(d_model, d_model, d_hidden=d_hidden, hidden_layers=hidden_layers, dropout=dropout)
 
 		self.wf_ffn_norm = nn.LayerNorm(d_model)
 		self.wf_ffn_dropout = nn.Dropout(dropout)
@@ -317,7 +314,7 @@ class proteusAI(nn.Module):
 	def auto_regressive(self, wf, coords, aas, key_padding_mask=None, temp=0.1):
 
 		# extract the already fixed positions
-		aa_onehot = (aas == 1).any(dim=2) | key_padding_mask
+		aa_onehot = torch.where((aas == 1).any(dim=2, keep_dim=True), aas, 0)
 
 		for position in range(aas.size(1)):
 			
@@ -369,7 +366,6 @@ class proteusAI(nn.Module):
 		# update filled_positions with most confident positions' sampled aa's 
 		aa_onehot_temp = aa_onehot.scatter(1, most_confident_idx, one_hot_samples.unsqueeze(1))
 		aa_onehot = torch.where((predicted_positions_mask.unsqueeze(-1).expand(-1, -1, aa_onehot.size(-1))), aa_onehot, aa_onehot_temp)
-		
 		seq_probs = torch.where((aa_onehot==1).any(dim=2, keepdim=True), aa_onehot, seq_probs)
 
 		return seq_probs, aa_onehot
@@ -384,6 +380,7 @@ class proteusAI(nn.Module):
 		# wave function embedding (replaces positional encoding)
 		wf = self.wf_embedding(coords, key_padding_mask) # batch x N x 3 --> batch x N x d_model
 
+		# initial wf embedding is the same, so dont recompute each time in auto regressive
 		if auto_regressive:
 			return self.auto_regressive(wf, coords, aas, key_padding_mask, temp)
 

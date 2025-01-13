@@ -30,7 +30,7 @@ import time
 import os
 
 from utils.io_utils import Output
-from utils.model_utils.featurization import protein_to_wavefunc
+from utils.model_utils.wf_embedding import wf_embedding
 
 # ----------------------------------------------------------------------------------------------------------------------
 
@@ -513,7 +513,7 @@ class DataCleaner():
 		coords, mask = self.pad_tensors(coords)
 
 		# get features for each biounit
-		features = protein_to_wavefunc(coords, self.d_model, self.min_wl, self.max_wl, self.base, mask=mask)
+		features = wf_embedding(coords, self.d_model, self.min_wl, self.max_wl, self.base, mask=mask)
 
 		# loop through each sample along batch dim and unpad coords and features
 		for i in range(features.size(0)): 

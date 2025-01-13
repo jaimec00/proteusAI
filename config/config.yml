@@ -1,7 +1,7 @@
 # Configuration for training the model
 d_model: 512  # dimensionality of input embeddings
 min_wl: 3.7  # minimum wl to use in wavelength sampling
-max_wl: 22.0  # maximum wl to use in wavelength sampling
+max_wl: 20.0  # maximum wl to use in wavelength sampling
 base_wl: 20.0  # minimum base to use in wavelength sampling
 d_hidden_wl: 1024
 hidden_layers_wf: 0
@@ -9,11 +9,11 @@ hidden_layers_wf: 0
 d_hidden_aa: 1024
 hidden_layers_aa: 0
 
-dualcoder_layers: 4 # number of decoder layers
-num_heads: 8  # number of attention heads to perform the training with
-min_spread: 3
-max_spread: 7
-base_spread: 20
+dualcoder_layers: 4 # number of dualcoder layers
+num_heads: 4  # number of attention heads to perform the training with
+min_spread: 3.0
+max_spread: 7.0
+base_spread: 20.0
 min_rbf: 0.05  # minimum rbf scaling factor in gaussian mha
 max_rbf: 0.99  # maximum rbf scaling factor in gaussian mha
 d_hidden_attn: 1024  # intermediate dimensions of decoder feed forward layer
@@ -22,10 +22,10 @@ hidden_layers_attn: 0
 temperature: 0.1  # temperature for autoregressive inference (for testing)
 
 # Training configuration
-num_train: -1  # number of training samples to use; -1 means all available
+num_train: 2048  # number of training samples to use; -1 means all available
 num_val: -1  # number of validation samples to use; -1 means all available
 num_test: -1  # number of test samples to use; -1 means all available
-epochs: 20  # number of epochs
+epochs: 1  # number of epochs
 
 # want as few combinations as possible to speed up triton autotuning
 batch_sizes: [1, 2, 4, 8, 16, 32, 64, 128]  # possible samples per batch
@@ -44,12 +44,9 @@ label_smoothing: 0.1  # percentage of label smoothing to use on the output label
 loss_type: "mean"  # whether to use the 'sum' or the 'mean' for CEL
 loss_sum_norm: 2000
 lr_scale: 0.1  # LR scaling factor
-lr_patience: 2  # LR patience for scaling down after plateau
+lr_patience: 5  # LR patience for scaling down after plateau
 use_chain_mask: True # whether to mask all chains except the sequence cluster representative
 use_amp: True  # whether to use automatic mixed precision
-
-# early_stopping: 
-# model_checkpoints:
 
 # ------------------------------------------------------------------------------
 # these only apply to probs/self_supervised training type
@@ -61,7 +58,7 @@ max_lbl_smooth_mean: 1.05  # maximum input label smoothing
 min_lbl_smooth_stdev: 0.05  # minimum input label smoothing stdev
 max_lbl_smooth_stdev: 0.2  # maximum input label smoothing stdev
 
-# Input noise (
+# Input noise
 min_noise_stdev: 0.1  # minimum mean of noise to apply to inputs
 initial_max_noise_stdev: 0.2  # initial maximum mean of noise to apply to inputs
 final_max_noise_stdev: 0.1  # final maximum mean of noise to apply to inputs
@@ -87,5 +84,7 @@ write_dot: True  # whether to save the dot file of the computational graph
 
 # Input
 data_path: "/share/wangyy/hjc2538/proteusAI/pdb_2021aug02_filtered"  # path to data
-# use_model: ""
+# use_model: 
+# early_stopping: 
+# model_checkpoints:
 config: "config/config.yml"  # Path to the YAML config file

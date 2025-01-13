@@ -105,15 +105,15 @@ class InputPerturbationParameters():
 	def get_lbl_smooth_params(self, epoch):
 
 		decayed_min_lbl_smooth = self.initial_min_lbl_smooth_mean + epoch.stage * (self.final_min_lbl_smooth_mean - self.initial_min_lbl_smooth_mean)
-		mean_lbl_smooth = calculate_stage(epoch.epoch, self.lbl_smooth_cycle_length, decayed_min_lbl_smooth, self.max_lbl_smooth_mean, phase_shift=-math.pi/2) # start with low label smoothing (sin function)
-		stdev_lbl_smooth = calculate_stage(epoch.epoch, self.lbl_smooth_noise_cycle_length, self.min_lbl_smooth_stdev, self.max_lbl_smooth_stdev, phase_shift=math.pi/2) # start with high stdev to compliment low label smoothing
+		mean_lbl_smooth = self.calculate_stage(epoch.epoch, self.lbl_smooth_noise_cycle_length, decayed_min_lbl_smooth, self.max_lbl_smooth_mean, phase_shift=-math.pi/2) # start with low label smoothing (sin function)
+		stdev_lbl_smooth = self.calculate_stage(epoch.epoch, self.lbl_smooth_noise_cycle_length, self.min_lbl_smooth_stdev, self.max_lbl_smooth_stdev, phase_shift=math.pi/2) # start with high stdev to compliment low label smoothing
 
 		return mean_lbl_smooth, stdev_lbl_smooth
 
 	def get_noise_params(self, epoch):
 
 		decayed_max_noise = self.initial_max_noise_stdev - epoch.stage * (self.initial_max_noise_stdev - self.final_max_noise_stdev)
-		stdev_noise = calculate_stage(epoch.epoch, self.lbl_smooth_noise_cycle_length, self.min_noise_stdev, decayed_max_noise, phase_shift=math.pi/2) # start with high noise to complement low label smoothing
+		stdev_noise = self.calculate_stage(epoch.epoch, self.lbl_smooth_noise_cycle_length, self.min_noise_stdev, decayed_max_noise, phase_shift=math.pi/2) # start with high noise to complement low label smoothing
 
 		return stdev_noise
 
@@ -142,7 +142,7 @@ class InputPerturbations():
 		self.onehot_injection_mean = onehot_injection_mean
 		self.onehot_injection_stdev = onehot_injection_stdev 
 
-		self.apply_onehot = None in [one_hot_injection_mean, onehot_injection_stdev]
+		self.apply_onehot = None in [onehot_injection_mean, onehot_injection_stdev]
 		self.apply_lbl_smooth = None in [lbl_smooth_mean, lbl_smooth_stdev]
 
 	def smooth_and_noise_labels(self, label_batch, num_classes=20):
@@ -267,12 +267,11 @@ class InputPerturbations():
 class HyperParameters():
 
 	def __init__(self, 	d_model,
-						min_wl, max_wl, 
-						base_wl, 
+						min_wl, max_wl, base_wl, 
 						d_hidden_wl, hidden_layers_wl, 
 						d_hidden_aa, hidden_layers_aa,
 						dualcoder_layers, num_heads,
-						min_spread, max_spread, 
+						min_spread, max_spread, base_spread,
 						min_rbf, max_rbf, 
 						d_hidden_attn, hidden_layers_attn, 
 						temperature, use_model ):
@@ -288,6 +287,7 @@ class HyperParameters():
 		self.num_heads = num_heads
 		self.min_spread = min_spread
 		self.max_spread = max_spread 
+		self.base_spread = base_spread 
 		self.min_rbf = min_rbf
 		self.max_rbf = max_rbf 
 		self.d_hidden_attn = d_hidden_attn
@@ -297,16 +297,16 @@ class HyperParameters():
 
 class TrainingParameters():
 
-	def __init__(self, 	epochs, batch_sizes, seq_sizes, batch_size, 
+	def __init__(self, 	epochs, batch_sizes, seq_sizes, batch_tokens, 
 						accumulation_steps, learning_step, beta1, beta2, epsilon, 
 						dropout, label_smoothing, include_ncaa, 
 						loss_type, loss_sum_norm, lr_scale, lr_patience, 
-						use_amp, use_checkpoint, use_chain_mask
+						use_amp, use_chain_mask
 				):
 		self.epochs = epochs
 		self.batch_sizes = batch_sizes
 		self.seq_sizes = seq_sizes
-		self.batch_size = batch_size
+		self.batch_tokens = batch_tokens
 		self.accumulation_steps = accumulation_steps
 		self.learning_step = learning_step
 		self.beta1 = beta1
@@ -320,7 +320,6 @@ class TrainingParameters():
 		self.lr_scale = lr_scale
 		self.lr_patience = lr_patience
 		self.use_amp = use_amp
-		self.use_checkpoint = use_checkpoint
 		self.use_chain_mask = use_chain_mask
 
 # ----------------------------------------------------------------------------------------------------------------------

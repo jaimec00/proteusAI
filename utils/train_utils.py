@@ -53,12 +53,11 @@ class TrainingRun():
 	def __init__(self, args):
 
 		self.hyper_parameters = HyperParameters(args.d_model,
-												args.min_wl, args.max_wl, 
-												args.base_wl, 
+												args.min_wl, args.max_wl, args.base_wl, 
 												args.d_hidden_wl, args.hidden_layers_wl, 
 												args.d_hidden_aa, args.hidden_layers_aa,
 												args.dualcoder_layers, args.num_heads,
-												args.min_spread, args.max_spread, 
+												args.min_spread, args.max_spread, args.base_spread,
 												args.min_rbf, args.max_rbf, 
 												args.d_hidden_attn, args.hidden_layers_attn, 
 												args.temperature, args.use_model )
@@ -68,7 +67,7 @@ class TrainingRun():
 														args.beta1, args.beta2, args.epsilon, 
 														args.dropout, args.label_smoothing, args.include_ncaa,
 														args.loss_type, args.loss_sum_norm, args.lr_scale, args.lr_patience,
-														args.use_amp, args.use_checkpoint, args.use_chain_mask,
+														args.use_amp, args.use_chain_mask,
 														)
 		
 		self.input_perturbation_parameters = InputPerturbationParameters(	args.initial_min_lbl_smooth_mean, args.final_min_lbl_smooth_mean, 
@@ -94,6 +93,7 @@ class TrainingRun():
 
 		self.gpu = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 		self.cpu = torch.device("cpu")
+
 
 	def setup_training(self):
 		'''
@@ -133,8 +133,8 @@ class TrainingRun():
 								self.hyper_parameters.min_wl,
 								self.hyper_parameters.max_wl,
 								self.hyper_parameters.base_wl,
-								self.hyper_parameters.d_hidden_wf,
-								self.hyper_parameters.hidden_layers_wf,
+								self.hyper_parameters.d_hidden_wl,
+								self.hyper_parameters.hidden_layers_wl,
 
 								self.hyper_parameters.d_hidden_aa,
 								self.hyper_parameters.hidden_layers_aa,
@@ -226,7 +226,7 @@ class TrainingRun():
 		# log training info
 		self.output.log.info(f"\n\ninitializing training. "\
 							f"training on {len(self.data.train_data)} batches "\
-							f"of batch size {self.training_parameters.batch_size} tokens "\
+							f"of batch size {self.training_parameters.batch_tokens} tokens "\
 							f"for {self.training_parameters.epochs} epochs.\n" )
 		
 		# loop through epochs
@@ -240,7 +240,7 @@ class TrainingRun():
 			self.train_losses[key].to_numpy()
 		self.val_losses.to_numpy()
 		
-		self.output.plot_training(self.train_losses, self.val_losses, use_probs=self.training_parameters.use_probs)
+		self.output.plot_training(self.train_losses, self.val_losses)
 		self.output.save_model(self.model)
 				
 	def validation(self):
@@ -300,7 +300,7 @@ class TrainingRun():
 					
 				batch = Batch(label_batch, coords_batch, chain_mask, key_padding_mask, 
 								 use_amp=False, 
-								auto_regressive=self.training_parameters.auto_regressive, 
+								auto_regressive=True, 
 								temp=self.hyper_parameters.temperature, loss_type=self.training_parameters.loss_type,
 								loss_sum_norm=self.training_parameters.loss_sum_norm)
 
@@ -375,11 +375,13 @@ class Epoch():
 			if not self.training_run_parent.training_parameters.use_chain_mask:
 				chain_mask = None
 					
-			batch = Batch(label_batch, coords_batch, chain_mask, key_padding_mask, 
-						b_idx=b_idx, epoch=self, 
-						use_amp=self.training_run_parent.training_parameters.use_amp, include_ncaa=self.training_run_parent.training_parameters.include_ncaa,
-						use_checkpoint=self.training_run_parent.training_parameters.use_checkpoint, loss_type=self.training_run_parent.training_parameters.loss_type,
-						loss_sum_norm=self.training_run_parent.training_parameters.loss_sum_norm)
+			batch = Batch(	label_batch, coords_batch, chain_mask, key_padding_mask, 
+							b_idx=b_idx, epoch=self, 
+							use_amp=self.training_run_parent.training_parameters.use_amp, 
+							include_ncaa=self.training_run_parent.training_parameters.include_ncaa,
+							loss_type=self.training_run_parent.training_parameters.loss_type,
+							loss_sum_norm=self.training_run_parent.training_parameters.loss_sum_norm
+						)
 			batch.batch_learn()
 			# normalize by number of valid tokens if computing sum, else it is already normalized
 			self.gather_batch_losses(batch, normalize=self.training_run_parent.loss_function.reduction=="sum")
@@ -410,13 +412,12 @@ class Batch():
 	def __init__(self, labels, coords, chain_mask, key_padding_mask, 
 					b_idx=None, epoch=None,
 					use_amp=True, auto_regressive=False, temp=0.1, include_ncaa=False,
-					use_checkpoint=True, loss_type="sum", loss_sum_norm=2000):
+					loss_type="sum", loss_sum_norm=2000):
 
 		self.labels = labels
 		self.coords = coords 
 		self.chain_mask = chain_mask if chain_mask is not None else torch.zeros(labels.shape, dtype=torch.bool, device=labels.device) 
 		self.use_amp = use_amp
-		self.use_checkpoint = use_checkpoint
 		num_aas = 20 if not include_ncaa else 21
 		self.predictions = torch.full(self.labels.shape, 1/num_aas).unsqueeze(-1).expand(-1,-1,num_aas)
 
@@ -502,7 +503,7 @@ class Batch():
 		optim = self.epoch_parent.training_run_parent.optim
 
 		learn_step = (self.b_idx + 1) % accumulation_steps == 0
-		loss = self.outputs.losses["self_output" if self.self_supervised else "output"].losses[-1] / accumulation_steps
+		loss = self.outputs.losses["output"].losses[-1] / accumulation_steps
 		
 		if scaler is not None:
 			scaler.scale(loss).backward()

@@ -77,16 +77,6 @@ class Output():
 			one-hot injection stdev: {input_perturbation_parameters.one_hot_injection_stdev}
 		''')
 
-
-		if training_parameters.training_type in ["probs", "self-supervision"]:
-			training_type = "training with probability distributions" + noise_info + onehot_info 
-		elif training_parameters.training_type == "onehot":
-			training_type = "training with one-hot AAs" + onehot_info
-		elif training_parameters.training_type == "wf":
-			training_type = "training with raw wave function features"
-		else:
-			raise ValueError(f"invalid training type: {training_parameters.training_type}")
-
 		log = 	textwrap.dedent(f'''
 
 		model hyper-parameters:
@@ -94,37 +84,43 @@ class Output():
 			d_model: {hyper_parameters.d_model}
 			min_wl: {hyper_parameters.min_wl} 
 			max_wl: {hyper_parameters.max_wl} 
-			min_base: {hyper_parameters.min_base} 
-			max_base: {hyper_parameters.max_base} 
+			base_wl: {hyper_parameters.base_wl}
+			d_hidden_wf: {hyper_parameters.d_hidden_wl}
+			hidden_layers_wf: {hyper_parameters.hidden_layers_wl}
+
+			d_hidden_aa: {hyper_parameters.d_hidden_aa}
+			hidden_layers_aa: {hyper_parameters.hidden_layers_aa}
+
+			number of dualcoders: {hyper_parameters.dualcoder_layers}
+			number of attention heads: {hyper_parameters.num_heads}
+			min_spread: {hyper_parameters.min_spread} 
+			max_spread: {hyper_parameters.max_spread} 
+			base_spread: {hyper_parameters.base_spread}
 			min_rbf: {hyper_parameters.min_rbf} 
 			max_rbf: {hyper_parameters.max_rbf} 
-			min_spread: {hyper_parameters.min_spread} 
-			max_spread: {hyper_parameters.max_spread} 			
-			number of decoders: {hyper_parameters.decoder_layers}
-			number of attention heads: {hyper_parameters.num_heads}
+			d_hidden_attn: {hyper_parameters.d_hidden_attn}
+			hidden_layers_attn: {hyper_parameters.hidden_layers_attn}
 			temperature: {hyper_parameters.temperature}
-			max sequeunce length: {hyper_parameters.max_tokens}
+
+			max sequeunce length: {data.max_size}
 
 			dataset split ({data.num_train + data.num_val + data.num_test} clusters total): 
 				train clusters: {data.num_train}
 				validation clusters: {data.num_val}
 				test clusters: {data.num_test}
-			batch size (tokens): {training_parameters.batch_size}
+			batch size (tokens): {training_parameters.batch_tokens}
 			possible batch sizes (samples): {training_parameters.batch_sizes}
 			possible sequence lengths (tokens): {training_parameters.seq_sizes}
-			effective batch size (tokens): {training_parameters.batch_size * training_parameters.accumulation_steps}
+			effective batch size (tokens): {training_parameters.batch_tokens * training_parameters.accumulation_steps}
 
 			epochs: {training_parameters.epochs}
-			phase I: {round(training_parameters.epochs * training_parameters.phase_split)} epochs
-			phase II: {round(training_parameters.epochs - (training_parameters.epochs * training_parameters.phase_split))} epochs
-
 			learning rate: {training_parameters.learning_step}
 			learning rate plateu scaling factor: {training_parameters.lr_scale}
 			learning rate plateu patience: {training_parameters.lr_patience}
 			dropout: {training_parameters.dropout}
 			output label-smoothing: {training_parameters.label_smoothing}
 			
-			{training_type}
+			{noise_info + onehot_info}
 
 			output directory: {self.out_path}
 		''')
@@ -144,10 +140,6 @@ class Output():
 			
 			current learning rate: {current_lr}
 	
-			using {model.active_decoders} decoders
-
-			decoder weights are {"frozen" if ((not epoch.phase) and (epoch.training_run_parent.training_parameters.training_type=="onehot")) else "not frozen"}
-
 			training inputs contain:
 				
 				mean label smooth: {round(input_perturbations.lbl_smooth_mean if input_perturbations.lbl_smooth_mean is not None else 0.00, 2)}
@@ -158,8 +150,6 @@ class Output():
 
 				mean one-hot injection: {round(input_perturbations.onehot_injection_mean if input_perturbations.onehot_injection_mean is not None else 0.00, 2)}
 				stdev one-hot injection: {round(input_perturbations.onehot_injection_stdev if input_perturbations.onehot_injection_stdev is not None else 0.00, 2)}
-
-				percent of self-supervised_batches: {round(input_perturbations.self_supervised_pct * 100, 2)}%
 
 				''')
 			)
@@ -190,14 +180,13 @@ class Output():
 		self.log.info(f"validation seq_sim: {str(seq_sim)}\n")
 
 
-	def plot_training(self, train_losses, val_losses, use_probs=True):
+	def plot_training(self, train_losses, val_losses):
 
 		# Create the plot
 		plt.plot([i + 1 for i in range(len(train_losses["output"].losses))], train_losses["output"].losses, marker='o', color='red', label="Training Output")
 		plt.plot([i + 1 for i in range(len(val_losses.losses))], val_losses.losses, marker='o', color='blue', label="Validation Output")
-		if use_probs:
-			plt.plot([i + 1 for i in range(len(train_losses["input"].losses))], losses["input"].losses, marker='o', color='yellow', label="Training Input")
-			plt.plot([i + 1 for i in range(len(train_losses["delta"].losses))], losses["delta"].losses, marker='o', color='orange', label="Delta Training")
+		plt.plot([i + 1 for i in range(len(train_losses["input"].losses))], train_losses["input"].losses, marker='o', color='yellow', label="Training Input")
+		plt.plot([i + 1 for i in range(len(train_losses["delta"].losses))], train_losses["delta"].losses, marker='o', color='orange', label="Delta Training")
 		
 		# Adding title and labels
 		plt.title('Cross Entropy Loss vs. Epochs')
@@ -220,9 +209,8 @@ class Output():
 		plt.plot([i + 1 for i in range(len(train_losses["output"].seq_sims))], train_losses["output"].seq_sims, marker='o', color='red', label="Training Output")
 		plt.plot([i + 1 for i in range(len(val_losses.seq_sims))], val_losses.seq_sims, marker='o', color='blue', label="Validation Output")
 
-		if use_probs:
-			plt.plot([i + 1 for i in range(len(train_losses["input"].seq_sims))], train_losses["input"].seq_sims, marker='o', color='yellow', label="Training Input")
-			plt.plot([i + 1 for i in range(len(train_losses["delta"].seq_sims))], train_losses["delta"].seq_sims, marker='o', color='orange', label="Training Delta")
+		plt.plot([i + 1 for i in range(len(train_losses["input"].seq_sims))], train_losses["input"].seq_sims, marker='o', color='yellow', label="Training Input")
+		plt.plot([i + 1 for i in range(len(train_losses["delta"].seq_sims))], train_losses["delta"].seq_sims, marker='o', color='orange', label="Training Delta")
 
 
 		# Adding title and labels
