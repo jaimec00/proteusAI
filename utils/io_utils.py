@@ -182,11 +182,19 @@ class Output():
 
 	def plot_training(self, train_losses, val_losses):
 
+		# convert to numpy arrays
+		for key in self.train_losses.keys():
+			self.train_losses[key].to_numpy()
+		for key in self.val_losses.keys():
+			self.val_losses[key].to_numpy()
+		
+
 		# Create the plot
 		plt.plot([i + 1 for i in range(len(train_losses["output"].losses))], train_losses["output"].losses, marker='o', color='red', label="Training Output")
-		plt.plot([i + 1 for i in range(len(val_losses.losses))], val_losses.losses, marker='o', color='blue', label="Validation Output")
 		plt.plot([i + 1 for i in range(len(train_losses["input"].losses))], train_losses["input"].losses, marker='o', color='yellow', label="Training Input")
 		plt.plot([i + 1 for i in range(len(train_losses["delta"].losses))], train_losses["delta"].losses, marker='o', color='orange', label="Delta Training")
+		plt.plot([i + 1 for i in range(len(val_losses["perturbation"].losses))], val_losses["perturbation"].losses, marker='o', color='blue', label="Validation Output (w/ perturbations)")
+		plt.plot([i + 1 for i in range(len(val_losses["no_perturbation"].losses))], val_losses["no_perturbation"].losses, marker='o', color='purple', label="Validation Output (w/o perturbations)")
 		
 		# Adding title and labels
 		plt.title('Cross Entropy Loss vs. Epochs')
@@ -207,12 +215,11 @@ class Output():
 		plt.figure()
 
 		plt.plot([i + 1 for i in range(len(train_losses["output"].seq_sims))], train_losses["output"].seq_sims, marker='o', color='red', label="Training Output")
-		plt.plot([i + 1 for i in range(len(val_losses.seq_sims))], val_losses.seq_sims, marker='o', color='blue', label="Validation Output")
-
 		plt.plot([i + 1 for i in range(len(train_losses["input"].seq_sims))], train_losses["input"].seq_sims, marker='o', color='yellow', label="Training Input")
 		plt.plot([i + 1 for i in range(len(train_losses["delta"].seq_sims))], train_losses["delta"].seq_sims, marker='o', color='orange', label="Training Delta")
-
-
+		plt.plot([i + 1 for i in range(len(val_losses["perturbation"].seq_sims))], val_losses["perturbation"].seq_sims, marker='o', color='blue', label="Validation Output (w/ perturbations)")
+		plt.plot([i + 1 for i in range(len(val_losses["perturbation"].seq_sims))], val_losses["no_perturbation"].seq_sims, marker='o', color='purple', label="Validation Output (w/o perturbations)")
+		
 		# Adding title and labels
 		plt.title('Mean Sequence Similarity vs. Epochs')
 		plt.xlabel('Epochs')

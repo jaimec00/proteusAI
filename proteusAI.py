@@ -39,6 +39,19 @@ class MLP(nn.Module):
 
 		return x
 
+class AminoAcidEmbedding(nn.Module):
+	'''
+	simple mlp w/ layernorm
+	'''
+	def __init__(self, num_aas, d_model, d_hidden_aa, hidden_layers_aa, dropout):
+		super(AminoAcidEmbedding, self).__init__()
+		
+		self.ffn = MLP(num_aas, d_model, d_hidden_aa, hidden_layers_aa, dropout)
+		self.norm = nn.LayerNorm(d_model)
+
+	def forward(self, aa):
+		return self.norm(self.ffn(aa))
+
 class WavefunctionEmbedding(nn.Module):
 	'''
 	converts the Ca coordinates (batch x N x 3) to the target feature space (batch x N x d_model) by modeling each Ca as
@@ -234,13 +247,13 @@ class DualCoder(nn.Module):
 								)
 
 		#### aa as K cross attention ####
-		wf = self.wf_cross_attn(	wf2, aas2, wf2,
+		wf = self.wf_cross_attn(	aas2, aas2, wf2,
 									coords=coords,
 									key_padding_mask=key_padding_mask,
 								)
 
 		#### wf as K cross attention ####
-		aas = self.aa_cross_attn(	aas2, wf2, aas2,
+		aas = self.aa_cross_attn(	wf2, wf2, aas2,
 									coords=coords,
 									key_padding_mask=key_padding_mask,
 								)
@@ -293,20 +306,21 @@ class proteusAI(nn.Module):
 		self.wf_embedding = WavefunctionEmbedding(d_model, min_wl, max_wl, base_wl, d_hidden_wl, hidden_layers_wl, dropout)
 
 		# amino acids
-		num_aas = 20 if not include_ncaa else 21
-		self.aa_embedding = MLP(num_aas, d_model, d_hidden_aa, hidden_layers_aa, dropout)
+		self.aa_embedding = AminoAcidEmbedding(21, d_model, d_hidden_aa, hidden_layers_aa, dropout)
 
 		# dual coders
 		self.dual_coders = nn.ModuleList([DualCoder(d_model, d_hidden_attn, hidden_layers_attn, n_head, min_spread, max_spread, base_spreads, min_rbf, max_rbf, dropout) for _ in range(dualcoder_layers)])
 
 		# map to aa probs
-		self.out_proj = nn.Linear(d_model, num_aas)
+		self.out_proj = nn.Linear(d_model, 20)
 
 	def dualcode(self, wf, aas, coords, key_padding_mask):
 
 		for dual_coder in self.dual_coders:
 			wf, aas = dual_coder(wf, aas, coords, key_padding_mask)
 
+		# note that wf is the output, since the original wf is more 
+		# representative of the unique protein than the initial aa probabilites
 		seq_probs = self.out_proj(wf)
 
 		return seq_probs

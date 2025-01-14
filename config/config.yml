@@ -12,9 +12,9 @@ hidden_layers_aa: 0
 dualcoder_layers: 4 # number of dualcoder layers
 num_heads: 4  # number of attention heads to perform the training with
 min_spread: 3.0
-max_spread: 7.0
-base_spread: 20.0
-min_rbf: 0.05  # minimum rbf scaling factor in gaussian mha
+max_spread: 6.0
+base_spread: 10.0
+min_rbf: 0.01  # minimum rbf scaling factor in gaussian mha
 max_rbf: 0.99  # maximum rbf scaling factor in gaussian mha
 d_hidden_attn: 1024  # intermediate dimensions of decoder feed forward layer
 hidden_layers_attn: 0
@@ -22,7 +22,7 @@ hidden_layers_attn: 0
 temperature: 0.1  # temperature for autoregressive inference (for testing)
 
 # Training configuration
-num_train: -1  # number of training samples to use; -1 means all available
+num_train: 256  # number of training samples to use; -1 means all available
 num_val: -1  # number of validation samples to use; -1 means all available
 num_test: -1  # number of test samples to use; -1 means all available
 epochs: 30  # number of epochs
@@ -34,8 +34,8 @@ batch_tokens: 10000 # number of valid tokens per batch
 max_tokens: 10000  # maximum number of tokens
 include_ncaa: False # whether to include non-canonical amino acids in loss calculation
 
-accumulation_steps: 1  # grad accumulation; how many batches to process before learning step
-learning_step: 0.00005  # learning rate
+accumulation_steps: 4  # grad accumulation; how many batches to process before learning step
+learning_step: 0.0001  # learning rate
 beta1: 0.9  # learning rate
 beta2: 0.98  # learning rate
 epsilon: 10e-9  # learning rate
@@ -43,34 +43,25 @@ dropout: 0.1  # percentage of dropout
 label_smoothing: 0.1  # percentage of label smoothing to use on the output labels for loss calculation
 loss_type: "mean"  # whether to use the 'sum' or the 'mean' for CEL
 loss_sum_norm: 2000
+lr_type: plateu
+lr_initial_min: 5e-5
+lr_initial_max: 1e-4
+lr_final_min: 1e-5
+lr_final_max: 5e-5
+lr_cycle_length: 7.0
+
 lr_scale: 0.1  # LR scaling factor
 lr_patience: 5  # LR patience for scaling down after plateau
 use_chain_mask: True # whether to mask all chains except the sequence cluster representative
 use_amp: True  # whether to use automatic mixed precision
 
 # ------------------------------------------------------------------------------
-# these only apply to probs/self_supervised training type
-
-# Input label smoothing 
-initial_min_lbl_smooth_mean: 0.15  # initial minimum input label smoothing
-final_min_lbl_smooth_mean: 0.85  # final minimum input label smoothing
-max_lbl_smooth_mean: 1.05  # maximum input label smoothing
-min_lbl_smooth_stdev: 0.05  # minimum input label smoothing stdev
-max_lbl_smooth_stdev: 0.2  # maximum input label smoothing stdev
-
-# Input noise
-min_noise_stdev: 0.1  # minimum mean of noise to apply to inputs
-initial_max_noise_stdev: 0.2  # initial maximum mean of noise to apply to inputs
-final_max_noise_stdev: 0.1  # final maximum mean of noise to apply to inputs
-
-# Input label smoothing and noise cycle length
-lbl_smooth_noise_cycle_length: 10.3  # cycle length of label smoothing and noise oscillations
 
 # Input one-hot injection
-min_one_hot_injection_mean: 0.15  # minimum mean percentage of one-hot label injection in training
-initial_max_one_hot_injection_mean: 0.25  # initial maximum mean percentage of one-hot label injection in training
-final_max_one_hot_injection_mean: 0.5  # final maximum mean percentage of one-hot label injection in training
-one_hot_injection_stdev: 0.25  # stdev percentage of one-hot label injection in training
+min_one_hot_injection_mean: 0.00  # minimum mean percentage of one-hot label injection in training
+initial_max_one_hot_injection_mean: 0.15  # initial maximum mean percentage of one-hot label injection in training
+final_max_one_hot_injection_mean: 0.05  # final maximum mean percentage of one-hot label injection in training
+one_hot_injection_stdev: 0.05  # stdev percentage of one-hot label injection in training
 one_hot_injection_cycle_length: 7.4  # input one-hot injection cycle length
 
 # ------------------------------------------------------------------------------
@@ -83,7 +74,7 @@ weights_path: "model_parameters.pth"  # path to save weights after training
 write_dot: True  # whether to save the dot file of the computational graph
 
 # Input
-data_path: "/share/wangyy/hjc2538/proteusAI/pdb_2021aug02_filtered"  # path to data
+data_path: "/share/wangyy/hjc2538/proteusAI/pdb_2021aug02"  # path to data
 # use_model: 
 # early_stopping: 
 # model_checkpoints:

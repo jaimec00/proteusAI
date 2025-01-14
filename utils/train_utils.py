@@ -10,11 +10,9 @@ import torch
 import torch.optim.lr_scheduler as lr_scheduler
 from torch.amp import autocast, GradScaler
 import torch.nn.functional as F
-import torch.nn as nn
+import torch.nn.CrossEntropyLoss as CEL
 
 from tqdm import tqdm
-import pandas as pd
-import os
 
 from proteusAI import proteusAI
 from utils.parameter_utils import (	HyperParameters, TrainingParameters, 
@@ -62,38 +60,31 @@ class TrainingRun():
 												args.d_hidden_attn, args.hidden_layers_attn, 
 												args.temperature, args.use_model )
 		
-		self.training_parameters = TrainingParameters(  args.epochs, args.batch_sizes, args.seq_sizes, args.batch_tokens, 
-														args.accumulation_steps, args.learning_step, 
-														args.beta1, args.beta2, args.epsilon, 
-														args.dropout, args.label_smoothing, args.include_ncaa,
-														args.loss_type, args.loss_sum_norm, args.lr_scale, args.lr_patience,
+		self.training_parameters = TrainingParameters(  args.epochs,
+														args.accumulation_steps, 
+														args.lr_type, # cyclic or plataeu
+														args.lr_initial_min, args.lr_initial_max, args.lr_final_min, args.lr_final_max, args.lr_cycle_length, # for cyclic
+														args.lr_scale, args.lr_patience, args.lr_step, # for plataeu
+														args.beta1, args.beta2, args.epsilon, # for adam optim
+														args.dropout, args.label_smoothing,
+														args.loss_type, args.loss_sum_norm, 
 														args.use_amp, args.use_chain_mask,
-														)
+													)
 		
-		self.input_perturbation_parameters = InputPerturbationParameters(	args.initial_min_lbl_smooth_mean, args.final_min_lbl_smooth_mean, 
-																			args.max_lbl_smooth_mean, args.min_lbl_smooth_stdev, args.max_lbl_smooth_stdev, 
-																			args.min_noise_stdev, args.initial_max_noise_stdev, args.final_max_noise_stdev, 
-																			args.lbl_smooth_noise_cycle_length, 
-																			args.initial_max_one_hot_injection_mean, args.final_max_one_hot_injection_mean, 
-																			args.min_one_hot_injection_mean, args.one_hot_injection_stdev, 
-																			args.one_hot_injection_cycle_length,
-																		) 
+		self.MASK_injection = MASK_injection(	args.initial_max_MASK_injection_mean, args.final_max_MASK_injection_mean, 
+												args.min_MASK_injection_mean, args.MASK_injection_stdev, 
+												args.MASK_injection_cycle_length, args.randAA_pct
+											)
 		
-		feature_path = f"3.7_20.0_20.0" # this is irrelevant now, since not precomputing features, but will update later
-		self.data = DataHolder(args.data_path, args.num_train, args.num_val, args.num_test, args.max_tokens, args.batch_sizes, args.seq_sizes, args.batch_tokens, feature_path, args.include_ncaa)
+		self.data = DataHolder(args.data_path, args.num_train, args.num_val, args.num_test, args.batch_tokens, args.max_batch_size, args.max_seq_size, args.min_seq_size)
 		self.output = Output(args.out_path, args.loss_plot, args.seq_plot, args.weights_path, args.write_dot)
 
-		self.train_losses = {
-							"input": Losses(),
-							"output": Losses(),
-							"delta": Losses()
-						}
+		self.train_losses = Losses()
 		self.val_losses = Losses()
 		self.test_losses = Losses()
 
 		self.gpu = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 		self.cpu = torch.device("cpu")
-
 
 	def setup_training(self):
 		'''
@@ -133,19 +124,19 @@ class TrainingRun():
 								self.hyper_parameters.min_wl,
 								self.hyper_parameters.max_wl,
 								self.hyper_parameters.base_wl,
-								self.hyper_parameters.d_hidden_wl,
-								self.hyper_parameters.hidden_layers_wl,
+								self.hyper_parameters.d_hidden_we,
+								self.hyper_parameters.hidden_layers_we,
 
 								self.hyper_parameters.d_hidden_aa,
 								self.hyper_parameters.hidden_layers_aa,
 
 								self.hyper_parameters.dualcoder_layers,
 								self.hyper_parameters.num_heads, 
-								self.hyper_parameters.min_rbf,
-								self.hyper_parameters.max_rbf,
 								self.hyper_parameters.min_spread,
 								self.hyper_parameters.max_spread,
 								self.hyper_parameters.base_spread,
+								self.hyper_parameters.min_rbf,
+								self.hyper_parameters.max_rbf,
 								self.hyper_parameters.d_hidden_attn,
 								self.hyper_parameters.hidden_layers_attn,
 
@@ -189,7 +180,24 @@ class TrainingRun():
 		'''
 
 		self.output.log.info("loading scheduler...")
-		self.scheduler = lr_scheduler.ReduceLROnPlateau(self.optim, mode='min', factor=self.training_parameters.lr_scale, patience=self.training_parameters.lr_patience) 
+
+		def custom_lr(epoch):
+
+			stage = epoch / self.training_parameters.epochs
+			current_min = self.training_parameters.lr_initial_min - stage*(self.training_parameters.lr_initial_min - self.training_parameters.lr_final_min)
+			current_max = self.training_parameters.lr_initial_max - stage*(self.training_parameters.lr_initial_max - self.training_parameters.lr_final_max)
+
+			midpoint = (current_max + current_min) / 2
+			amplitude = (current_max - current_min) / 2
+			
+			lr = midpoint + amplitude*math.sin(2*math.pi*epoch/self.training_parameters.lr_cycle_length)
+			
+			return lr
+		
+		if self.training_parameters.lr_type == "plateu":
+			self.scheduler = lr_scheduler.ReduceLROnPlateau(self.optim, mode='min', factor=self.training_parameters.lr_scale, patience=self.training_parameters.lr_patience) 
+		else:
+			self.scheduler = lr_scheduler.LambdaLR(self.optim, custom_lr)
 
 	def setup_loss_function(self):
 		'''
@@ -203,7 +211,7 @@ class TrainingRun():
 		'''
 
 		self.output.log.info("loading loss function...") 
-		self.loss_function = nn.CrossEntropyLoss(ignore_index=-1, reduction="none", label_smoothing=self.training_parameters.label_smoothing)
+		self.loss_function = CEL(ignore_index=-1, reduction=self.training_parameters.loss_type, label_smoothing=self.training_parameters.label_smoothing)
 
 	def train(self):
 		'''
@@ -231,21 +239,15 @@ class TrainingRun():
 		
 		# loop through epochs
 		for epoch in range(self.training_parameters.epochs):
-			
 			epoch = Epoch(epoch, self)
 			epoch.epoch_loop()
 
-
-		for key in self.train_losses.keys():
-			self.train_losses[key].to_numpy()
-		self.val_losses.to_numpy()
-		
 		self.output.plot_training(self.train_losses, self.val_losses)
 		self.output.save_model(self.model)
 				
-	def validation(self):
+	def validation(self, epoch):
 		
-		self.output.log.info(f"running validation...\n")
+		self.output.log.info(f"running validation w/ no perturbations...\n")
 		
 		# switch to evaluation mode to perform validation
 		self.model.eval()
@@ -255,30 +257,28 @@ class TrainingRun():
 		# turn off gradient calculation
 		with torch.no_grad():
 
-			input_perturbations = self.get_test_perturbations()
-
-			val_pbar = tqdm(total=len(self.data.val_data), desc="val_progress", unit="step")
+			val_pbar = tqdm(total=len(self.data.val_data), desc="epoch_validation_progress", unit="step")
 			# loop through validation batches
 			for label_batch, coords_batch, chain_mask, key_padding_mask in self.data.val_data:
-
-				if not self.training_parameters.use_chain_mask:
-					chain_mask = None
 					
-				batch = Batch(label_batch, coords_batch, chain_mask, key_padding_mask, 
-							use_amp=False, auto_regressive=False,
-							loss_type=self.training_parameters.loss_type,
-							loss_sum_norm=self.training_parameters.loss_sum_norm)
-				input_perturbations.apply_perturbations(batch)
+				batch = Batch(	label_batch, coords_batch, chain_mask, key_padding_mask, 
+								use_amp=False, auto_regressive=False
+							)
+
 				batch.batch_forward(self.model, self.loss_function, self.gpu)
 
 				# store losses
-				loss, seq_sim = batch.outputs.losses["output"].get_avg()
+				loss, seq_sim = batch.outputs.losses.get_avg()
 				val_losses.add_losses(float(loss.item()), seq_sim)
 
 				val_pbar.update(1)
 
-		self.val_losses.add_losses(*val_losses.get_avg())
-		self.output.log_val_losses(val_losses)
+			self.val_losses.add_losses(*val_losses.get_avg())
+			self.output.log_val_losses(val_losses)
+
+			self.val_losses["perturbations"].add_losses(*val_losses_perturbations.get_avg())
+			self.output.log_val_losses(val_losses_perturbations)
+
 
 	def test(self):
 
@@ -293,22 +293,18 @@ class TrainingRun():
 		# turn off gradient calculation
 		with torch.no_grad():
 
-			input_perturbations = self.get_test_perturbations()
 
 			test_pbar = tqdm(total=len(self.data.test_data), desc="test_progress", unit="step")
+
 			# loop through testing batches
 			for label_batch, coords_batch, chain_mask, key_padding_mask in self.data.test_data:
-
-				if not self.training_parameters.use_chain_mask:
-					chain_mask = None
 					
 				batch = Batch(label_batch, coords_batch, chain_mask, key_padding_mask, 
 								 use_amp=False, 
 								auto_regressive=True, 
-								temp=self.hyper_parameters.temperature, loss_type=self.training_parameters.loss_type,
-								loss_sum_norm=self.training_parameters.loss_sum_norm)
+								temp=self.hyper_parameters.temperature, 
+							)
 
-				input_perturbations.apply_perturbations(batch)
 				batch.batch_forward(self.model, self.loss_function, self.gpu)
 
 				loss, seq_sim = batch.outputs.losses["output"].get_avg()
@@ -325,19 +321,6 @@ class TrainingRun():
 		if None not in test_ar_seq_sims:
 			self.output.log.info(f"test auto-regressive sequence similarity: {sum(test_ar_seq_sims) / len(test_ar_seq_sims)}")
 
-	def get_test_perturbations(self):
-
-		mean_onehot = 0.1
-		stdev_onehot = 0.0
-		mean_lbl_smooth = None
-		stdev_lbl_smooth = None
-		stdev_noise = None
-
-		input_perturbations = InputPerturbations(mean_onehot, stdev_onehot, stdev_noise,
-											mean_lbl_smooth, stdev_lbl_smooth,
-											)
-
-		return input_perturbations
 
 class Epoch():	
 	def __init__(self, epoch, training_run):
@@ -353,7 +336,6 @@ class Epoch():
 								"output": Losses()
 		}
 		
-
 		self.input_perturbations = self.training_run_parent.input_perturbation_parameters.get_input_perturbations(self)
 
 	def epoch_loop(self):
@@ -377,16 +359,10 @@ class Epoch():
 		# loop through batches
 		epoch_pbar = tqdm(total=len(self.training_run_parent.data.train_data), desc="epoch_progress", unit="step")
 		for b_idx, (label_batch, coords_batch, chain_mask, key_padding_mask) in enumerate(self.training_run_parent.data.train_data):
-
-			if not self.training_run_parent.training_parameters.use_chain_mask:
-				chain_mask = None
 					
 			batch = Batch(	label_batch, coords_batch, chain_mask, key_padding_mask, 
 							b_idx=b_idx, epoch=self, 
 							use_amp=self.training_run_parent.training_parameters.use_amp, 
-							include_ncaa=self.training_run_parent.training_parameters.include_ncaa,
-							loss_type=self.training_run_parent.training_parameters.loss_type,
-							loss_sum_norm=self.training_run_parent.training_parameters.loss_sum_norm
 						)
 			batch.batch_learn()
 			# normalize by number of valid tokens if computing sum, else it is already normalized
@@ -399,10 +375,10 @@ class Epoch():
 		self.training_run_parent.output.log_epoch_losses(self, self.training_run_parent.train_losses)
 
 		# run validation
-		self.training_run_parent.validation()
+		self.training_run_parent.validation(self)
 
 		# lr scheduler update
-		self.training_run_parent.scheduler.step(self.training_run_parent.val_losses.losses[-1])
+		self.training_run_parent.scheduler.step(self.training_run_parent.val_losses_context.losses[-1])
 
 		# switch representative cluster samples
 		if self.epoch < (self.epochs - 1):
@@ -411,21 +387,21 @@ class Epoch():
 
 
 	def gather_batch_losses(self, batch, normalize=False):
-		self.train_losses["input"].extend_losses(batch.outputs.losses["input"], normalize)
-		self.train_losses["output"].extend_losses(batch.outputs.losses["output"], normalize)
+		self.train_losses.extend_losses(batch.outputs.losses, normalize)
 
 class Batch():
 	def __init__(self, labels, coords, chain_mask, key_padding_mask, 
 					b_idx=None, epoch=None,
-					use_amp=True, auto_regressive=False, temp=0.1, include_ncaa=False,
-					loss_type="sum", loss_sum_norm=2000):
+					use_amp=True, auto_regressive=False, temp=0.1
+				):
 
 		self.labels = labels
 		self.coords = coords 
-		self.chain_mask = chain_mask if chain_mask is not None else torch.zeros(labels.shape, dtype=torch.bool, device=labels.device) 
+		self.chain_mask = chain_mask
 		self.use_amp = use_amp
-		num_aas = 20 if not include_ncaa else 21
-		self.predictions = torch.full(self.labels.shape, 1/num_aas).unsqueeze(-1).expand(-1,-1,num_aas)
+
+		# input is always 21 dim, last dim is mask token
+		self.predictions = F.onehot(labels, 21).float()
 
 		self.key_padding_mask = key_padding_mask
 		self.onehot_mask = torch.zeros(self.key_padding_mask.shape, dtype=torch.bool)
@@ -436,9 +412,6 @@ class Batch():
 		self.use_amp = use_amp
 		self.auto_regressive = auto_regressive
 		self.temp = temp
-
-		self.loss_type = loss_type
-		self.loss_sum_norm = loss_sum_norm
 
 		self.outputs = None
 
@@ -547,35 +520,25 @@ class Batch():
 				ar_output_prediction = None
 
 		# compute one shot also
-
 		output_prediction = model(self.coords, self.predictions, key_padding_mask=self.key_padding_mask, auto_regressive=False)
 
-		return ModelOutputs(output_prediction, ar_output_prediction, 
-							self.predictions, self.labels)
+		return ModelOutputs(output_prediction, ar_output_prediction, self.labels)
 
 class ModelOutputs():
 
-	def __init__(self, output_predictions, ar_output_predictions, input_predictions, 
-				labels):
+	def __init__(self, output_predictions, ar_output_predictions, labels):
 		
-		self.input_predictions = input_predictions
 		self.output_predictions = output_predictions
 		self.ar_output_predictions = ar_output_predictions
 
 		self.labels = labels
 
-		self.valid = self.get_valid()
-
-		self.losses = {
-			"input": Losses(),
-			"output": Losses(), 
-			"ar_output": Losses()
-		}
-
+		self.output_losses = Losses()
+		self.ar_output_losses = Losses()
 
 	def compute_seq_sim(self, prediction):
 		
-		prediction_flat = prediction.contiguous().view(-1, 20) # batch*N x 20
+		prediction_flat = prediction.contiguous().view(-1, prediction.size(-1)) # batch*N x 20
 		labels_flat = self.labels.view(-1) # batch x N --> batch*N,
 
 		seq_predictions = torch.argmax(prediction_flat, dim=-1) # batch*N x 20 --> batch*N,
@@ -586,19 +549,19 @@ class ModelOutputs():
 		
 		return seq_sim
 
-	def compute_cel(self, prediction, num_classes=20):
+	def compute_cel(self, prediction):
 
 		prediction = torch.softmax(prediction, dim=-1)
 
 		# Flatten the tensor to simplify indexing for CEL calculation
-		prediction_flat = prediction.contiguous().view(-1, num_classes)
+		prediction_flat = prediction.contiguous().view(-1, prediciton.size(2))
 		labels_flat = self.labels.view(-1)
 		key_padding_mask_flat = (labels_flat == -1).view(-1)
 
 		# Compute CEL: Use the log of the predicted probability for the true class
 		# Gather the predicted probability for each true class in label_batch
 		true_label_probs = prediction_flat[torch.arange(len(labels_flat)).long(), labels_flat.long()]
-		log_probs = torch.log(true_label_probs + 1e-12)  # Avoid log(0) by adding a small epsilon
+		log_probs = torch.log(true_label_probs + 1e-6)  # Avoid log(0) by adding a small epsilon
 		cel = -log_probs  # Cross-entropy loss for each position
 
 		# Mask out padded tokens (where key_padding_mask is True)
@@ -607,7 +570,7 @@ class ModelOutputs():
 
 		return cel
 
-	def compute_cel_and_seq_sim(self, prediction, loss_function=None, loss_type="sum", sum_norm=2000):
+	def compute_cel_and_seq_sim(self, prediction, loss_function=None, sum_norm=2000):
 		"""
 		Compute the mean cross-entropy loss (CEL) and sequence similarity (accuracy) between
 		the original label batch and the noised & smoothed label batch.
@@ -622,32 +585,18 @@ class ModelOutputs():
 			mean_seq_sim (float): The mean sequence similarity (accuracy) over all valid positions.
 		"""
 
-		cel = loss_function(prediction.view(-1, prediction.size(2)).to(torch.float32), self.labels.view(-1).long()) if loss_function else self.compute_cel(prediction)
-	
-		valid = self.labels.view(-1)!=-1
-		
-		# doing manual calculation because needs to be float32 or get overflow in sum
-		cel_sum = (cel*valid).sum()
-		
-		if loss_type == "sum":
-			cel = cel_sum / sum_norm
-		elif loss_type == "mean":
-			cel = cel_sum / valid.sum()
-
+		cel = loss_function(prediction.view(-1, prediction.size(2)).to(torch.float32), self.labels.view(-1).long())
+		if loss_function.reduction == "sum":
+			cel = cel_sum / norm
 
 		seq_sim = self.compute_seq_sim(prediction)
 
 		return cel, seq_sim
 
-	def get_valid(self):
-		return (self.labels != -1).sum()
-
 	def get_losses(self, loss_function, loss_type="sum", sum_norm=2000):
 
-		for prediction, prediction_loss in zip(	
-												[self.input_predictions, self.output_predictions, self.ar_output_predictions], 
-												
-												[self.losses["input"], self.losses["output"], self.losses["ar_output"]]
+		for prediction, prediction_loss in zip(	[self.output_predictions, self.ar_output_predictions], 
+												[self.losses["output"], self.losses["ar_output"]]
 											):
 
 			# for some reason gives tuple to cel and None to seq sim if do 'cel, seq_sim = self.compute...'
@@ -665,7 +614,6 @@ class Losses():
 		self.seq_sims = []
 
 	def get_avg(self):
-
 
 		avg_loss, avg_seq_sim = 0, 0 # will make None later, but 0 for now since operated on like a float later
 		if None not in self.losses:

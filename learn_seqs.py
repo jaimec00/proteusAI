@@ -99,14 +99,21 @@ def init_args():
 	parser.add_argument("--label_smoothing", default=0.1, type=float, help="percentage of label smoothing to use on the output labels for loss calculation")
 	parser.add_argument("--loss_type", default="mean", type=str, choices=['sum', 'mean'], help="whether to use the 'sum' or the 'mean' for CEL")
 	parser.add_argument("--loss_sum_norm", default=2000, type=int, help="normalization factor for sum loss")
+
+	parser.add_argument("--lr_type", default="custom", type=str, choices=["plateu, custom"], help="LR type")
 	parser.add_argument("--lr_scale", default=0.1, type=float, help="LR scaling factor")
 	parser.add_argument("--lr_patience", default=5, type=int, help="LR patience for scaling down after plateu")
+	parser.add_argument("--lr_initial_min", default=5e-5, type=float,  help="initial lr rate minimum")
+	parser.add_argument("--lr_initial_max", default=1e-4, type=float,  help="initial lr rate maximum")
+	parser.add_argument("--lr_final_min", default=1e-5, type=float,  help="final lr rate minimum")
+	parser.add_argument("--lr_final_max", default=5e-5, type=float,  help="final lr rate maximum")
+	parser.add_argument("--lr_cycle_length", default=7.0, type=float,  help="epochs that make up a cycle")
+
 	parser.add_argument("--use_amp", default=True, type=bool,  help="whether to use automatic mixed precision")
 	parser.add_argument("--use_chain_mask", default=True, type=bool,  help="whether to compute loss only for chain representative of the cluster, or the whole biounit")
 
 	# other
 	parser.add_argument("--temperature", default=0.01, type=float, help="temperature for autoregressive inference (for testing)")
-	parser.add_argument("--training_type", default="wf", type=str, choices=["wf", "onehot", "probs", "self-supervision"],  help="what type of training")
 
 	# input label smoothing
 	parser.add_argument("--initial_min_lbl_smooth_mean", default=3/20, type=float, help="initial minimum input label smoothing")

@@ -15,10 +15,7 @@ import torch.nn.functional as F
 
 class InputPerturbationParameters():
 
-	def __init__(self,  initial_min_lbl_smooth_mean, final_min_lbl_smooth_mean, 
-						max_lbl_smooth_mean,min_lbl_smooth_stdev, max_lbl_smooth_stdev, 
-						min_noise_stdev, initial_max_noise_stdev, final_max_noise_stdev, 
-						lbl_smooth_noise_cycle_length, 
+	def __init__(self,  
 						initial_max_one_hot_injection_mean, final_max_one_hot_injection_mean, 
 						min_one_hot_injection_mean, one_hot_injection_stdev, 
 						one_hot_injection_cycle_length ,
@@ -102,21 +99,6 @@ class InputPerturbationParameters():
 
 		return mean_onehot, stdev_onehot
 
-	def get_lbl_smooth_params(self, epoch):
-
-		decayed_min_lbl_smooth = self.initial_min_lbl_smooth_mean + epoch.stage * (self.final_min_lbl_smooth_mean - self.initial_min_lbl_smooth_mean)
-		mean_lbl_smooth = self.calculate_stage(epoch.epoch, self.lbl_smooth_noise_cycle_length, decayed_min_lbl_smooth, self.max_lbl_smooth_mean, phase_shift=-math.pi/2) # start with low label smoothing (sin function)
-		stdev_lbl_smooth = self.calculate_stage(epoch.epoch, self.lbl_smooth_noise_cycle_length, self.min_lbl_smooth_stdev, self.max_lbl_smooth_stdev, phase_shift=math.pi/2) # start with high stdev to compliment low label smoothing
-
-		return mean_lbl_smooth, stdev_lbl_smooth
-
-	def get_noise_params(self, epoch):
-
-		decayed_max_noise = self.initial_max_noise_stdev - epoch.stage * (self.initial_max_noise_stdev - self.final_max_noise_stdev)
-		stdev_noise = self.calculate_stage(epoch.epoch, self.lbl_smooth_noise_cycle_length, self.min_noise_stdev, decayed_max_noise, phase_shift=math.pi/2) # start with high noise to complement low label smoothing
-
-		return stdev_noise
-
 	def get_input_perturbations(self, epoch):
 
 		mean_onehot, stdev_onehot = self.get_onehot_params(epoch)
@@ -132,57 +114,15 @@ class InputPerturbationParameters():
 
 class InputPerturbations():
 
-	def __init__(self,  onehot_injection_mean, onehot_injection_stdev,
-						noise_stdev, lbl_smooth_mean, lbl_smooth_stdev,
-					):
+	def __init__(self,  MASK_injection_mean, MASK_injection_stdev):
 		
-		self.lbl_smooth_mean = lbl_smooth_mean
-		self.lbl_smooth_stdev = lbl_smooth_stdev
-		self.noise_stdev = noise_stdev
 		self.onehot_injection_mean = onehot_injection_mean
 		self.onehot_injection_stdev = onehot_injection_stdev 
 
 		self.apply_onehot = None in [onehot_injection_mean, onehot_injection_stdev]
 		self.apply_lbl_smooth = None in [lbl_smooth_mean, lbl_smooth_stdev]
 
-	def smooth_and_noise_labels(self, label_batch, num_classes=20):
-		"""
-		Apply label smoothing and noise on a per-position basis for each prediction in the batch.
-
-		Params:
-			label_batch (torch.Tensor): A batch of correct labels with shape (batch_size, N), where each entry is the index of the correct label.
-			mean_lbl_smooth (float): The mean for the Gaussian distribution of label smoothing factors.
-			stdev_lbl_smooth (float): The stdev for the Gaussian distribution of label smoothing factors.
-			stdev_noise (float): The stdev for the Gaussian distribution of noise to add to each position.
-
-		Returns:
-			noised_labels (torch.Tensor): A batch of predictions with label smoothing and noise added, with shape (batch_size, N, 20).
-		"""
-		
-		# Sample label smoothing factors for each position from a Gaussian distribution
-		lbl_smooth_factors = torch.clamp(torch.normal(self.lbl_smooth_mean, self.lbl_smooth_stdev, size=label_batch.shape, device=label_batch.device), min=0.01, max=(num_classes - 1)/num_classes)
-
-		# Apply label smoothing by assigning the smoothed factor to the true label positions
-		one_hot_labels = F.one_hot(torch.clamp(label_batch.long(), min=0), num_classes=num_classes).float().to(label_batch.device)  # Shape: (batch_size, N, num_classes)
-		smoothed_labels = (one_hot_labels * (1 - lbl_smooth_factors.unsqueeze(-1))) + \
-							((1 - one_hot_labels) * (lbl_smooth_factors).unsqueeze(-1) / (num_classes - 1))
-
-		# Generate noise and add it to the smoothed predictions
-		mean_noise = 0 # to make sure we subtract and add sometimes
-		noise_values = torch.normal(mean_noise, self.noise_stdev, size=smoothed_labels.shape, device=label_batch.device)
-		noised_labels = smoothed_labels + noise_values
-
-		# Clamp negative values to zero
-		noised_labels = torch.clamp(noised_labels, min=0.01)
-
-		# Zero out padded tokens and renormalize each row to sum to 1
-		noised_labels = noised_labels.masked_fill(label_batch.unsqueeze(-1) == -1, 0)  # Ignore padding
-		
-		noised_labels = F.normalize(noised_labels, p=1, dim=-1)  # Ensure probabilities sum to 1
-
-		return noised_labels
-
-	def one_hot_injection(self, prediction, labels, key_padding_mask, max_pct=0.90):
+	def MASK_injection(self, prediction, labels, key_padding_mask, max_pct=0.90):
 		'''
 		injects one hot labels into a prediction batch. each sample within a batch gets
 		assigned a percent value of label smoothing, e.g. if the assigned value is 0.5,
@@ -260,9 +200,13 @@ class InputPerturbations():
 	def apply_perturbations(self, batch):
 		
 		if self.apply_onehot:
-			batch.predictions = self.smooth_and_noise_labels(batch.labels)
-		if self.apply_lbl_smooth:
 			batch.predictions, batch.onehot_mask = self.one_hot_injection(batch.predictions, batch.labels, batch.key_padding_mask)
+		# make a percentage of the masked positions have an incorrect class
+		# hard code it for testing, lets say 
+		MASK_tokens = batch.predictions[:, :, 20] == 1 # Z x N
+		selected_MASK_tokens = MASK_tokens & (torch.rand(MASK_tokens.shape) < 0.15) # Z x N
+		rand_tokens = F.one_hot(torch.randint(0,20, MASK_tokens.shape), num_classes=21) # Z x N x 21
+		batch.predictions = torch.where(selected_MASK_tokens.unsqueeze(2),rand_tokens, batch.predictions)
 
 class HyperParameters():
 
@@ -298,7 +242,9 @@ class HyperParameters():
 class TrainingParameters():
 
 	def __init__(self, 	epochs, batch_sizes, seq_sizes, batch_tokens, 
-						accumulation_steps, learning_step, beta1, beta2, epsilon, 
+						accumulation_steps, learning_step, 
+						lr_type, lr_initial_min, lr_initial_max, lr_final_min, lr_final_max, lr_cycle_length,
+						beta1, beta2, epsilon, 
 						dropout, label_smoothing, include_ncaa, 
 						loss_type, loss_sum_norm, lr_scale, lr_patience, 
 						use_amp, use_chain_mask
@@ -309,6 +255,12 @@ class TrainingParameters():
 		self.batch_tokens = batch_tokens
 		self.accumulation_steps = accumulation_steps
 		self.learning_step = learning_step
+		self.lr_type = lr_type 
+		self.lr_initial_min = lr_initial_min
+		self.lr_initial_max = lr_initial_max
+		self.lr_final_min = lr_final_min
+		self.lr_final_max = lr_final_max
+		self.lr_cycle_length = lr_cycle_length
 		self.beta1 = beta1
 		self.beta2 = beta2
 		self.epsilon = epsilon
