@@ -49,32 +49,16 @@ class Output():
 
 		return logger
 
-	def log_hyperparameters(self, training_parameters, hyper_parameters, input_perturbation_parameters, data):
+	def log_hyperparameters(self, training_parameters, hyper_parameters, MASK_injection, data):
 
-		noise_info = textwrap.dedent(f'''
-		input perturbations:
+		MASK_info = textwrap.dedent(f'''
+		MASK injection cycle length: {MASK_injection.MASK_injection_cycle_length} epochs
 
-			label-smoothing and noise cycle length: {input_perturbation_parameters.lbl_smooth_noise_cycle_length}
-
-				initial minimum mean label-smoothing: {input_perturbation_parameters.initial_min_lbl_smooth_mean}
-				final minimum mean label-smoothing: {input_perturbation_parameters.final_min_lbl_smooth_mean}
-				maximum mean label-smoothing: {input_perturbation_parameters.max_lbl_smooth_mean}
-				minimum stdev label-smoothing: {input_perturbation_parameters.min_lbl_smooth_stdev}
-				maximum stdev label-smoothing: {input_perturbation_parameters.max_lbl_smooth_stdev}
-
-				minimum stdev noise: {input_perturbation_parameters.min_noise_stdev}
-				initial maximum stdev noise: {input_perturbation_parameters.initial_max_noise_stdev}
-				final maximum stdev noise: {input_perturbation_parameters.final_max_noise_stdev}
-
-		''')
-
-		onehot_info = textwrap.dedent(f'''
-		one-hot injection cycle length: {input_perturbation_parameters.one_hot_injection_cycle_length} epochs
-
-			minimum one-hot injection mean: {input_perturbation_parameters.min_one_hot_injection_mean}
-			initial maximum one-hot injection mean: {input_perturbation_parameters.initial_max_one_hot_injection_mean}
-			final maximum one-hot injection mean: {input_perturbation_parameters.final_max_one_hot_injection_mean}
-			one-hot injection stdev: {input_perturbation_parameters.one_hot_injection_stdev}
+			initial minimum MASK injection mean: {MASK_injection.initial_min_MASK_injection_mean}
+			initial maximum MASK injection mean: {MASK_injection.initial_max_MASK_injection_mean}
+			final minimum MASK injection mean: {MASK_injection.final_min_MASK_injection_mean}
+			final maximum MASK injection mean: {MASK_injection.final_max_MASK_injection_mean}
+			MASK injection stdev: {MASK_injection.MASK_injection_stdev}
 		''')
 
 		log = 	textwrap.dedent(f'''
@@ -108,26 +92,27 @@ class Output():
 				train clusters: {data.num_train}
 				validation clusters: {data.num_val}
 				test clusters: {data.num_test}
-			batch size (tokens): {training_parameters.batch_tokens}
-			possible batch sizes (samples): {training_parameters.batch_sizes}
-			possible sequence lengths (tokens): {training_parameters.seq_sizes}
-			effective batch size (tokens): {training_parameters.batch_tokens * training_parameters.accumulation_steps}
+			batch size (tokens): {data.batch_tokens}
+			max batch size (samples): {data.batch_size}
+			min sequence length (tokens): {data.min_seq_size}
+			max sequence length (tokens): {data.max_seq_size}
+			effective batch size (tokens): {data.batch_tokens * training_parameters.accumulation_steps}
 
 			epochs: {training_parameters.epochs}
 			learning rate: {training_parameters.learning_step}
-			learning rate plateu scaling factor: {training_parameters.lr_scale}
-			learning rate plateu patience: {training_parameters.lr_patience}
+			learning rate plateau scaling factor: {training_parameters.lr_scale}
+			learning rate plateau patience: {training_parameters.lr_patience}
 			dropout: {training_parameters.dropout}
-			output label-smoothing: {training_parameters.label_smoothing}
+			label-smoothing: {training_parameters.label_smoothing}
 			
-			{noise_info + onehot_info}
+			{MASK_info}
 
 			output directory: {self.out_path}
 		''')
 
 		self.log.info(log)
 
-	def log_epoch(self, epoch, optim, model, input_perturbations):
+	def log_epoch(self, epoch, optim, model, MASK_injection):
 
 		for param_group in optim.param_groups:
 			current_lr = param_group['lr']
@@ -142,35 +127,18 @@ class Output():
 	
 			training inputs contain:
 				
-				mean label smooth: {round(input_perturbations.lbl_smooth_mean if input_perturbations.lbl_smooth_mean is not None else 0.00, 2)}
-				stdev label smooth: {round(input_perturbations.lbl_smooth_stdev if input_perturbations.lbl_smooth_stdev is not None else 0.00, 2)}
-
-				mean noise: 0.00
-				stdev noise: {round(input_perturbations.noise_stdev if input_perturbations.noise_stdev is not None else 0.00, 2)}
-
-				mean one-hot injection: {round(input_perturbations.onehot_injection_mean if input_perturbations.onehot_injection_mean is not None else 0.00, 2)}
-				stdev one-hot injection: {round(input_perturbations.onehot_injection_stdev if input_perturbations.onehot_injection_stdev is not None else 0.00, 2)}
+				mean MASK injection: {round(MASK_injection.MASK_injection_mean if MASK_injection.MASK_injection_mean is not None else 0.00, 2)}
+				stdev MASK injection: {round(MASK_injection.MASK_injection_stdev if MASK_injection.MASK_injection_stdev is not None else 0.00, 2)}
 
 				''')
 			)
 
 	def log_epoch_losses(self, epoch, losses):
 
-		input_loss, input_seq_sim = epoch.train_losses["input"].get_avg()
-		self.log.info(f"train input loss: {str(input_loss.item())}")
-		self.log.info(f"train input seq_sim: {str(input_seq_sim)}\n")		
-		losses["input"].add_losses(input_loss, input_seq_sim)
-
-		output_loss, output_seq_sim = epoch.train_losses["output"].get_avg()
+		output_loss, output_seq_sim = epoch.train_losses.get_avg()
 		self.log.info(f"train output loss: {str(output_loss.item())}")
 		self.log.info(f"train output seq_sim: {str(output_seq_sim)}\n")		
-		losses["output"].add_losses(output_loss, output_seq_sim)
-
-		delta_loss = output_loss - input_loss
-		delta_seq_sim = output_seq_sim - input_seq_sim
-		self.log.info(f"delta train loss: {str(delta_loss.item())}")
-		self.log.info(f"delta train seq_sim: {str(delta_seq_sim)}\n")
-		losses["delta"].add_losses(delta_loss, delta_seq_sim)
+		losses.add_losses(output_loss, output_seq_sim)
 
 	def log_val_losses(self, losses):
 		
@@ -179,22 +147,17 @@ class Output():
 		self.log.info(f"validation loss: {str(loss)}")
 		self.log.info(f"validation seq_sim: {str(seq_sim)}\n")
 
-
-	def plot_training(self, train_losses, val_losses):
+	def plot_training(self, train_losses, val_losses, val_losses_context):
 
 		# convert to numpy arrays
-		for key in self.train_losses.keys():
-			self.train_losses[key].to_numpy()
-		for key in self.val_losses.keys():
-			self.val_losses[key].to_numpy()
-		
+		for losses in [train_losses, val_losses, val_losses_context]:
+			for key in losses.keys():
+				losses[key].to_numpy()
 
 		# Create the plot
-		plt.plot([i + 1 for i in range(len(train_losses["output"].losses))], train_losses["output"].losses, marker='o', color='red', label="Training Output")
-		plt.plot([i + 1 for i in range(len(train_losses["input"].losses))], train_losses["input"].losses, marker='o', color='yellow', label="Training Input")
-		plt.plot([i + 1 for i in range(len(train_losses["delta"].losses))], train_losses["delta"].losses, marker='o', color='orange', label="Delta Training")
-		plt.plot([i + 1 for i in range(len(val_losses["perturbation"].losses))], val_losses["perturbation"].losses, marker='o', color='blue', label="Validation Output (w/ perturbations)")
-		plt.plot([i + 1 for i in range(len(val_losses["no_perturbation"].losses))], val_losses["no_perturbation"].losses, marker='o', color='purple', label="Validation Output (w/o perturbations)")
+		plt.plot([i + 1 for i in range(len(train_losses.losses))], train_losses.losses, marker='o', color='red', label="Training Output")
+		plt.plot([i + 1 for i in range(len(val_losses.losses))], val_losses.losses, marker='o', color='blue', label="Validation Output (no context)")
+		plt.plot([i + 1 for i in range(len(val_losses_context.losses))], val_losses_context.losses, marker='o', color='orange', label="Validation Output (w/ context)")
 		
 		# Adding title and labels
 		plt.title('Cross Entropy Loss vs. Epochs')
@@ -214,11 +177,9 @@ class Output():
 
 		plt.figure()
 
-		plt.plot([i + 1 for i in range(len(train_losses["output"].seq_sims))], train_losses["output"].seq_sims, marker='o', color='red', label="Training Output")
-		plt.plot([i + 1 for i in range(len(train_losses["input"].seq_sims))], train_losses["input"].seq_sims, marker='o', color='yellow', label="Training Input")
-		plt.plot([i + 1 for i in range(len(train_losses["delta"].seq_sims))], train_losses["delta"].seq_sims, marker='o', color='orange', label="Training Delta")
-		plt.plot([i + 1 for i in range(len(val_losses["perturbation"].seq_sims))], val_losses["perturbation"].seq_sims, marker='o', color='blue', label="Validation Output (w/ perturbations)")
-		plt.plot([i + 1 for i in range(len(val_losses["perturbation"].seq_sims))], val_losses["no_perturbation"].seq_sims, marker='o', color='purple', label="Validation Output (w/o perturbations)")
+		plt.plot([i + 1 for i in range(len(train_losses.seq_sims))], train_losses.seq_sims, marker='o', color='red', label="Training Output")
+		plt.plot([i + 1 for i in range(len(val_losses.seq_sims))], val_losses.seq_sims, marker='o', color='blue', label="Validation Output (no context)")
+		plt.plot([i + 1 for i in range(len(val_losses_context.seq_sims))], val_losses_context.seq_sims, marker='o', color='orange', label="Validation Output (w/ context)")
 		
 		# Adding title and labels
 		plt.title('Mean Sequence Similarity vs. Epochs')

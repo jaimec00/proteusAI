@@ -3,13 +3,13 @@ d_model: 512  # dimensionality of input embeddings
 min_wl: 3.7  # minimum wl to use in wavelength sampling
 max_wl: 20.0  # maximum wl to use in wavelength sampling
 base_wl: 20.0  # minimum base to use in wavelength sampling
-d_hidden_wl: 1024
-hidden_layers_wf: 0
+d_hidden_we: 1024
+hidden_layers_we: 0
 
 d_hidden_aa: 1024
 hidden_layers_aa: 0
 
-dualcoder_layers: 4 # number of dualcoder layers
+encoder_layers: 4 # number of dualcoder layers
 num_heads: 4  # number of attention heads to perform the training with
 min_spread: 3.0
 max_spread: 6.0
@@ -24,15 +24,14 @@ temperature: 0.1  # temperature for autoregressive inference (for testing)
 # Training configuration
 num_train: 256  # number of training samples to use; -1 means all available
 num_val: -1  # number of validation samples to use; -1 means all available
-num_test: -1  # number of test samples to use; -1 means all available
-epochs: 30  # number of epochs
+num_test: 128  # number of test samples to use; -1 means all available
+epochs: 3  # number of epochs
 
 # want as few combinations as possible to speed up triton autotuning
-batch_sizes: [1, 2, 4, 8, 16, 32, 64, 128]  # possible samples per batch
-seq_sizes: [128, 256, 512, 1024, 2048, 4096, 8192, 10000] # possible sequence lengths
-batch_tokens: 10000 # number of valid tokens per batch 
-max_tokens: 10000  # maximum number of tokens
-include_ncaa: False # whether to include non-canonical amino acids in loss calculation
+max_batch_size: 128  # possible samples per batch
+min_seq_sizes: 512 # possible sequence lengths
+max_seq_sizes: 16384 # possible sequence lengths
+batch_tokens: 16384 # number of valid tokens per batch 
 
 accumulation_steps: 4  # grad accumulation; how many batches to process before learning step
 learning_step: 0.0001  # learning rate
@@ -57,12 +56,12 @@ use_amp: True  # whether to use automatic mixed precision
 
 # ------------------------------------------------------------------------------
 
-# Input one-hot injection
-min_one_hot_injection_mean: 0.00  # minimum mean percentage of one-hot label injection in training
-initial_max_one_hot_injection_mean: 0.15  # initial maximum mean percentage of one-hot label injection in training
-final_max_one_hot_injection_mean: 0.05  # final maximum mean percentage of one-hot label injection in training
-one_hot_injection_stdev: 0.05  # stdev percentage of one-hot label injection in training
-one_hot_injection_cycle_length: 7.4  # input one-hot injection cycle length
+# Input MASK injection
+min_MASK_injection_mean: 0.00  # minimum mean percentage of one-hot label injection in training
+initial_max_MASK_injection_mean: 0.15  # initial maximum mean percentage of one-hot label injection in training
+final_max_MASK_injection_mean: 0.05  # final maximum mean percentage of one-hot label injection in training
+MASK_injection_stdev: 0.05  # stdev percentage of one-hot label injection in training
+MASK_injection_cycle_length: 7.4  # input one-hot injection cycle length
 
 # ------------------------------------------------------------------------------
 

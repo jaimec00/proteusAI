@@ -2,21 +2,20 @@
 '''
 author: 		jaime cardenas
 title:  		train_utils.py
-description:	utility classes for training
+description:	utility classes for training proteusAI
 '''
 # ----------------------------------------------------------------------------------------------------------------------
 
 import torch
 import torch.optim.lr_scheduler as lr_scheduler
 from torch.amp import autocast, GradScaler
-import torch.nn.functional as F
+import torch.nn.functional.one_hot as onehot
 import torch.nn.CrossEntropyLoss as CEL
 
 from tqdm import tqdm
 
 from proteusAI import proteusAI
-from utils.parameter_utils import (	HyperParameters, TrainingParameters, 
-									InputPerturbationParameters, InputPerturbations )
+from utils.parameter_utils import HyperParameters, TrainingParameters, MASK_injection
 from utils.io_utils import Output
 from utils.data_utils import DataHolder
 
@@ -25,16 +24,12 @@ from utils.data_utils import DataHolder
 class TrainingRun():
 	'''
 	the main class for training. holds all of the configuration arguments, and organnizes them into hyper-parameters, 
-	training parameters, input perturbation parameters, data, and output objects
+	training parameters, MASK_injection, data, and output objects
 	also orchestrates the setup of training, training itself, validation, testing, outputs, etc.
 
 	Attributes:
 		hyper_parameters (HyperParameters): store model hyper_parameters
 		training_parameters (TrainingParameters): stores training parameters
-		input_perturbation_parameters (InputPerturbationParameters): stores the input perturbation parameters (noise, 
-																		label smooth, on-hot injection), also contain
-																		methods to calculate values depending on stage and
-																		also to apply these perturbations 
 		data (DataHolder): object to store data (contains object os Data type, inherets from Dataset), splits into train, 
 							val, and test depending on arguments, also capable of loading the Data into DataLoader for 
 							easy integration
@@ -52,7 +47,7 @@ class TrainingRun():
 
 		self.hyper_parameters = HyperParameters(args.d_model,
 												args.min_wl, args.max_wl, args.base_wl, 
-												args.d_hidden_wl, args.hidden_layers_wl, 
+												args.d_hidden_we, args.hidden_layers_we, 
 												args.d_hidden_aa, args.hidden_layers_aa,
 												args.dualcoder_layers, args.num_heads,
 												args.min_spread, args.max_spread, args.base_spread,
@@ -67,20 +62,22 @@ class TrainingRun():
 														args.lr_scale, args.lr_patience, args.lr_step, # for plataeu
 														args.beta1, args.beta2, args.epsilon, # for adam optim
 														args.dropout, args.label_smoothing,
-														args.loss_type, args.loss_sum_norm, 
+														args.loss_type, args.loss_scale, 
 														args.use_amp, args.use_chain_mask,
 													)
 		
-		self.MASK_injection = MASK_injection(	args.initial_max_MASK_injection_mean, args.final_max_MASK_injection_mean, 
-												args.min_MASK_injection_mean, args.MASK_injection_stdev, 
-												args.MASK_injection_cycle_length, args.randAA_pct
+		self.MASK_injection = MASK_injection(	args.initial_min_MASK_injection_mean, args.initial_min_MASK_injection_mean, 
+												args.initial_max_MASK_injection_mean, args.final_max_MASK_injection_mean, 
+												args.MASK_injection_stdev, 
+												args.MASK_injection_cycle_length, args.randAA_pct, args.trueAA_pct # rand and true AA pct are not implemented, want to see how the method does by itself first
 											)
 		
 		self.data = DataHolder(args.data_path, args.num_train, args.num_val, args.num_test, args.batch_tokens, args.max_batch_size, args.max_seq_size, args.min_seq_size)
 		self.output = Output(args.out_path, args.loss_plot, args.seq_plot, args.weights_path, args.write_dot)
 
 		self.train_losses = Losses()
-		self.val_losses = Losses()
+		self.val_losses = Losses() # validation with all tokens being MASK
+		self.val_losses_context = Losses() # validation with the same MASK injection as the training batches from current epoch
 		self.test_losses = Losses()
 
 		self.gpu = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
@@ -104,7 +101,7 @@ class TrainingRun():
 		self.setup_loss_function()
 		self.scaler = GradScaler(self.gpu) if self.gpu is not None else None
 
-		self.output.log_hyperparameters(self.training_parameters, self.hyper_parameters, self.input_perturbation_parameters, self.data)
+		self.output.log_hyperparameters(self.training_parameters, self.hyper_parameters, self.MASK_injection, self.data)
 
 	def setup_model(self):
 		'''
@@ -143,6 +140,7 @@ class TrainingRun():
 								self.training_parameters.dropout,
 								include_ncaa=self.training_parameters.include_ncaa
 							)
+
 		self.model.to(self.gpu)
 
 		if self.hyper_parameters.use_model is not None:
@@ -181,7 +179,7 @@ class TrainingRun():
 
 		self.output.log.info("loading scheduler...")
 
-		def custom_lr(epoch):
+		def cyclic_lr(epoch):
 
 			stage = epoch / self.training_parameters.epochs
 			current_min = self.training_parameters.lr_initial_min - stage*(self.training_parameters.lr_initial_min - self.training_parameters.lr_final_min)
@@ -194,10 +192,10 @@ class TrainingRun():
 			
 			return lr
 		
-		if self.training_parameters.lr_type == "plateu":
+		if self.training_parameters.lr_type == "plateau":
 			self.scheduler = lr_scheduler.ReduceLROnPlateau(self.optim, mode='min', factor=self.training_parameters.lr_scale, patience=self.training_parameters.lr_patience) 
 		else:
-			self.scheduler = lr_scheduler.LambdaLR(self.optim, custom_lr)
+			self.scheduler = lr_scheduler.LambdaLR(self.optim, cyclic_lr)
 
 	def setup_loss_function(self):
 		'''
@@ -245,7 +243,15 @@ class TrainingRun():
 		self.output.plot_training(self.train_losses, self.val_losses)
 		self.output.save_model(self.model)
 				
-	def validation(self, epoch):
+	def all_MASK_validation(self):
+		'''run validation with no AA context'''
+		self.validation()
+
+	def batch_MASK_validation(self, epoch):
+		'''run validation with the same context as the training batches from the current epoch'''
+		self.validation(epoch)
+
+	def validation(self, epoch=None):
 		
 		self.output.log.info(f"running validation w/ no perturbations...\n")
 		
@@ -257,13 +263,20 @@ class TrainingRun():
 		# turn off gradient calculation
 		with torch.no_grad():
 
+			# progress bar
 			val_pbar = tqdm(total=len(self.data.val_data), desc="epoch_validation_progress", unit="step")
+			
 			# loop through validation batches
 			for label_batch, coords_batch, chain_mask, key_padding_mask in self.data.val_data:
 					
 				batch = Batch(	label_batch, coords_batch, chain_mask, key_padding_mask, 
-								use_amp=False, auto_regressive=False
+								epoch=epoch, use_amp=False, auto_regressive=False
 							)
+
+				if epoch is not None:
+					self.MASK_injection.MASK_tokens(batch)
+				else:
+					self.MASK_all(batch)
 
 				batch.batch_forward(self.model, self.loss_function, self.gpu)
 
@@ -273,12 +286,12 @@ class TrainingRun():
 
 				val_pbar.update(1)
 
-			self.val_losses.add_losses(*val_losses.get_avg())
+			if epoch is None:
+				self.val_losses.add_losses(*val_losses.get_avg())
+			else:
+				self.val_losses_context.add_losses(*val_losses.get_avg())
+
 			self.output.log_val_losses(val_losses)
-
-			self.val_losses["perturbations"].add_losses(*val_losses_perturbations.get_avg())
-			self.output.log_val_losses(val_losses_perturbations)
-
 
 	def test(self):
 
@@ -293,14 +306,14 @@ class TrainingRun():
 		# turn off gradient calculation
 		with torch.no_grad():
 
-
+			# progress bar
 			test_pbar = tqdm(total=len(self.data.test_data), desc="test_progress", unit="step")
 
 			# loop through testing batches
 			for label_batch, coords_batch, chain_mask, key_padding_mask in self.data.test_data:
 					
 				batch = Batch(label_batch, coords_batch, chain_mask, key_padding_mask, 
-								 use_amp=False, 
+								use_amp=False, 
 								auto_regressive=True, 
 								temp=self.hyper_parameters.temperature, 
 							)
@@ -321,6 +334,9 @@ class TrainingRun():
 		if None not in test_ar_seq_sims:
 			self.output.log.info(f"test auto-regressive sequence similarity: {sum(test_ar_seq_sims) / len(test_ar_seq_sims)}")
 
+	def MASK_all(self, batch):
+
+		batch.predictions = onehot(torch.full((batch.size(0), batch.size(1)), 20, device=batch.predictions.device), 21)
 
 class Epoch():	
 	def __init__(self, epoch, training_run):
@@ -331,13 +347,8 @@ class Epoch():
 		self.epochs = self.training_run_parent.training_parameters.epochs
 		self.stage = epoch / self.epochs
 
-		self.train_losses = {
-								"input": Losses(),
-								"output": Losses()
-		}
+		self.losses = Losses()
 		
-		self.input_perturbations = self.training_run_parent.input_perturbation_parameters.get_input_perturbations(self)
-
 	def epoch_loop(self):
 		'''
 		a single training loop through one epoch. sets up epoch input perturbation values depending on the stage (calculated in Epoch.__init__)
@@ -360,14 +371,20 @@ class Epoch():
 		epoch_pbar = tqdm(total=len(self.training_run_parent.data.train_data), desc="epoch_progress", unit="step")
 		for b_idx, (label_batch, coords_batch, chain_mask, key_padding_mask) in enumerate(self.training_run_parent.data.train_data):
 					
+			# instantiate this batch
 			batch = Batch(	label_batch, coords_batch, chain_mask, key_padding_mask, 
 							b_idx=b_idx, epoch=self, 
 							use_amp=self.training_run_parent.training_parameters.use_amp, 
 						)
-			batch.batch_learn()
-			# normalize by number of valid tokens if computing sum, else it is already normalized
-			self.gather_batch_losses(batch, normalize=self.training_run_parent.loss_function.reduction=="sum")
 
+			# inject MASK tokens for prediction
+			self.training_run_parent.MASK_injection.MASK_tokens(batch)
+
+			# learn
+			batch.batch_learn()
+
+			# compile batch losses for logging
+			self.gather_batch_losses(batch, normalize=self.training_run_parent.loss_function.reduction=="sum")
 
 			epoch_pbar.update(1)
 		
@@ -401,7 +418,7 @@ class Batch():
 		self.use_amp = use_amp
 
 		# input is always 21 dim, last dim is mask token
-		self.predictions = F.onehot(labels, 21).float()
+		self.predictions = onehot(labels, 21).float()
 
 		self.key_padding_mask = key_padding_mask
 		self.onehot_mask = torch.zeros(self.key_padding_mask.shape, dtype=torch.bool)
@@ -570,7 +587,7 @@ class ModelOutputs():
 
 		return cel
 
-	def compute_cel_and_seq_sim(self, prediction, loss_function=None, sum_norm=2000):
+	def compute_cel_and_seq_sim(self, prediction, loss_function=None, scale=1/2000):
 		"""
 		Compute the mean cross-entropy loss (CEL) and sequence similarity (accuracy) between
 		the original label batch and the noised & smoothed label batch.
@@ -587,7 +604,7 @@ class ModelOutputs():
 
 		cel = loss_function(prediction.view(-1, prediction.size(2)).to(torch.float32), self.labels.view(-1).long())
 		if loss_function.reduction == "sum":
-			cel = cel_sum / norm
+			cel = cel_sum * scale
 
 		seq_sim = self.compute_seq_sim(prediction)
 
@@ -596,11 +613,11 @@ class ModelOutputs():
 	def get_losses(self, loss_function, loss_type="sum", sum_norm=2000):
 
 		for prediction, prediction_loss in zip(	[self.output_predictions, self.ar_output_predictions], 
-												[self.losses["output"], self.losses["ar_output"]]
+												[self.output_losses, self.ar_output_losses]
 											):
 
 			# for some reason gives tuple to cel and None to seq sim if do 'cel, seq_sim = self.compute...'
-			cel_and_seq_sim = self.compute_cel_and_seq_sim(prediction, loss_function, loss_type, sum_norm) if prediction is not None else (None, None)
+			cel_and_seq_sim = self.compute_cel_and_seq_sim(prediction, loss_function) if prediction is not None else (None, None)
 			cel, seq_sim = cel_and_seq_sim
 			prediction_loss.add_losses(cel, seq_sim)
 
@@ -633,6 +650,6 @@ class Losses():
 		self.seq_sims.extend(other.seq_sims)
 
 	def to_numpy(self):
+		'''utility when plotting losses w/ matplotlib'''
 		self.losses = [loss.detach().to("cpu").numpy() for loss in self.losses if isinstance(loss, torch.Tensor)]
-
 

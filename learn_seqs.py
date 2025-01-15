@@ -56,15 +56,15 @@ def init_args():
 	parser.add_argument("--min_wl", default=3.7, type=float, help="minimum wavelength to use in wavelength sampling")
 	parser.add_argument("--max_wl", default=20.0, type=float, help="maximum wavelength to use in wavelength sampling")
 	parser.add_argument("--base_wl", default=20.0, type=float, help="base to use in wavelength sampling")
-	parser.add_argument("--d_hidden_wl", default=1024, type=int, help="hidden dimensions in post wavefunction embedding MLP")
-	parser.add_argument("--hidden_layers_wl", default=0, type=int, help="number of hidden layers in post wavefunction embedding MLP")
+	parser.add_argument("--d_hidden_we", default=1024, type=int, help="hidden dimensions in post wavefunction embedding MLP")
+	parser.add_argument("--hidden_layers_we", default=0, type=int, help="number of hidden layers in post wavefunction embedding MLP")
 
 	# aa embedding (just an MLP)
 	parser.add_argument("--d_hidden_aa", default=1024, type=int, help="hidden dimensions in AA embedding MLP")
 	parser.add_argument("--hidden_layers_aa", default=0, type=int, help="number hidden layers in AA embedding MLP")
 	
 	# dualcoder
-	parser.add_argument("--dualcoder_layers", default=4, type=int, help="number of dualcoder layers")
+	parser.add_argument("--encoder_layers", default=4, type=int, help="number of encoder layers")
 	parser.add_argument("--num_heads", default=8, type=int, help="number of attention heads")
 	parser.add_argument("--min_spread", default=3.0, type=float, help="minimum spread to use for geometric attention")
 	parser.add_argument("--max_spread", default=8.0, type=float, help="maximum spread to use for geometric attention")
@@ -82,11 +82,10 @@ def init_args():
 	parser.add_argument("--epochs", default=50, type=int, help="number of epochs")
 
 	# input restrictions	
-	parser.add_argument("--batch_sizes", default=[1, 2, 4, 8, 16], type=list, help="possible number of samples per batch, minimizes triton recompilation overhead")
-	parser.add_argument("--seq_sizes", default=[1024, 4096, 8192, 10000], type=list, help="possible sequence lengths, minimizes triton recompilation overhead")
-	parser.add_argument("--batch_tokens", default=10000, type=int, help="target number of tokens per batch")
-	parser.add_argument("--max_tokens", default=512, type=int, help="maximum number of tokens per sample")
-	parser.add_argument("--include_ncaa", default=False, type=bool, help="if False, masks out non-canonical AA, else X is a valid prediction")
+	parser.add_argument("--max_batch_size", default=128, type=list, help="possible number of samples per batch, minimizes triton recompilation overhead")
+	parser.add_argument("--min_seq_sizes", default=512, type=list, help="possible sequence lengths, minimizes triton recompilation overhead")
+	parser.add_argument("--max_seq_sizes", default=16384, type=list, help="possible sequence lengths, minimizes triton recompilation overhead")
+	parser.add_argument("--batch_tokens", default=16384, type=int, help="target number of tokens per batch")
 	
 	# learning parameters
 	parser.add_argument("--accumulation_steps", default=2, type=int, help="grad accumulation; how many batches to process before learning step")
@@ -115,36 +114,15 @@ def init_args():
 	# other
 	parser.add_argument("--temperature", default=0.01, type=float, help="temperature for autoregressive inference (for testing)")
 
-	# input label smoothing
-	parser.add_argument("--initial_min_lbl_smooth_mean", default=3/20, type=float, help="initial minimum input label smoothing")
-	parser.add_argument("--final_min_lbl_smooth_mean", default=17/20, type=float, help="final minimum input label smoothing")
-	parser.add_argument("--max_lbl_smooth_mean", default=21/20, type=float, help="maximum input label smoothing")
-
-	parser.add_argument("--min_lbl_smooth_stdev", default=1/20, type=float, help="minimum input label smoothing stdev")
-	parser.add_argument("--max_lbl_smooth_stdev", default=4/20, type=float, help="maximum input label smoothing stdev")
-
-	# input noise
-	parser.add_argument("--min_noise_stdev", default=0.1, type=float, help="minimum stdev of noise to apply to inputs")
-	parser.add_argument("--initial_max_noise_stdev", default=0.4, type=float, help="initial maximum stdev of noise to apply to inputs")
-	parser.add_argument("--final_max_noise_stdev", default=0.2, type=float, help="final maximum stdev of noise to apply to inputs")
-
-	# label smooth and noise cycle length (oscillate with phase shift of pi; in sync)
-	parser.add_argument("--lbl_smooth_noise_cycle_length", default=5.3, type=float, help="cycle length of label smoothing and noise oscillations (non-integers minimize the chance of sampling the same values every cycle)")
-
 	# input one-hot injection
-	parser.add_argument("--min_one_hot_injection_mean", default=0.15, type=float, help="minimum mean percentage of one-hot label injection in training")
-	parser.add_argument("--initial_max_one_hot_injection_mean", default=0.8, type=float, help="initial maximum mean percentage of one-hot label injection in training")
-	parser.add_argument("--final_max_one_hot_injection_mean", default=0.25, type=float, help="final maximum mean percentage of one-hot label injection in training")
-
-	parser.add_argument("--one_hot_injection_stdev", default=0.25, type=float, help="stdev percentage of one-hot label injection in training")
+	parser.add_argument("--initial_min_MASK_injection_mean", default=0.05, type=float, help="initial minimum mean percentage of one-hot label injection in training")
+	parser.add_argument("--initial_max_MASK_injection_mean", default=0.1, type=float, help="initial maximum mean percentage of one-hot label injection in training")
+	parser.add_argument("--final_min_MASK_injection_mean", default=0.9, type=float, help="final minimum mean percentage of one-hot label injection in training")
+	parser.add_argument("--final_max_MASK_injection_mean", default=0.95, type=float, help="final maximum mean percentage of one-hot label injection in training")
+	parser.add_argument("--MASK_injection_stdev", default=0.05, type=float, help="stdev percentage of one-hot label injection in training")
 
 	# cycle length of one-hot injection
-	parser.add_argument("--one_hot_injection_cycle_length", default=4.3, type=float, help="input one-hot injection cycle length. operates at different frequency than label smooth and noise cycles")
-
-	# when to start gradually introducing self-supervision, also when to complete the decoder expansion
-	parser.add_argument("--phase_split", default=0.3, type=float, help="	ratio of progressive learning phase (supervised learning to real-world "\
-																						"inputs (mix of supervision and self-supervision). "\
-																						"also when to finish the decoder layer expansion.")
+	parser.add_argument("--MASK_injection_cycle_length", default=4.3, type=float, help="input one-hot injection cycle length. operates at different frequency than label smooth and noise cycles")
 
 	# output
 	parser.add_argument("--out_path", default="output", type=Path, help="path to store output, such as plots and weights file.")

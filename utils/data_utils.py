@@ -213,6 +213,9 @@ class Data():
 		if biounit_coords==[] or biounit_labels==[]:
 			return None
 
+		if biounit_labels > self.max_seq_len:
+			return None
+
 		biounit_coords = torch.cat(biounit_coords, dim=0)
 		biounit_labels = torch.cat(biounit_labels, dim=0)
 

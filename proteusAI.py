@@ -91,7 +91,7 @@ class WavefunctionEmbedding(nn.Module):
 		# an identity after softmax so that at the start, each index is basically just taking into account the
 		# wavelength of its corresponding index
 		wavelength_weights = torch.softmax(self.wavelength_weights, dim=1)
-		wavelengths = torch.matmul(wavelength_weights, self.wavelengths.to().unsqueeze(1)).squeeze(1) # d_model//2 x d_model//2 @ d_model//2 x 1 -> d_model//2
+		wavelengths = torch.matmul(wavelength_weights, self.wavelengths.unsqueeze(1)).squeeze(1) # d_model//2 x d_model//2 @ d_model//2 x 1 -> d_model//2
 		wavenumbers = 2 * torch.pi / wavelengths
 
 		# convert to wf features if not already precomputed
@@ -180,95 +180,39 @@ class GeoAttention(nn.Module):
 		# return
 		return out # batch x N x d_model
 
-class GeoAttention_Unit(nn.Module):
-	def __init__(self, d_model=512, nhead=8,  min_spread=1, max_spread=6, base=20, min_rbf=0.1, max_rbf=0.9, dropout=0.0):
-		super(GeoAttention_Unit, self).__init__()
-		'''
-		utility class that combines attention and add+norm w/ dropout
-		'''
-		self.attn = GeoAttention(d_model, nhead, min_spread=min_spread, max_spread=max_spread, base=base, min_rbf=min_rbf, max_rbf=max_rbf, dropout=dropout)
-		self.norm = nn.LayerNorm(d_model)
-		self.dropout = nn.Dropout(dropout)
-
-	def forward(self, q, k, v, coords, key_padding_mask=None):
-		
-		# multi-head gaussian attention
-		o = self.attn(	q, k, v,
-						coords=coords,
-						key_padding_mask=key_padding_mask,
-					)
-
-		# residual connection with dropout
-		o = v + self.dropout(o)
-
-		# norm
-		o = self.norm(o)
-
-		return o
-
-class DualCoder(nn.Module):
+class Encoder(nn.Module):
 	'''
 	interleaved cross-attention module, structure queries sequence to update self, sequence queries structure to update itself
 	'''
 
 	def __init__(self, d_model=512, d_hidden=1024, hidden_layers=0, nhead=8, min_spread=1, max_spread=6, base=20, min_rbf=0.1, max_rbf=0.9, dropout=0.0):
-		super(DualCoder, self).__init__()
+		super(Encoder, self).__init__()
 
 		# Self-attention layers
-		self.wf_self_attn = GeoAttention_Unit(d_model, nhead, min_spread=min_spread, max_spread=max_spread, base=base, min_rbf=min_rbf, max_rbf=max_rbf, dropout=dropout)
-		self.aa_self_attn = GeoAttention_Unit(d_model, nhead, min_spread=min_spread, max_spread=max_spread, base=base, min_rbf=min_rbf, max_rbf=max_rbf, dropout=dropout)
-		
-		# cross attention layers
-		self.wf_cross_attn = GeoAttention_Unit(d_model, nhead, min_spread=min_spread, max_spread=max_spread, base=base, min_rbf=min_rbf, max_rbf=max_rbf, dropout=dropout)
-		self.aa_cross_attn = GeoAttention_Unit(d_model, nhead, min_spread=min_spread, max_spread=max_spread, base=base, min_rbf=min_rbf, max_rbf=max_rbf, dropout=dropout)
+		self.attn = GeoAttention(d_model, nhead, min_spread=min_spread, max_spread=max_spread, base=base, min_rbf=min_rbf, max_rbf=max_rbf, dropout=dropout)
+		self.attn_norm = nn.LayerNorm(d_model)
+		self.attn_dropout = nn.Dropout(dropout)
 
 		# Feed-forward network
-		self.wf_ffn = MLP(d_model, d_model, d_hidden=d_hidden, hidden_layers=hidden_layers, dropout=dropout)
-		self.aa_ffn = MLP(d_model, d_model, d_hidden=d_hidden, hidden_layers=hidden_layers, dropout=dropout)
+		self.ffn = MLP(d_model, d_model, d_hidden=d_hidden, hidden_layers=hidden_layers, dropout=dropout)
+		self.ffn_norm = nn.LayerNorm(d_model)
+		self.ffn_dropout = nn.Dropout(dropout)
 
-		self.wf_ffn_norm = nn.LayerNorm(d_model)
-		self.wf_ffn_dropout = nn.Dropout(dropout)
+	def forward(self, aas, coords, key_padding_mask=None):
 
-		self.aa_ffn_norm = nn.LayerNorm(d_model)
-		self.aa_ffn_dropout = nn.Dropout(dropout)
+		aas2 = self.attn(	aas, aas, aas,
+							coords=coords,
+							key_padding_mask=key_padding_mask,
+						)
 
-	def forward(self, wf, aas, coords, key_padding_mask=None):
-
-		#### wf self attention ####
-		wf2 = self.wf_self_attn(	wf, wf, wf,
-									coords=coords,
-									key_padding_mask=key_padding_mask,
-								)
-		
-		#### aa self attention ####
-		aas2 = self.aa_self_attn(	aas, aas, aas,
-									coords=coords,
-									key_padding_mask=key_padding_mask,
-								)
-
-		#### aa as K cross attention ####
-		wf = self.wf_cross_attn(	aas2, aas2, wf2,
-									coords=coords,
-									key_padding_mask=key_padding_mask,
-								)
-
-		#### wf as K cross attention ####
-		aas = self.aa_cross_attn(	wf2, wf2, aas2,
-									coords=coords,
-									key_padding_mask=key_padding_mask,
-								)
+		aas = self.attn_norm(aas + self.attn_dropout(aas2))
 
 		# Feed-forward network for wavefunction
-		wf2 = self.wf_ffn(wf)
-		wf = wf + self.wf_ffn_dropout(wf2)
-		wf = self.wf_ffn_norm(wf)
-
-		# Feed-forward network for AAs
-		aas2 = self.aa_ffn(aas)
-		aas = aas + self.aa_ffn_dropout(aas2)
-		aas = self.aa_ffn_norm(aas)
+		aas2 = self.ffn(aas)
+		aas = aas + self.ffn_dropout(aas2)
+		aas = self.ffn_norm(aas)
 		
-		return wf, aas
+		return aas
 
 class proteusAI(nn.Module):
 	'''
@@ -309,19 +253,17 @@ class proteusAI(nn.Module):
 		self.aa_embedding = AminoAcidEmbedding(21, d_model, d_hidden_aa, hidden_layers_aa, dropout)
 
 		# dual coders
-		self.dual_coders = nn.ModuleList([DualCoder(d_model, d_hidden_attn, hidden_layers_attn, n_head, min_spread, max_spread, base_spreads, min_rbf, max_rbf, dropout) for _ in range(dualcoder_layers)])
+		self.dual_coders = nn.ModuleList([Encoder(d_model, d_hidden_attn, hidden_layers_attn, n_head, min_spread, max_spread, base_spreads, min_rbf, max_rbf, dropout) for _ in range(dualcoder_layers)])
 
 		# map to aa probs
 		self.out_proj = nn.Linear(d_model, 20)
 
-	def dualcode(self, wf, aas, coords, key_padding_mask):
+	def encode(self, aas, coords, key_padding_mask):
 
-		for dual_coder in self.dual_coders:
-			wf, aas = dual_coder(wf, aas, coords, key_padding_mask)
+		for encoder in self.encoders:
+			aas = encoder(aas, coords, key_padding_mask)
 
-		# note that wf is the output, since the original wf is more 
-		# representative of the unique protein than the initial aa probabilites
-		seq_probs = self.out_proj(wf)
+		seq_probs = self.out_proj(aas)
 
 		return seq_probs
 
@@ -401,8 +343,11 @@ class proteusAI(nn.Module):
 		# simple mlp to get aas to target feature space
 		aas = self.aa_embedding(aas)
 
+		# simple addition of WE and AA embeddings
+		aas = aas + wf
+
 		# dual coder to communicate structure and sequence
-		seq_probs = self.dualcode(wf, aas, coords, key_padding_mask) # batch x N x d_model (returns aa probability logits)
+		seq_probs = self.encode(aas, coords, key_padding_mask) # batch x N x d_model (returns aa probability logits)
 
 		return seq_probs
 
