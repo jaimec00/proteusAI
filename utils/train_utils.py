@@ -51,7 +51,6 @@ class TrainingRun():
 												args.d_hidden_aa, args.hidden_layers_aa,
 												args.dualcoder_layers, args.num_heads,
 												args.min_spread, args.max_spread, args.base_spread,
-												args.min_rbf, args.max_rbf, 
 												args.d_hidden_attn, args.hidden_layers_attn, 
 												args.temperature, args.use_model )
 		
@@ -132,8 +131,6 @@ class TrainingRun():
 								self.hyper_parameters.min_spread,
 								self.hyper_parameters.max_spread,
 								self.hyper_parameters.base_spread,
-								self.hyper_parameters.min_rbf,
-								self.hyper_parameters.max_rbf,
 								self.hyper_parameters.d_hidden_attn,
 								self.hyper_parameters.hidden_layers_attn,
 

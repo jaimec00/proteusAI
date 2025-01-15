@@ -69,8 +69,6 @@ def init_args():
 	parser.add_argument("--min_spread", default=3.0, type=float, help="minimum spread to use for geometric attention")
 	parser.add_argument("--max_spread", default=8.0, type=float, help="maximum spread to use for geometric attention")
 	parser.add_argument("--base_spread", default=20.0, type=float, help="base to use for spread sampling in geometric attention")
-	parser.add_argument("--min_rbf", default=0.05, type=float, help="minimum rbf scaling to apply in geometric attention")
-	parser.add_argument("--max_rbf", default=0.99, type=float, help="maximum rbf scaling to apply in geometric attention")
 	parser.add_argument("--d_hidden_attn", default=1024, type=int, help="hidden dimensions in geometric attention FFN")
 	parser.add_argument("--hidden_layers_attn", default=0, type=int, help="number of hidden layers in geometric attention FFN")
 

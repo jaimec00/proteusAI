@@ -151,7 +151,6 @@ class HyperParameters():
 						d_hidden_aa, hidden_layers_aa,
 						dualcoder_layers, num_heads,
 						min_spread, max_spread, base_spread,
-						min_rbf, max_rbf, 
 						d_hidden_attn, hidden_layers_attn, 
 						temperature, use_model ):
 		self.d_model = d_model
@@ -167,8 +166,6 @@ class HyperParameters():
 		self.min_spread = min_spread
 		self.max_spread = max_spread 
 		self.base_spread = base_spread 
-		self.min_rbf = min_rbf
-		self.max_rbf = max_rbf 
 		self.d_hidden_attn = d_hidden_attn
 		self.hidden_layers_attn = hidden_layers_attn 
 		self.temperature = temperature
