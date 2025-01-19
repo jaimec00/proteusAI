@@ -1,7 +1,7 @@
 # ----------------------------------------------------------------------------------------------------------------------
 '''
 author: 		jaime cardenas
-title:  		featurization.py
+title:  		wf_embedding.py
 description:	converts alpha carbon coordinates to features by modeling each Ca as a point source using Green's
 				function solution to the Hemholtz eq. in 3D: 
 					nabla^2 psi_k(r) = k^2 * psi_k(r)
@@ -172,7 +172,7 @@ def _wf_embedding_fwd(
 	mask_IJ = mask_NI[:, None] & mask_NJ[None, :] # NI x NJ
 	mask_IJ = mask_IJ & (dists!=0)
 
-	# init pointer for storing sum of phases
+	# init pointer for storing sum of cosines and sins
 	cos_sum_ptr = cos_sums_ptr + (Z*stride_cos_sums_Z) + ((NI_offs + tl.arange(0, BLOCK_NI))*stride_cos_sums_N)
 	sin_sum_ptr = sin_sums_ptr + (Z*stride_sin_sums_Z) + ((NI_offs + tl.arange(0, BLOCK_NI))*stride_sin_sums_N)
 
@@ -188,7 +188,7 @@ def _wf_embedding_fwd(
 		cos_sums = tl.sum(tl.where(mask_IJ, tl.cos(phase), 0.0), axis=1)
 		sin_sums = tl.sum(tl.where(mask_IJ, tl.sin(phase), 0.0), axis=1)
 
-		# store to for bwd
+		# store for bwd
 		tl.atomic_add(cos_sum_ptr, cos_sums, mask=mask_NI)
 		tl.atomic_add(sin_sum_ptr, sin_sums, mask=mask_NI)
 

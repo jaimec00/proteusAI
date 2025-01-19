@@ -69,37 +69,33 @@ class Output():
 			min_wl: {hyper_parameters.min_wl} 
 			max_wl: {hyper_parameters.max_wl} 
 			base_wl: {hyper_parameters.base_wl}
-			d_hidden_wf: {hyper_parameters.d_hidden_wl}
-			hidden_layers_wf: {hyper_parameters.hidden_layers_wl}
+			d_hidden_we: {hyper_parameters.d_hidden_we}
+			hidden_layers_we: {hyper_parameters.hidden_layers_we}
 
 			d_hidden_aa: {hyper_parameters.d_hidden_aa}
 			hidden_layers_aa: {hyper_parameters.hidden_layers_aa}
 
-			number of dualcoders: {hyper_parameters.dualcoder_layers}
+			number of encoders: {hyper_parameters.encoder_layers}
 			number of attention heads: {hyper_parameters.num_heads}
 			min_spread: {hyper_parameters.min_spread} 
 			max_spread: {hyper_parameters.max_spread} 
 			base_spread: {hyper_parameters.base_spread}
-			min_rbf: {hyper_parameters.min_rbf} 
-			max_rbf: {hyper_parameters.max_rbf} 
 			d_hidden_attn: {hyper_parameters.d_hidden_attn}
 			hidden_layers_attn: {hyper_parameters.hidden_layers_attn}
 			temperature: {hyper_parameters.temperature}
-
-			max sequeunce length: {data.max_size}
 
 			dataset split ({data.num_train + data.num_val + data.num_test} clusters total): 
 				train clusters: {data.num_train}
 				validation clusters: {data.num_val}
 				test clusters: {data.num_test}
 			batch size (tokens): {data.batch_tokens}
-			max batch size (samples): {data.batch_size}
+			max batch size (samples): {data.max_batch_size}
 			min sequence length (tokens): {data.min_seq_size}
 			max sequence length (tokens): {data.max_seq_size}
 			effective batch size (tokens): {data.batch_tokens * training_parameters.accumulation_steps}
 
 			epochs: {training_parameters.epochs}
-			learning rate: {training_parameters.learning_step}
+			learning rate: {training_parameters.lr_step}
 			learning rate plateau scaling factor: {training_parameters.lr_scale}
 			learning rate plateau patience: {training_parameters.lr_patience}
 			dropout: {training_parameters.dropout}
@@ -127,15 +123,15 @@ class Output():
 	
 			training inputs contain:
 				
-				mean MASK injection: {round(MASK_injection.MASK_injection_mean if MASK_injection.MASK_injection_mean is not None else 0.00, 2)}
-				stdev MASK injection: {round(MASK_injection.MASK_injection_stdev if MASK_injection.MASK_injection_stdev is not None else 0.00, 2)}
+				mean MASK injection: {round(MASK_injection.MASK_injection_mean, 2)}
+				stdev MASK injection: {round(MASK_injection.MASK_injection_stdev, 2)}
 
 				''')
 			)
 
 	def log_epoch_losses(self, epoch, losses):
 
-		output_loss, output_seq_sim = epoch.train_losses.get_avg()
+		output_loss, output_seq_sim = epoch.losses.get_avg()
 		self.log.info(f"train output loss: {str(output_loss.item())}")
 		self.log.info(f"train output seq_sim: {str(output_seq_sim)}\n")		
 		losses.add_losses(output_loss, output_seq_sim)
@@ -151,8 +147,7 @@ class Output():
 
 		# convert to numpy arrays
 		for losses in [train_losses, val_losses, val_losses_context]:
-			for key in losses.keys():
-				losses[key].to_numpy()
+			losses.to_numpy()
 
 		# Create the plot
 		plt.plot([i + 1 for i in range(len(train_losses.losses))], train_losses.losses, marker='o', color='red', label="Training Output")

@@ -81,13 +81,13 @@ def init_args():
 
 	# input restrictions	
 	parser.add_argument("--max_batch_size", default=128, type=list, help="possible number of samples per batch, minimizes triton recompilation overhead")
-	parser.add_argument("--min_seq_sizes", default=512, type=list, help="possible sequence lengths, minimizes triton recompilation overhead")
-	parser.add_argument("--max_seq_sizes", default=16384, type=list, help="possible sequence lengths, minimizes triton recompilation overhead")
+	parser.add_argument("--min_seq_size", default=512, type=list, help="possible sequence lengths, minimizes triton recompilation overhead")
+	parser.add_argument("--max_seq_size", default=16384, type=list, help="possible sequence lengths, minimizes triton recompilation overhead")
 	parser.add_argument("--batch_tokens", default=16384, type=int, help="target number of tokens per batch")
+	parser.add_argument("--min_resolution", default=3.5, type=float, help="minimum structure resolution")
 	
 	# learning parameters
 	parser.add_argument("--accumulation_steps", default=2, type=int, help="grad accumulation; how many batches to process before learning step")
-	parser.add_argument("--learning_step", default=0.00005, type=float, help="learning rate")
 	parser.add_argument("--beta1", default=0.9, type=float, help="beta1 parameter for Adam optimizer")
 	parser.add_argument("--beta2", default=0.98, type=float, help="beta2 parameter for Adam optimizer")
 	parser.add_argument("--epsilon", default=10e-9, type=float, help="epsilon parameter for Adam optimizer")
@@ -95,8 +95,9 @@ def init_args():
 	parser.add_argument("--dropout", default=0.1, type=float, help="percentage of dropout")
 	parser.add_argument("--label_smoothing", default=0.1, type=float, help="percentage of label smoothing to use on the output labels for loss calculation")
 	parser.add_argument("--loss_type", default="mean", type=str, choices=['sum', 'mean'], help="whether to use the 'sum' or the 'mean' for CEL")
-	parser.add_argument("--loss_sum_norm", default=2000, type=int, help="normalization factor for sum loss")
+	parser.add_argument("--loss_scale", default=1, type=int, help="normalization factor for sum loss")
 
+	parser.add_argument("--lr_step", default=0.00005, type=float, help="learning rate")
 	parser.add_argument("--lr_type", default="custom", type=str, choices=["plateu, custom"], help="LR type")
 	parser.add_argument("--lr_scale", default=0.1, type=float, help="LR scaling factor")
 	parser.add_argument("--lr_patience", default=5, type=int, help="LR patience for scaling down after plateu")
@@ -118,6 +119,8 @@ def init_args():
 	parser.add_argument("--final_min_MASK_injection_mean", default=0.9, type=float, help="final minimum mean percentage of one-hot label injection in training")
 	parser.add_argument("--final_max_MASK_injection_mean", default=0.95, type=float, help="final maximum mean percentage of one-hot label injection in training")
 	parser.add_argument("--MASK_injection_stdev", default=0.05, type=float, help="stdev percentage of one-hot label injection in training")
+	parser.add_argument("--randAA_pct", default=0.05, type=float, help="stdev percentage of one-hot label injection in training")
+	parser.add_argument("--trueAA_pct", default=0.05, type=float, help="stdev percentage of one-hot label injection in training")
 
 	# cycle length of one-hot injection
 	parser.add_argument("--MASK_injection_cycle_length", default=4.3, type=float, help="input one-hot injection cycle length. operates at different frequency than label smooth and noise cycles")

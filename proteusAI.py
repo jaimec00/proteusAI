@@ -43,14 +43,15 @@ class AminoAcidEmbedding(nn.Module):
 	'''
 	simple mlp w/ layernorm
 	'''
-	def __init__(self, num_aas, d_model, d_hidden_aa, hidden_layers_aa, dropout):
+	def __init__(self, num_aas=21, d_model=512, d_hidden_aa=1024, hidden_layers_aa=0, dropout=0.0):
 		super(AminoAcidEmbedding, self).__init__()
 		
 		self.ffn = MLP(num_aas, d_model, d_hidden_aa, hidden_layers_aa, dropout)
-		self.norm = nn.LayerNorm(d_model)
+		# self.norm = nn.LayerNorm(d_model)
 
 	def forward(self, aa):
-		return self.norm(self.ffn(aa))
+		return self.ffn(aa)
+		# return self.norm(self.ffn(aa))
 
 class WavefunctionEmbedding(nn.Module):
 	'''
@@ -81,9 +82,9 @@ class WavefunctionEmbedding(nn.Module):
 		# note that will be doing a weighted sum of wavelengths, not wavenumbers, compute the wavenumbers after computing weighted sum 
 		# of wavelengths, to ensure the wavelengths are always within min wavelength and max wavelength		
 
-		self.mlp = MLP(d_model, d_model, d_hidden, hidden_layers, dropout)
-		self.norm = nn.LayerNorm(d_model)
-		self.dropout = nn.Dropout(dropout)
+		# self.mlp = MLP(d_model, d_model, d_hidden, hidden_layers, dropout)
+		# self.norm = nn.LayerNorm(d_model)
+		# self.dropout = nn.Dropout(dropout)
 
 	def forward(self, coords, key_padding_mask):
 
@@ -98,11 +99,11 @@ class WavefunctionEmbedding(nn.Module):
 		wf = wf_embedding(coords, wavenumbers, key_padding_mask) # batch x N x 3 --> batch x N x d_model
 
 		# pass through ffn
-		wf2 = self.mlp(wf)
+		# wf2 = self.mlp(wf)
 
 		# add and norm w dropout
-		wf = wf + self.dropout(wf2)
-		wf = self.norm(wf)
+		# wf = wf + self.dropout(wf2)
+		# wf = self.norm(wf)
 
 		return wf
 
@@ -127,15 +128,31 @@ class GeoAttention(nn.Module):
 
 		# define spreads and spread weights matrix so each head's spread is a weighted sum of the allowed spreads
 		self.register_buffer("spreads", min_spread + (max_spread - min_spread) * (torch.logspace(0,1,nhead, base) - 1) / (base - 1))
-		self.spread_weights = nn.Parameter(torch.randn([self.nhead, self.nhead])) 
 
-		self.q_proj = nn.Parameter(torch.randn(self.nhead, self.d_model, self.d_k)) # nhead x d_model x d_k
-		self.k_proj = nn.Parameter(torch.randn(self.nhead, self.d_model, self.d_k)) # nhead x d_model x d_k
-		self.v_proj = nn.Parameter(torch.randn(self.nhead, self.d_model, self.d_k)) # nhead x d_model x d_k
+		# compute the values to initialize the weights, so that post softmax, the diagonals have the most weight
+		# and the farther a column index is from the diagonal, the less weight it receives
+		idxs = torch.arange(0, nhead) # just the index of each spread
+		diag_idx = idxs.unsqueeze(1).expand(-1, nhead) # the index of the corresponding diagonal for each row (same for all columns)
+		col_idx = idxs.unsqueeze(0).expand(nhead, -1)# the index of each column, same for each row
+		dist = (diag_idx - col_idx).abs() # how far an index is from the diagonal of its corresponding row
+		dist_pct = dist / (nhead) # as a percentage
+		inv_dist_pct = 1 - (dist_pct**(1/(2*nhead))) # invert by subtracting pct from 1, also take the 2*nhead root to emphasize the diagonals more
+		log_inv = torch.log(inv_dist_pct) # take the log to prepare it for softmax
+		self.spread_weights = nn.Parameter(log_inv)# initialize the learnable weight matrix
 
-		self.q_layernorm = nn.LayerNorm(self.d_k)
-		self.k_layernorm = nn.LayerNorm(self.d_k)
-		self.v_layernorm = nn.LayerNorm(self.d_k)
+
+		# QKV weight matrices
+
+		# init xavier distribution
+		xavier_scale = math.sqrt(6/(d_k + d_model))
+
+		self.q_proj = nn.Parameter(-xavier_scale + torch.rand(self.nhead, self.d_model, self.d_k) * (2*xavier_scale)) # nhead x d_model x d_k
+		self.k_proj = nn.Parameter(-xavier_scale + torch.rand(self.nhead, self.d_model, self.d_k) * (2*xavier_scale)) # nhead x d_model x d_k
+		self.v_proj = nn.Parameter(-xavier_scale + torch.rand(self.nhead, self.d_model, self.d_k) * (2*xavier_scale)) # nhead x d_model x d_k
+
+		self.q_bias = nn.Parameter(torch.zeros(self.nhead, self.dk))
+		self.k_bias = nn.Parameter(torch.zeros(self.nhead, self.dk))
+		self.v_bias = nn.Parameter(torch.zeros(self.nhead, self.dk))
 
 		self.out_proj = nn.Linear(d_model, d_model)
 
@@ -150,14 +167,9 @@ class GeoAttention(nn.Module):
 		assert d_model == self.d_model
 
 		# project the tensors
-		Q = torch.matmul(q.unsqueeze(1), self.q_proj.unsqueeze(0)) # batch x nhead x N x d_k
-		K = torch.matmul(k.unsqueeze(1), self.k_proj.unsqueeze(0)) # batch x nhead x N x d_k
-		V = torch.matmul(v.unsqueeze(1), self.v_proj.unsqueeze(0)) # batch x nhead x N x d_k
-
-		# apply layer norm after projection to ensure numerical stability
-		Q = self.q_layernorm(Q)
-		K = self.k_layernorm(K)
-		V = self.v_layernorm(V)
+		Q = torch.matmul(q.unsqueeze(1), self.q_proj.unsqueeze(0)) + self.q_bias.unsqueeze(0).unsqueeze(2) # batch x nhead x N x d_k
+		K = torch.matmul(k.unsqueeze(1), self.k_proj.unsqueeze(0)) + self.k_bias.unsqueeze(0).unsqueeze(2) # batch x nhead x N x d_k
+		V = torch.matmul(v.unsqueeze(1), self.v_proj.unsqueeze(0)) + self.v_bias.unsqueeze(0).unsqueeze(2) # batch x nhead x N x d_k
 
 		# define dropout
 		dropout = self.dropout if self.training else 0.0
@@ -180,7 +192,7 @@ class GeoAttention(nn.Module):
 
 class Encoder(nn.Module):
 	'''
-	interleaved cross-attention module, structure queries sequence to update self, sequence queries structure to update itself
+	bidirectional encoder
 	'''
 
 	def __init__(self, d_model=512, d_hidden=1024, hidden_layers=0, nhead=8, min_spread=1, max_spread=6, base=20, dropout=0.0):
@@ -236,9 +248,6 @@ class proteusAI(nn.Module):
 						
 						# dropout
 						dropout=0.00,
-
-						# include non-canonical AAs
-						include_ncaa=False
 					):
 
 		super(proteusAI, self).__init__()
@@ -249,11 +258,36 @@ class proteusAI(nn.Module):
 		# amino acids
 		self.aa_embedding = AminoAcidEmbedding(21, d_model, d_hidden_aa, hidden_layers_aa, dropout)
 
-		# dual coders
+		# encoders
 		self.encoders = nn.ModuleList([Encoder(d_model, d_hidden_attn, hidden_layers_attn, n_head, min_spread, max_spread, base_spreads, dropout) for _ in range(encoder_layers)])
 
 		# map to aa probs
 		self.out_proj = nn.Linear(d_model, 20)
+
+	def forward(self, coords, aas, key_padding_mask=None, auto_regressive=False, temp=0.1):
+		"""
+		Forward pass of the model with optional auto-regressive inference
+		"""
+		# coords: batch x N x 3 (or batch x N x d_model if self.as_coords is False)
+		# aa_onehot: batch x N x 20
+
+		# wave function embedding (replaces positional encoding)
+		wf = self.wf_embedding(coords, key_padding_mask) # batch x N x 3 --> batch x N x d_model
+
+		# initial wf embedding is the same, so dont recompute each time in auto regressive
+		if auto_regressive:
+			return self.auto_regressive(wf, coords, aas, key_padding_mask, temp)
+
+		# simple mlp to get aas to target feature space
+		aas = self.aa_embedding(aas)
+
+		# simple addition of WE and AA embeddings
+		aas = aas + wf
+
+		# bidirectional encoder
+		seq_probs = self.encode(aas, coords, key_padding_mask) # batch x N x d_model (returns aa probability logits)
+
+		return seq_probs
 
 	def encode(self, aas, coords, key_padding_mask):
 
@@ -266,24 +300,25 @@ class proteusAI(nn.Module):
 
 	def auto_regressive(self, wf, coords, aas, key_padding_mask=None, temp=0.1):
 
-		# extract the already fixed positions
-		aa_onehot = torch.where((aas == 1).any(dim=2, keepdim=True), aas, 0)
+		# extract the already fixed positions. unpredicted positions are the MASK token (idx 20), so extracting
+		# all except mask index means unpredicted are all 0
+		aa_onehot = aas[:, :, :20]
 
 		for position in range(aas.size(1)):
 			
-			aa_embedded = self.aa_embedding(aas)
+			aa_embedded = self.aa_embedding(aas) + wf
 
 			# decode the wavefunction
-			seq_probs = self.encode(wf, aa_embedded, coords, key_padding_mask) # batch x N x 512 --> batch x N X 20 
+			seq_probs = self.encode(aa_embedded, coords, key_padding_mask) # batch x N x 512 --> batch x N X 20 
 			
 			# convert to probability distribution
 			seq_probs = F.softmax(seq_probs, dim=2) # batch x N x 20
 
 			# select aa at most confident position
-			aas, aa_onehot = self.update_most_confident(seq_probs, aa_onehot, key_padding_mask, temp)
+			aa_onehot = self.update_most_confident(seq_probs, aa_onehot, key_padding_mask, temp)
 
 			# if all positions predicted, stop
-			if torch.all(aa_onehot.any(dim=2) | key_padding_mask):
+			if torch.all( (~((aa_onehot==0).all(dim=2))) | key_padding_mask):
 				break
 
 		return aa_onehot
@@ -319,33 +354,7 @@ class proteusAI(nn.Module):
 		# update filled_positions with most confident positions' sampled aa's 
 		aa_onehot_temp = aa_onehot.scatter(1, most_confident_idx, one_hot_samples.unsqueeze(1))
 		aa_onehot = torch.where((predicted_positions_mask.unsqueeze(-1).expand(-1, -1, aa_onehot.size(-1))), aa_onehot, aa_onehot_temp)
-		seq_probs = torch.where((aa_onehot==1).any(dim=2, keepdim=True), aa_onehot, seq_probs)
 
-		return seq_probs, aa_onehot
-
-	def forward(self, coords, aas, key_padding_mask=None, auto_regressive=False, temp=0.1):
-		"""
-		Forward pass of the model with optional auto-regressive inference
-		"""
-		# coords: batch x N x 3 (or batch x N x d_model if self.as_coords is False)
-		# aa_onehot: batch x N x 20
-
-		# wave function embedding (replaces positional encoding)
-		wf = self.wf_embedding(coords, key_padding_mask) # batch x N x 3 --> batch x N x d_model
-
-		# initial wf embedding is the same, so dont recompute each time in auto regressive
-		if auto_regressive:
-			return self.auto_regressive(wf, coords, aas, key_padding_mask, temp)
-
-		# simple mlp to get aas to target feature space
-		aas = self.aa_embedding(aas)
-
-		# simple addition of WE and AA embeddings
-		aas = aas + wf
-
-		# dual coder to communicate structure and sequence
-		seq_probs = self.encode(aas, coords, key_padding_mask) # batch x N x d_model (returns aa probability logits)
-
-		return seq_probs
+		return aa_onehot
 
 # ----------------------------------------------------------------------------------------------------------------------

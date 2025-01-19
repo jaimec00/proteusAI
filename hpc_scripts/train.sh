@@ -28,6 +28,6 @@ conda activate protAI_env
 export TRITON_HOME="/share/wangyy/hjc2538/proteusAI"
 export TRITON_CACHE_DIR="/share/wangyy/hjc2538/proteusAI/.triton/cache"
 
-# export CUDA_VISIBLE_DEVICES=0
+export CUDA_VISIBLE_DEVICES=0
 export CUDA_LAUNCH_BLOCKING=1
 python -u learn_seqs.py --config config/config.yml

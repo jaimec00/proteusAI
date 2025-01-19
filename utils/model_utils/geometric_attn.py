@@ -161,15 +161,8 @@ def _attn_fwd(
 	# in the worst case (for my setup),  I,J = 10,000
 	# I and J each require 14 bits, meaning would need a minimum of 14 + 14 = 28 bits, 
 	# to represent all possible combinations uniquely, so 32 bit int is required for true uniqueness
-
-	# instead we will hash this to a 16 bit integer using two 16 bit integers as input.
-	# there will be a non-negligible amount of collisions, but only need an approximation
-	# of uniqueness for this purpose, and hashing reduces correlations between collisions anyways,
-	# essentially simulating randomness
-
-	# this assumes I and J idxs fits in 16 bits. if it doesnt, code still works, just 
-	# that there will be more collisions in dropout, but this is generally acceptable
-	# given the alternative of using larger dtypes
+	# 16 LSB of i index is 16 MSB of the 32 bit int, 16 LSB of j index is 16 LSB of the 32 bit int
+	# can do a hash instead, but this is fine if the sequence is never past 2^16 tokens long
 
 	# load rng seed for this batch head combo
 	rng_seed = tl.load(rng_seed_ptr + (offs_Z*stride_rng_seed_Z) + (offs_H*stride_rng_seed_H))
@@ -224,13 +217,13 @@ def _attn_fwd(
 		attn_mask = (mask_i[:, None]) & (tl.load(mask_j_ptr, boundary_check=(0,), padding_option="zero").to(tl.int1)[None, :]) # N x N
 
 		# scale attention logits by Rij and mask invalid pairs
-		Sij = tl.where(attn_mask, Sij*Rij, -inf) # N x N (fp32)
+		SRij = tl.where(attn_mask, Sij*Rij, -inf) # N x N (fp32)
 
 		# max of each row
-		mij = tl.maximum(mi, tl.max(Sij, axis=1)) # N,  (fp32)
+		mij = tl.maximum(mi, tl.max(SRij, axis=1)) # N,  (fp32)
 
-		# compute softmax(Sij - mij) = Pij
-		Pij = tl.exp(tl.where(mij[:, None]==-inf, -inf, Sij - mij[:, None])) # N x N (fp32)
+		# compute softmax(SRij - mij) = Pij
+		Pij = tl.exp(tl.where(mij[:, None]==-inf, -inf, SRij - mij[:, None])) # N x N (fp32)
 
 		# compute alpha
 		alpha = tl.exp(tl.where((mi==-inf) | (mij==-inf), tl.where((mi==-inf) & (mij==-inf), 0, -inf), mi - mij)) # (fp32)
@@ -239,13 +232,8 @@ def _attn_fwd(
 		li = alpha*li + tl.sum(Pij, axis=1) # N, (fp32)
 
 		# apply dropout mask
-		# hash the two numbers (I, J) to get a pseudo unique number for each element
-		J_bytes = (J_idxs & 0xFFFF)
-		hash_vals = ((I_bytes) | (J_bytes)) # XORs
-
-		# now each IJ combo in the current block has a pseudo-unique number associated
-		# with it, along with the corresponding batch+head random seed, simulating 
-		# randomness while still allowing deterministic computation in the bwd pass
+		J_bytes = J_idxs & 0xFFFF
+		hash_vals = I_bytes | J_bytes # combine to get unique int
 		dropout_mask = (tl.rand(rng_seed, hash_vals) >= dropout_p).to(tl.int1) # N x N
 		
 		# apply dropout
@@ -476,15 +464,11 @@ def _attn_bwd(
 		# compute rbfs (fp32)
 		Rij = tl.exp(-(dists*dists) / (2.0*spread*spread)) # N x N (fp32)
 
-		# for positive logits, scale by 1 + rbf, which is in range (1,2). the multiplication ensures cross
-		# talk between attention weights and the rbfs themselves, and adding 1 to the rbf achieves two goals: 
-		# 	first, gradients for spreads AND Q and K are much more stable, since the logits are scaled up 
-		# 		dynamically, this increases the probability of gradient-friendly softmax. 
-		# 	second, this amplifies the effect of the original attention weights, allowing dynamic attention that is tied
-		# 		to the spatial geometry.
-		# for negative logits, small dists should be scaled to be less negative than for far distances. still range
-		# between 1 and 2, but the rbfs are "inverted", where large distance corresponds to 1 + min_rbf and small distance to 2
-		Rij = tl.where(Sij < 0, (2)-Rij, 1 + Rij)
+		# for positive logits, scale by 1 + rbf, so that SR = S + S*R. for smoother gradients
+		# for negative logits, small dists should be scaled to be less negative than for far distances, s.t. SR = 2S - S*R
+		# the rbfs are "inverted", where large distances are more negative and small distances are not scaled
+		# maximum attention value is 2S for both, just that the RBFs play different roles depending on sign(S)
+		Rij = tl.where(Sij < 0, 2-Rij, 1 + Rij)
 
 		# mask out attention that is not relevant to this head
 		mask_i = tl.load(mask_i_ptr, boundary_check=(0, ), padding_option="zero").to(tl.int1)
@@ -502,9 +486,8 @@ def _attn_bwd(
 		Pij = tl.exp(tl.where(attn_mask, SRij - Li[:, None], -inf)) # N x N (fp32)
 
 		# apply dropout mask
-		# note that shifting I one bit to the left, already shifted J one bit to the right outside the loop
 		I_bytes = (I_idxs & 0xFFFF) << 16
-		hash_vals = ((I_bytes) | (J_bytes)) # XORs
+		hash_vals = I_bytes | J_bytes 
 		dropout_mask = tl.rand(rng_seed, hash_vals) >= dropout_p # N x N
 		Pij = tl.where(dropout_mask, Pij / (1-dropout_p), 0.0)
 
@@ -635,8 +618,8 @@ class _geometric_attn(torch.autograd.Function):
 							)
 
 		# generate a rng seed for each batch and head
-		# rng_seed = torch.randint(0, 2**16-1, (batch,nheads), device=Q.device)
-		rng_seed = torch.ones(batch,nheads, device=Q.device) # hard code for debugging
+		rng_seed = torch.randint(0, 2**16-1, (batch,nheads), device=Q.device)
+		# rng_seed = torch.ones(batch,nheads, device=Q.device) # hard code for debugging
 
 		
 		# run the kernel

@@ -9,8 +9,8 @@ description:	utility classes for training proteusAI
 import torch
 import torch.optim.lr_scheduler as lr_scheduler
 from torch.amp import autocast, GradScaler
-import torch.nn.functional.one_hot as onehot
-import torch.nn.CrossEntropyLoss as CEL
+from torch.nn.functional import one_hot as onehot
+from torch.nn import CrossEntropyLoss as CEL
 
 from tqdm import tqdm
 
@@ -49,10 +49,11 @@ class TrainingRun():
 												args.min_wl, args.max_wl, args.base_wl, 
 												args.d_hidden_we, args.hidden_layers_we, 
 												args.d_hidden_aa, args.hidden_layers_aa,
-												args.dualcoder_layers, args.num_heads,
+												args.encoder_layers, args.num_heads,
 												args.min_spread, args.max_spread, args.base_spread,
 												args.d_hidden_attn, args.hidden_layers_attn, 
-												args.temperature, args.use_model )
+												args.temperature, args.use_model
+												)
 		
 		self.training_parameters = TrainingParameters(  args.epochs,
 														args.accumulation_steps, 
@@ -65,13 +66,18 @@ class TrainingRun():
 														args.use_amp, args.use_chain_mask,
 													)
 		
-		self.MASK_injection = MASK_injection(	args.initial_min_MASK_injection_mean, args.initial_min_MASK_injection_mean, 
-												args.initial_max_MASK_injection_mean, args.final_max_MASK_injection_mean, 
+		self.MASK_injection = MASK_injection(	args.initial_min_MASK_injection_mean, args.initial_max_MASK_injection_mean, 
+												args.final_min_MASK_injection_mean, args.final_max_MASK_injection_mean, 
 												args.MASK_injection_stdev, 
 												args.MASK_injection_cycle_length, args.randAA_pct, args.trueAA_pct # rand and true AA pct are not implemented, want to see how the method does by itself first
 											)
 		
-		self.data = DataHolder(args.data_path, args.num_train, args.num_val, args.num_test, args.batch_tokens, args.max_batch_size, args.max_seq_size, args.min_seq_size)
+		self.data = DataHolder(	args.data_path, 
+								args.num_train, args.num_val, args.num_test, 
+								args.batch_tokens, args.max_batch_size, 
+								args.min_seq_size, args.max_seq_size, 
+								args.use_chain_mask, args.min_resolution
+							)
 		self.output = Output(args.out_path, args.loss_plot, args.seq_plot, args.weights_path, args.write_dot)
 
 		self.train_losses = Losses()
@@ -126,7 +132,7 @@ class TrainingRun():
 								self.hyper_parameters.d_hidden_aa,
 								self.hyper_parameters.hidden_layers_aa,
 
-								self.hyper_parameters.dualcoder_layers,
+								self.hyper_parameters.encoder_layers,
 								self.hyper_parameters.num_heads, 
 								self.hyper_parameters.min_spread,
 								self.hyper_parameters.max_spread,
@@ -135,7 +141,6 @@ class TrainingRun():
 								self.hyper_parameters.hidden_layers_attn,
 
 								self.training_parameters.dropout,
-								include_ncaa=self.training_parameters.include_ncaa
 							)
 
 		self.model.to(self.gpu)
@@ -158,7 +163,7 @@ class TrainingRun():
 		'''
 
 		self.output.log.info("loading optimizer...")
-		self.optim = torch.optim.Adam(self.model.parameters(), lr=self.training_parameters.learning_step, 
+		self.optim = torch.optim.Adam(self.model.parameters(), lr=self.training_parameters.lr_step, 
 									betas=(self.training_parameters.beta1, self.training_parameters.beta2), 
 									eps=self.training_parameters.epsilon)
 		self.optim.zero_grad()
@@ -229,7 +234,7 @@ class TrainingRun():
 		# log training info
 		self.output.log.info(f"\n\ninitializing training. "\
 							f"training on {len(self.data.train_data)} batches "\
-							f"of batch size {self.training_parameters.batch_tokens} tokens "\
+							f"of batch size {self.data.batch_tokens} tokens "\
 							f"for {self.training_parameters.epochs} epochs.\n" )
 		
 		# loop through epochs
@@ -237,20 +242,20 @@ class TrainingRun():
 			epoch = Epoch(epoch, self)
 			epoch.epoch_loop()
 
-		self.output.plot_training(self.train_losses, self.val_losses)
+		self.output.plot_training(self.train_losses, self.val_losses, self.val_losses_context)
 		self.output.save_model(self.model)
 				
 	def all_MASK_validation(self):
 		'''run validation with no AA context'''
+		self.output.log.info(f"running validation w/ no context...\n")
 		self.validation()
 
 	def batch_MASK_validation(self, epoch):
 		'''run validation with the same context as the training batches from the current epoch'''
+		self.output.log.info(f"running validation w/ context...\n")
 		self.validation(epoch)
 
-	def validation(self, epoch=None):
-		
-		self.output.log.info(f"running validation w/ no perturbations...\n")
+	def validation(self, epoch=None):		
 		
 		# switch to evaluation mode to perform validation
 		self.model.eval()
@@ -278,7 +283,7 @@ class TrainingRun():
 				batch.batch_forward(self.model, self.loss_function, self.gpu)
 
 				# store losses
-				loss, seq_sim = batch.outputs.losses.get_avg()
+				loss, seq_sim = batch.outputs.output_losses.get_avg()
 				val_losses.add_losses(float(loss.item()), seq_sim)
 
 				val_pbar.update(1)
@@ -315,10 +320,12 @@ class TrainingRun():
 								temp=self.hyper_parameters.temperature, 
 							)
 
+				self.MASK_all(batch)
+
 				batch.batch_forward(self.model, self.loss_function, self.gpu)
 
-				loss, seq_sim = batch.outputs.losses["output"].get_avg()
-				_, ar_seq_sim = batch.outputs.losses["ar_output"].get_avg()
+				loss, seq_sim = batch.outputs.output_losses.get_avg()
+				_, ar_seq_sim = batch.outputs.ar_output_losses.get_avg()
 				
 				test_losses.append(float(loss.item()) )
 				test_seq_sims.append(seq_sim)
@@ -333,7 +340,7 @@ class TrainingRun():
 
 	def MASK_all(self, batch):
 
-		batch.predictions = onehot(torch.full((batch.size(0), batch.size(1)), 20, device=batch.predictions.device), 21)
+		batch.predictions = onehot(torch.full((batch.size(0), batch.size(1)), 20, device=batch.predictions.device), 21).float()
 
 class Epoch():	
 	def __init__(self, epoch, training_run):
@@ -362,7 +369,8 @@ class Epoch():
 		self.training_run_parent.model.train()
 
 		# setup the epoch
-		self.training_run_parent.output.log_epoch(self, self.training_run_parent.optim, self.training_run_parent.model, self.input_perturbations)
+		self.training_run_parent.MASK_injection.calc_mean_MASK(self)
+		self.training_run_parent.output.log_epoch(self, self.training_run_parent.optim, self.training_run_parent.model, self.training_run_parent.MASK_injection)
 
 		# loop through batches
 		epoch_pbar = tqdm(total=len(self.training_run_parent.data.train_data), desc="epoch_progress", unit="step")
@@ -377,11 +385,12 @@ class Epoch():
 			# inject MASK tokens for prediction
 			self.training_run_parent.MASK_injection.MASK_tokens(batch)
 
+
 			# learn
 			batch.batch_learn()
 
 			# compile batch losses for logging
-			self.gather_batch_losses(batch, normalize=self.training_run_parent.loss_function.reduction=="sum")
+			self.gather_batch_losses(batch)
 
 			epoch_pbar.update(1)
 		
@@ -389,7 +398,8 @@ class Epoch():
 		self.training_run_parent.output.log_epoch_losses(self, self.training_run_parent.train_losses)
 
 		# run validation
-		self.training_run_parent.validation(self)
+		self.training_run_parent.all_MASK_validation()
+		self.training_run_parent.batch_MASK_validation(self)
 
 		# lr scheduler update
 		self.training_run_parent.scheduler.step(self.training_run_parent.val_losses_context.losses[-1])
@@ -400,8 +410,8 @@ class Epoch():
 			self.training_run_parent.data.train_data.rotate_data()
 
 
-	def gather_batch_losses(self, batch, normalize=False):
-		self.train_losses.extend_losses(batch.outputs.losses, normalize)
+	def gather_batch_losses(self, batch):
+		self.losses.extend_losses(batch.outputs.output_losses)
 
 class Batch():
 	def __init__(self, labels, coords, chain_mask, key_padding_mask, 
@@ -415,7 +425,8 @@ class Batch():
 		self.use_amp = use_amp
 
 		# input is always 21 dim, last dim is mask token
-		self.predictions = onehot(labels, 21).float()
+		# onehot does not accept -1, make the masked labels as MASK for now, masked anyways
+		self.predictions = onehot(torch.where(labels==-1, 20, labels), 21).float()
 
 		self.key_padding_mask = key_padding_mask
 		self.onehot_mask = torch.zeros(self.key_padding_mask.shape, dtype=torch.bool)
@@ -449,9 +460,6 @@ class Batch():
 		Returns:
 			None
 		'''
-
-		# apply proper perturbations to input (overwrites batch.predictions, if configured to do so)
-		self.epoch_parent.input_perturbations.apply_perturbations(self)
 
 		# forward pass
 		self.batch_forward(self.epoch_parent.training_run_parent.model, self.epoch_parent.training_run_parent.loss_function, self.epoch_parent.training_run_parent.gpu)
@@ -487,7 +495,7 @@ class Batch():
 		else:
 			self.outputs = self.get_outputs(model)
 
-		self.outputs.get_losses(loss_function, loss_type=self.loss_type, sum_norm=self.loss_sum_norm)
+		self.outputs.get_losses(loss_function)
 
 	def batch_backward(self):
 
@@ -496,7 +504,7 @@ class Batch():
 		optim = self.epoch_parent.training_run_parent.optim
 
 		learn_step = (self.b_idx + 1) % accumulation_steps == 0
-		loss = self.outputs.losses["output"].losses[-1] / accumulation_steps
+		loss = self.outputs.output_losses.losses[-1] / accumulation_steps
 		
 		if scaler is not None:
 			scaler.scale(loss).backward()
@@ -537,6 +545,9 @@ class Batch():
 		output_prediction = model(self.coords, self.predictions, key_padding_mask=self.key_padding_mask, auto_regressive=False)
 
 		return ModelOutputs(output_prediction, ar_output_prediction, self.labels)
+
+	def size(self, idx):
+		return self.labels.size(idx)
 
 class ModelOutputs():
 
@@ -607,7 +618,7 @@ class ModelOutputs():
 
 		return cel, seq_sim
 
-	def get_losses(self, loss_function, loss_type="sum", sum_norm=2000):
+	def get_losses(self, loss_function):
 
 		for prediction, prediction_loss in zip(	[self.output_predictions, self.ar_output_predictions], 
 												[self.output_losses, self.ar_output_losses]

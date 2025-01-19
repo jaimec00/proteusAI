@@ -12,7 +12,7 @@ hidden_layers_aa: 0
 encoder_layers: 4 # number of dualcoder layers
 num_heads: 4  # number of attention heads to perform the training with
 min_spread: 3.0
-max_spread: 6.0
+max_spread: 8.0
 base_spread: 10.0
 d_hidden_attn: 1024  # intermediate dimensions of decoder feed forward layer
 hidden_layers_attn: 0
@@ -20,27 +20,28 @@ hidden_layers_attn: 0
 temperature: 0.1  # temperature for autoregressive inference (for testing)
 
 # Training configuration
-num_train: 256  # number of training samples to use; -1 means all available
+num_train: 2048  # number of training samples to use; -1 means all available
 num_val: -1  # number of validation samples to use; -1 means all available
-num_test: 128  # number of test samples to use; -1 means all available
-epochs: 3  # number of epochs
+num_test: -1  # number of test samples to use; -1 means all available
+epochs: 2  # number of epochs
 
 # want as few combinations as possible to speed up triton autotuning
 max_batch_size: 128  # possible samples per batch
-min_seq_sizes: 512 # possible sequence lengths
-max_seq_sizes: 16384 # possible sequence lengths
+min_seq_size: 64 # possible sequence lengths
+max_seq_size: 16384 # possible sequence lengths
 batch_tokens: 16384 # number of valid tokens per batch 
+min_resolution: 3.5
 
 accumulation_steps: 4  # grad accumulation; how many batches to process before learning step
-learning_step: 0.0001  # learning rate
 beta1: 0.9  # learning rate
 beta2: 0.98  # learning rate
 epsilon: 10e-9  # learning rate
 dropout: 0.1  # percentage of dropout
 label_smoothing: 0.1  # percentage of label smoothing to use on the output labels for loss calculation
 loss_type: "mean"  # whether to use the 'sum' or the 'mean' for CEL
-loss_sum_norm: 2000
-lr_type: plateu
+loss_scale: 2000
+lr_type: plateau
+lr_step: 5e-5  # learning rate
 lr_initial_min: 5e-5
 lr_initial_max: 1e-4
 lr_final_min: 1e-5
@@ -55,9 +56,10 @@ use_amp: True  # whether to use automatic mixed precision
 # ------------------------------------------------------------------------------
 
 # Input MASK injection
-min_MASK_injection_mean: 0.00  # minimum mean percentage of one-hot label injection in training
-initial_max_MASK_injection_mean: 0.15  # initial maximum mean percentage of one-hot label injection in training
-final_max_MASK_injection_mean: 0.05  # final maximum mean percentage of one-hot label injection in training
+initial_min_MASK_injection_mean: 0.05  # minimum mean percentage of one-hot label injection in training
+final_min_MASK_injection_mean: 0.80  # minimum mean percentage of one-hot label injection in training
+initial_max_MASK_injection_mean: 0.25  # initial maximum mean percentage of one-hot label injection in training
+final_max_MASK_injection_mean: 1.00  # final maximum mean percentage of one-hot label injection in training
 MASK_injection_stdev: 0.05  # stdev percentage of one-hot label injection in training
 MASK_injection_cycle_length: 7.4  # input one-hot injection cycle length
 

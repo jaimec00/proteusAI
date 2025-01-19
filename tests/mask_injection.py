@@ -1,16 +1,8 @@
-# ----------------------------------------------------------------------------------------------------------------------
-'''
-author: 		jaime cardenas
-title:  		parameter_utils.py
-description:	utility classes for parameter management for training 
-'''
-# ----------------------------------------------------------------------------------------------------------------------
 
-import math
+
+
 import torch
-import torch.nn.functional as F
-
-# ----------------------------------------------------------------------------------------------------------------------	
+import math
 
 class MASK_injection():
 
@@ -37,12 +29,14 @@ class MASK_injection():
 		self.randAA_pct = randAA_pct
 		self.trueAA_pct = trueAA_pct
 
-	def calc_mean_MASK(self, epoch):
+	def calc_mean_MASK(self, epoch, stage):
+
+
 
 		# compute one-hot injection means and stdevs
-		min_mean = self.initial_min_MASK_injection_mean + epoch.stage * (self.final_min_MASK_injection_mean - self.initial_min_MASK_injection_mean)
-		max_mean = self.initial_max_MASK_injection_mean + epoch.stage * (self.final_max_MASK_injection_mean - self.initial_max_MASK_injection_mean)
-		mean_MASK = self.calculate_stage(epoch.epoch, self.MASK_injection_cycle_length, min_mean, max_mean, phase_shift=-math.pi/2) # start with low MASK injection, to give the model as much context as possible to start, only allowed to predict a few positions and slowly increase difficulty
+		min_mean = self.initial_min_MASK_injection_mean + stage * (self.final_min_MASK_injection_mean - self.initial_min_MASK_injection_mean)
+		max_mean = self.initial_max_MASK_injection_mean + stage * (self.final_max_MASK_injection_mean - self.initial_max_MASK_injection_mean)
+		mean_MASK = self.calculate_stage(epoch, self.MASK_injection_cycle_length, min_mean, max_mean, phase_shift=-math.pi/2) # start with low MASK injection, to give the model as much context as possible to start, only allowed to predict a few positions and slowly increase difficulty
 
 		# for easy logging
 		self.MASK_injection_mean = mean_MASK
@@ -130,10 +124,12 @@ class MASK_injection():
 		# invert the MASK_mask so 1 corresponds to non MASK positions
 		return prediction, ~MASK_mask
 
-	def MASK_tokens(self, batch):
+	def MASK_tokens(self, predictions, mask):
 		
-		batch.predictions, batch.onehot_mask = self.inject_MASK(batch.predictions, batch.key_padding_mask, self.MASK_injection_mean, self.MASK_injection_stdev)
+		predictions, onehot_mask = self.inject_MASK(predictions, mask, self.MASK_injection_mean, self.MASK_injection_stdev)
 		
+		return predictions, onehot_mask
+
 		# skip rand token injection for now
 		# make a percentage of the masked positions have an incorrect class
 		# hard code it for testing, lets say 
@@ -142,65 +138,36 @@ class MASK_injection():
 		# rand_tokens = F.one_hot(torch.randint(0,20, MASK_tokens.shape), num_classes=21) # Z x N x 21
 		# batch.predictions = torch.where(selected_MASK_tokens.unsqueeze(2),rand_tokens, batch.predictions)
 
-class HyperParameters():
 
-	def __init__(self, 	d_model,
-						min_wl, max_wl, base_wl, 
-						d_hidden_we, hidden_layers_we, 
-						d_hidden_aa, hidden_layers_aa,
-						encoder_layers, num_heads,
-						min_spread, max_spread, base_spread,
-						d_hidden_attn, hidden_layers_attn, 
-						temperature, use_model ):
-		self.d_model = d_model
-		self.min_wl = min_wl
-		self.max_wl = max_wl
-		self.base_wl = base_wl 
-		self.d_hidden_we = d_hidden_we
-		self.hidden_layers_we = hidden_layers_we 
-		self.d_hidden_aa = d_hidden_aa
-		self.hidden_layers_aa = hidden_layers_aa
-		self.encoder_layers = encoder_layers
-		self.num_heads = num_heads
-		self.min_spread = min_spread
-		self.max_spread = max_spread 
-		self.base_spread = base_spread 
-		self.d_hidden_attn = d_hidden_attn
-		self.hidden_layers_attn = hidden_layers_attn 
-		self.temperature = temperature
-		self.use_model = use_model
+def main():
+	initial_min_MASK_injection_mean, initial_max_MASK_injection_mean = 0.0, 0.2
+	final_min_MASK_injection_mean, final_max_MASK_injection_mean = 0.2, 0.4
+	MASK_injection_stdev, MASK_injection_cycle_length = 0.05, 10.0
+	randAA_pct, trueAA_pct = 0.0, 0.0
 
-class TrainingParameters():
+	mask_injection = MASK_injection(initial_min_MASK_injection_mean, initial_max_MASK_injection_mean,
+									final_min_MASK_injection_mean, final_max_MASK_injection_mean, 
+									MASK_injection_stdev, MASK_injection_cycle_length, 
+									randAA_pct=0.0, trueAA_pct=0.0)
 
-	def __init__(self, 	epochs,
-						accumulation_steps, 
-						lr_type, # cyclic or plataeu
-						lr_initial_min, lr_initial_max, lr_final_min, lr_final_max, lr_cycle_length, # for cyclic
-						lr_scale, lr_patience, lr_step, # for plataeu
-						beta1, beta2, epsilon, # for adam optim
-						dropout, label_smoothing,
-						loss_type, loss_scale, 
-						use_amp, use_chain_mask
-				):
-		self.epochs = epochs
-		self.accumulation_steps = accumulation_steps 
-		self.lr_type = lr_type 
-		self.lr_initial_min = lr_initial_min
-		self.lr_initial_max = lr_initial_max
-		self.lr_final_min = lr_final_min
-		self.lr_final_max = lr_final_max
-		self.lr_cycle_length = lr_cycle_length 
-		self.lr_scale = lr_scale 
-		self.lr_patience = lr_patience
-		self.lr_step = lr_step
-		self.beta1 = beta1 
-		self.beta2 = beta2
-		self.epsilon = epsilon 
-		self.dropout = dropout 
-		self.label_smoothing = label_smoothing
-		self.loss_type = loss_type 
-		self.loss_scale = loss_scale
-		self.use_amp = use_amp 
-		self.use_chain_mask = use_chain_mask
+	batch, N, tokens = 1, 4, 21
+	predictions = torch.zeros(batch, N, tokens)
+	mask = torch.zeros(batch, N, dtype=torch.bool)
 
-# ----------------------------------------------------------------------------------------------------------------------
+	epochs = 20
+
+	for epoch in range(epochs):
+		stage = epoch/epochs
+		mask_injection.calc_mean_MASK(epoch, stage)
+
+		print(mask_injection.MASK_injection_mean)
+
+		new_pred, onehot = mask_injection.MASK_tokens(predictions, mask)
+
+		print(new_pred, onehot)
+		print()
+
+
+
+if __name__ == "__main__":
+	main() 
