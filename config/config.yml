@@ -56,12 +56,12 @@ use_amp: True  # whether to use automatic mixed precision
 # ------------------------------------------------------------------------------
 
 # Input MASK injection
-initial_min_MASK_injection_mean: 0.05  # minimum mean percentage of one-hot label injection in training
-final_min_MASK_injection_mean: 0.80  # minimum mean percentage of one-hot label injection in training
-initial_max_MASK_injection_mean: 0.25  # initial maximum mean percentage of one-hot label injection in training
-final_max_MASK_injection_mean: 1.00  # final maximum mean percentage of one-hot label injection in training
-MASK_injection_stdev: 0.05  # stdev percentage of one-hot label injection in training
-MASK_injection_cycle_length: 20  # input one-hot injection cycle length
+initial_min_MASK_injection_mean: 0.05  # initial minimum mean percentage of MASK injection injection in training
+final_min_MASK_injection_mean: 0.80  # final minimum mean percentage of MASK injection injection in training
+initial_max_MASK_injection_mean: 0.25  # initial maximum mean percentage of MASK injection injection in training
+final_max_MASK_injection_mean: 1.00  # final maximum mean percentage of MASK injection injection in training
+MASK_injection_stdev: 0.05  # stdev percentage of MASK injection injection in training
+MASK_injection_cycle_length: 20  # input MASK token injection cycle length
 
 # ------------------------------------------------------------------------------
 

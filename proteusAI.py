@@ -140,7 +140,6 @@ class GeoAttention(nn.Module):
 		log_inv = torch.log(inv_dist_pct) # take the log to prepare it for softmax
 		self.spread_weights = nn.Parameter(log_inv)# initialize the learnable weight matrix
 
-
 		# QKV weight matrices
 
 		# init xavier distribution
