@@ -71,9 +71,9 @@ import os
 
 # define configurations for autotuning
 configs = [	triton.Config({"BLOCK_NI": i, "BLOCK_NJ": j}, num_warps=w)
-			for i in [8, 16, 32, 64, 128]
-			for j in [8, 16, 32, 64, 128]
-			for w in [4]
+			for i in [16, 32, 64, 128]
+			for j in [16, 32, 64, 128]
+			for w in [4, 8]
 		]
 
 # filter out configs that are too big
@@ -84,7 +84,7 @@ def keep_fwd(conf):
 	if autotune == "1":
 		return (BLOCK_NI * BLOCK_NJ) <= 2048
 	else:
-		return ((BLOCK_NI == 64) and (BLOCK_NJ == 32) and (conf.num_warps==4))
+		return ((BLOCK_NI == 32) and (BLOCK_NJ == 32) and (conf.num_warps==4))
 
 @triton.autotune(list(filter(keep_fwd, configs)),
 				 key=['tot_Z', 'tot_N', 'd_model'], # triton will not recompile if these inputs are the same (size of input tensor)
