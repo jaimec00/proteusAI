@@ -91,8 +91,9 @@ class WavefunctionEmbedding(nn.Module):
 		# each feature index will be a weighted sum of the allowed wavelengths, it is initialized to be almost
 		# an identity after softmax so that at the start, each index is basically just taking into account the
 		# wavelength of its corresponding index
-		wavelength_weights = torch.softmax(self.wavelength_weights, dim=1)
-		wavelengths = torch.matmul(wavelength_weights, self.wavelengths.unsqueeze(1)).squeeze(1) # d_model//2 x d_model//2 @ d_model//2 x 1 -> d_model//2
+		# wavelength_weights = torch.softmax(self.wavelength_weights, dim=1)
+		# wavelengths = torch.matmul(wavelength_weights, self.wavelengths.unsqueeze(1)).squeeze(1) # d_model//2 x d_model//2 @ d_model//2 x 1 -> d_model//2
+		wavelengths = self.wavelengths
 		wavenumbers = 2 * torch.pi / wavelengths
 
 		# convert to wf features if not already precomputed
@@ -174,9 +175,9 @@ class GeoAttention(nn.Module):
 		dropout = self.dropout if self.training else 0.0
 		
 		# get spread for each head, which is a learnable weighted sum of the allowed spreads
-		spread_weights = torch.softmax(self.spread_weights, dim=1) 
-		spreads = torch.matmul(spread_weights, self.spreads.unsqueeze(1)).squeeze(1) # nhead x nhead @ nhead x 1 -> nhead
-		
+		# spread_weights = torch.softmax(self.spread_weights, dim=1) 
+		# spreads = torch.matmul(spread_weights, self.spreads.unsqueeze(1)).squeeze(1) # nhead x nhead @ nhead x 1 -> nhead
+		spreads = self.spreads
 		# perform attention
 		out = geometric_attn(Q, K, V, coords, spreads, mask=key_padding_mask, dropout=dropout)  # batch x nhead x N x d_k
 
@@ -278,10 +279,10 @@ class proteusAI(nn.Module):
 			return self.auto_regressive(wf, coords, aas, key_padding_mask, temp)
 
 		# simple mlp to get aas to target feature space
-		aas = self.aa_embedding(aas)
+		# aas = self.aa_embedding(aas)
 
 		# simple addition of WE and AA embeddings
-		aas = aas + wf
+		aas = wf #aas + wf
 
 		# bidirectional encoder
 		seq_probs = self.encode(aas, coords, key_padding_mask) # batch x N x d_model (returns aa probability logits)

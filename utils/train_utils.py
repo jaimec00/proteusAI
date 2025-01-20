@@ -276,7 +276,8 @@ class TrainingRun():
 							)
 
 				if epoch is not None:
-					self.MASK_injection.MASK_tokens(batch)
+					# self.MASK_injection.MASK_tokens(batch)
+					self.MASK_all(batch)
 				else:
 					self.MASK_all(batch)
 
@@ -383,7 +384,8 @@ class Epoch():
 						)
 
 			# inject MASK tokens for prediction
-			self.training_run_parent.MASK_injection.MASK_tokens(batch)
+			# self.training_run_parent.MASK_injection.MASK_tokens(batch)
+			self.training_run_parent.MASK_all(batch)
 
 			# learn
 			batch.batch_learn()

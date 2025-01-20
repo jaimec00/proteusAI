@@ -9,7 +9,7 @@ hidden_layers_we: 0
 d_hidden_aa: 1024
 hidden_layers_aa: 0
 
-encoder_layers: 1 # number of dualcoder layers
+encoder_layers: 4 # number of dualcoder layers
 num_heads: 4  # number of attention heads to perform the training with
 min_spread: 3.0
 max_spread: 8.0
@@ -29,10 +29,10 @@ epochs: 50  # number of epochs
 max_batch_size: 256  # possible samples per batch
 min_seq_size: 64 # possible sequence lengths
 max_seq_size: 16384 # possible sequence lengths
-batch_tokens: 16384 # number of valid tokens per batch 
+batch_tokens: 32768 # number of valid tokens per batch 
 min_resolution: 3.5
 
-accumulation_steps: 4  # grad accumulation; how many batches to process before learning step
+accumulation_steps: 2  # grad accumulation; how many batches to process before learning step
 beta1: 0.9  # learning rate
 beta2: 0.98  # learning rate
 epsilon: 10e-9  # learning rate
@@ -41,7 +41,7 @@ label_smoothing: 0.1  # percentage of label smoothing to use on the output label
 loss_type: "mean"  # whether to use the 'sum' or the 'mean' for CEL
 loss_scale: 2000
 lr_type: plateau
-lr_step: 5e-5  # learning rate
+lr_step: 2e-5  # learning rate
 lr_initial_min: 5e-5
 lr_initial_max: 1e-4
 lr_final_min: 1e-5
