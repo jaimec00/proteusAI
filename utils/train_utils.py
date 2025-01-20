@@ -385,7 +385,6 @@ class Epoch():
 			# inject MASK tokens for prediction
 			self.training_run_parent.MASK_injection.MASK_tokens(batch)
 
-
 			# learn
 			batch.batch_learn()
 
@@ -596,21 +595,11 @@ class ModelOutputs():
 		return cel
 
 	def compute_cel_and_seq_sim(self, prediction, loss_function=None, scale=1/2000):
-		"""
-		Compute the mean cross-entropy loss (CEL) and sequence similarity (accuracy) between
-		the original label batch and the noised & smoothed label batch.
-
-		Params:
-			label_batch (torch.Tensor): A batch of correct labels with shape (batch_size, N), where each entry is the index of the correct label.
-			noised_labels (torch.Tensor): A batch of smoothed and noised label predictions with shape (batch_size, N, num_classes).
-			key_padding_mask (torch.Tensor): A mask with shape (batch_size, N), where True indicates padding positions.
-
-		Returns:
-			mean_cel (float): The mean cross-entropy loss over all valid positions.
-			mean_seq_sim (float): The mean sequence similarity (accuracy) over all valid positions.
-		"""
 
 		cel = loss_function(prediction.view(-1, prediction.size(2)).to(torch.float32), self.labels.view(-1).long())
+		if cel.isnan().any() or cel.isinf().any():
+			print("num_valid: ", (self.labels!=-1).sum())
+
 		if loss_function.reduction == "sum":
 			cel = cel_sum * scale
 

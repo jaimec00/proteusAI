@@ -9,7 +9,7 @@ hidden_layers_we: 0
 d_hidden_aa: 1024
 hidden_layers_aa: 0
 
-encoder_layers: 4 # number of dualcoder layers
+encoder_layers: 1 # number of dualcoder layers
 num_heads: 4  # number of attention heads to perform the training with
 min_spread: 3.0
 max_spread: 8.0
@@ -20,13 +20,13 @@ hidden_layers_attn: 0
 temperature: 0.1  # temperature for autoregressive inference (for testing)
 
 # Training configuration
-num_train: 2048  # number of training samples to use; -1 means all available
+num_train: -1  # number of training samples to use; -1 means all available
 num_val: -1  # number of validation samples to use; -1 means all available
 num_test: -1  # number of test samples to use; -1 means all available
-epochs: 2  # number of epochs
+epochs: 50  # number of epochs
 
 # want as few combinations as possible to speed up triton autotuning
-max_batch_size: 128  # possible samples per batch
+max_batch_size: 256  # possible samples per batch
 min_seq_size: 64 # possible sequence lengths
 max_seq_size: 16384 # possible sequence lengths
 batch_tokens: 16384 # number of valid tokens per batch 
@@ -61,7 +61,7 @@ final_min_MASK_injection_mean: 0.80  # minimum mean percentage of one-hot label 
 initial_max_MASK_injection_mean: 0.25  # initial maximum mean percentage of one-hot label injection in training
 final_max_MASK_injection_mean: 1.00  # final maximum mean percentage of one-hot label injection in training
 MASK_injection_stdev: 0.05  # stdev percentage of one-hot label injection in training
-MASK_injection_cycle_length: 7.4  # input one-hot injection cycle length
+MASK_injection_cycle_length: 20  # input one-hot injection cycle length
 
 # ------------------------------------------------------------------------------
 
@@ -73,7 +73,7 @@ weights_path: "model_parameters.pth"  # path to save weights after training
 write_dot: True  # whether to save the dot file of the computational graph
 
 # Input
-data_path: "/share/wangyy/hjc2538/proteusAI/pdb_2021aug02"  # path to data
+data_path: "/share/wangyy/hjc2538/proteusAI/pdb_2021aug02_filtered"  # path to data
 # use_model: 
 # early_stopping: 
 # model_checkpoints:

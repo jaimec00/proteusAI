@@ -60,9 +60,6 @@ description:	converts alpha carbon coordinates to features by modeling each Ca a
 				while this computation would be memory intensive in pytorch, protein_to_wavefunc quickly and efficiently computes the
 				exact features by fusing all the required operations into a single triton kernel, with no approximation.
 
-				TODO:
-					implement backward pass to compute gradients for min_wl, max_wl, and base
-
 '''
 # ----------------------------------------------------------------------------------------------------------------------
 
@@ -222,7 +219,7 @@ def wf_embedding(coords, wavenumbers, mask=None):
 
 class _wf_embedding(torch.autograd.Function):
 
-	@staticmethod # might make wavelengths learnable and make a backward pass, but focusing on MHA kernel first
+	@staticmethod
 	def forward(ctx, coords, wavenumbers, mask=None):
 		'''
 		converts the alpha carbon coordinates of a protein into a tensor of 
@@ -235,10 +232,8 @@ class _wf_embedding(torch.autograd.Function):
 		Args:
 			coords (torch.Tensor):              tensor containing batches of Ca coords. 
 												size = batch x N x 3 
-			d_model (int):						features to create. d_model = number_of_wavelengths*2
-			min_wl (float):						minimum wavelength to use
-			max_wl (float):						maximum wavelength to use
-			base (int|float):					wavelengths are sampled logarithmically, chooses the base to use
+			wavenumbers (torch.Tensor):         tensor containing the wavenumbers to use for each feature idx. 
+												size = batch x N x d_model//2
 			mask (torch.Tensor):    			tenor containing key padding mask
 												size = batch x N 
 		
@@ -277,8 +272,8 @@ class _wf_embedding(torch.autograd.Function):
 		_wf_embedding_fwd[grid](  	out, out.stride(0), out.stride(1), out.stride(2),
 											coords, coords.stride(0), coords.stride(1), coords.stride(2),
 											wavenumbers, wavenumbers.stride(0),
-											cos_sums, cos_sums.stride(0),cos_sums.stride(1), cos_sums.stride(2),
-											sin_sums, sin_sums.stride(0),sin_sums.stride(1), sin_sums.stride(2),
+											cos_sums, cos_sums.stride(0), cos_sums.stride(1), cos_sums.stride(2),
+											sin_sums, sin_sums.stride(0), sin_sums.stride(1), sin_sums.stride(2),
 											mask, mask.stride(0), mask.stride(1),
 											batch, N, d_model
 										)

@@ -30,6 +30,107 @@ torch.serialization.add_safe_globals([defaultdict, list])
 
 # ----------------------------------------------------------------------------------------------------------------------
 
+class EpochBioUnits():
+	def __init__(self, batch_tokens, max_batch_size):
+		
+		self.batch_tokens = batch_tokens
+		self.max_batch_size = max_batch_size 
+
+		self.biounits = []
+		self.chains = [] # also store chain ids so can create the chain mask
+		self.batches = []
+	
+	def add_biounit(self, biounit, chain):
+		self.biounits.append(biounit)
+		self.chains.append(chain)
+
+	def clear_biounits(self):
+		self.biounits = []
+		self.chains = []
+		self.batches = []
+
+	def batch_data(self):
+
+		# get a list of the indexes
+		idxs = list(range(len(self.biounits)))
+
+		# also get the size of each sample for efficient batching
+		idx_size = [[i, len(self.biounits[i])] for i in idxs]
+
+		# sort first so that batches have similar sized samples
+		idx_size = sorted(idx_size, key=lambda x: x[1])
+		random_idx_batches = [idx_size[i:i+self.max_batch_size] for i in range(0, len(idx_size), self.max_batch_size)]
+
+		# shuffle each mini-batch
+		for i in random_idx_batches:
+			random.shuffle(i)
+
+		# send these initial batches to threads to process in parallel, and split in two recursively until the batches are the target batch size
+		def batch_subset(batch_idxs):
+			'''
+			recursively splits batch idxs until reach target number of tokens. 
+			starts at max batch dim eg 64, and splits into 2
+			returns a list of lists, each inner list containing sample indexes and corresponding size
+			'''
+			# print(len(batch_idxs), sum(i[1] for i in batch_idxs))
+			if (sum(i[1] for i in batch_idxs) > self.batch_tokens) or (len(batch_idxs) > self.max_batch_size):
+				split = len(batch_idxs) // 2
+				return batch_subset(batch_idxs[:split]) + batch_subset(batch_idxs[split:])
+			else: 
+				return [batch_idxs]
+
+
+		# parallel processing
+		with ThreadPoolExecutor(max_workers=16) as executor:
+			
+			# submit tasks
+			futures = [executor.submit(batch_subset, batch) for batch in random_idx_batches]
+			
+			# collect results
+			for future in as_completed(futures):
+
+				result = future.result()
+				if result is not None:  # Ignore failed results
+					self.batches.extend(result)
+
+		# shuffle batches, as mini batches are ordered by number of samples (ascending) due to previous logic
+		random.shuffle(self.batches)
+
+	def __len__(self):
+		return len(self.batches)
+
+	def __getitem__(self, idx):
+		return self.biounits[idx]
+
+class BioUnitCache():
+	'''
+	Caches the biounits that have already been loaded from disk to memory for faster retrieval
+	'''
+	def __init__(self):
+
+		self.biounits = {}
+		self.lock = Lock()
+
+	def add_biounit(self, biounit, biounit_id):
+		with self.lock:
+			self.biounits[biounit_id] = biounit 
+
+	def __getitem__(self, biounit_id):
+		with self.lock:
+			try:
+				return self.biounits[biounit_id]
+			except KeyError:
+				return None
+
+class BioUnit():
+	def __init__(self, biounit_dict):
+		self.coords = biounit_dict["coords"]
+		self.labels = biounit_dict["labels"] # no mask needed, masked vals have -1 for labels
+		self.labels = torch.where(self.labels==20, -1, self.labels) # don't predict NCAA
+		self.chain_idxs = biounit_dict["chain_idxs"] # dict of chain [start, end)
+
+	def __len__(self):
+		return self.labels.size(0)
 
 class DataHolder():
 
@@ -63,7 +164,7 @@ class DataHolder():
 		test_clusters_path = data_path / Path("test_clusters.txt")
 
 		# load the df with pdb info
-		pdbs_info = pd.read_csv( pdb_info_path, header=0)
+		pdbs_info = pd.read_csv( pdb_info_path, header=0, engine='python') # use python engine to interpret list as a list properly
 
 		# filter based on resolution
 		pdbs_info = pdbs_info.loc[pdbs_info.RESOLUTION <= min_resolution, :]
@@ -71,10 +172,10 @@ class DataHolder():
 		# filter out long sequences
 
 		# get indices of each chains biounit sizes that are less than max_seq_size
-		pdbs_info["VALID_IDX"] = pdbs_info.loc[:, "BIOUNIT_SIZE"].apply(lambda x: [i for i, _ in enumerate(x) if i <= max_seq_size])
+		pdbs_info["VALID_IDX"] = pdbs_info.loc[:, "BIOUNIT_SIZE"].apply(lambda x: [i for i, size in enumerate(x.split(";")) if int(size) <= max_seq_size])
 		# remove the indices
-		pdbs_info.BIOUNIT = pdbs_info.apply(lambda row: [row.BIOUNIT[idx] for idx in row.VALID_IDX], axis=1)
-		pdbs_info.BIOUNIT_SIZE = pdbs_info.apply(lambda row: [row.BIOUNIT_SIZE[idx] for idx in row.VALID_IDX], axis=1)
+		pdbs_info.BIOUNIT = pdbs_info.apply(lambda row: [row.BIOUNIT.split(";")[idx] for idx in row.VALID_IDX], axis=1)
+		pdbs_info.BIOUNIT_SIZE = pdbs_info.apply(lambda row: [row.BIOUNIT_SIZE.split(";")[idx] for idx in row.VALID_IDX], axis=1)
 		# remove any chains who do not have a biounit after the length filter, and remove the VALID IDX column
 		pdbs_info = pdbs_info.loc[pdbs_info.BIOUNIT.apply(lambda x: len(x)>0), [col for col in pdbs_info.columns if col != "VALID_IDX"]].reset_index(drop=True)
 
@@ -179,9 +280,9 @@ class Data():
 
 	def add_data(self, biounit_id):
 
-		biounit_path = self.pdb_path / Path(f"{biounit_id.split('_')[0][1:3]}/{biounit_id}.pdb") 
+		biounit_path = self.pdb_path / Path(f"{biounit_id.split('_')[0][1:3]}/{biounit_id}.pt") 
 		biounit_raw = torch.load(biounit_path, weights_only=True)
-		biounit = Biounit(biounit_raw)
+		biounit = BioUnit(biounit_raw)
 		self.biounit_cache.add_biounit(biounit, biounit_id)
 
 		return biounit
@@ -205,8 +306,8 @@ class Data():
 											torch.cat(
 														(	tensor, 
 															weight*pad(
-																		[max_size - tensor.size(0)] + \
-																		[tensor.size(i) for i in range(1,tensor.dim())], 
+																		tuple([max_size - tensor.size(0)] + \
+																		[tensor.size(i) for i in range(1,tensor.dim())]), 
 																		dtype=tensor.dtype, device=tensor.device
 																	) + bias
 														), dim=0
@@ -220,7 +321,20 @@ class Data():
 	def __iter__(self):
 		for batch in self.epoch_biounits.batches:
 			
-			seq_next_pow2 = 2**math.ceil(math.log(max(i[1] for i in batch), 2)) # next power of 2
+			
+			# seq size are powers of two, unless it is between 2^n-1 and 2^(n-1 + 1/2)
+			# where n is log_2(max_seq_size) this is because the diff between 2^n-1 and 2^n is very big
+			seq_pow2 = math.log(max(i[1] for i in batch), 2)
+			intermediate_pow = math.log(self.max_seq_size//2 + self.max_seq_size//4, 2)
+			small_pow = math.log(self.max_seq_size//2, 2)
+			
+			if (seq_pow2 > small_pow) and (seq_pow2 < intermediate_pow):
+				seq_pow = intermediate_pow
+			else:
+				seq_pow = math.ceil(seq_pow2)
+
+			seq_next_pow2 = int(2**seq_pow) # next power of 2
+
 			seq_size = max(self.min_seq_size, min(self.max_seq_size, seq_next_pow2))
 
 			labels = []
@@ -260,106 +374,6 @@ class Data():
 	def __len__(self):
 		return len(self.epoch_biounits)
 	
-class EpochBioUnits():
-	def __init__(self, batch_tokens, max_batch_size):
-		
-		self.batch_tokens = batch_tokens
-		self.max_batch_size = max_batch_size 
-
-		self.biounits = []
-		self.chains = [] # also store chain ids so can create the chain mask
-		self.batches = []
-	
-	def add_biounit(self, biounit, chain):
-		self.biounits.append(biounit)
-		self.chains.append(chain)
-
-	def clear_biounits(self):
-		self.biounits = []
-		self.chains = []
-		self.batches = []
-
-	def batch_data(self):
-
-		# get a list of the indexes
-		idxs = list(range(len(self.biounits)))
-
-		# also get the size of each sample for efficient batching
-		idx_size = [[i, len(self.biounits[i])] for i in idxs]
-
-		# sort first so that batches have similar sized samples
-		idx_size = sorted(idx_size, key=lambda x: x[1])
-		random_idx_batches = [idx_size[i:i+self.max_batch_size] for i in range(0, len(idx_size), self.max_batch_size)]
-
-		# shuffle each mini-batch
-		for i in random_idx_batches:
-			random.shuffle(i)
-
-		# send these initial batches to threads to process in parallel, and split in two recursively until the batches are the target batch size
-		def batch_subset(batch_idxs):
-			'''
-			recursively splits batch idxs until reach target number of tokens. 
-			starts at max batch dim eg 64, and splits into 2
-			returns a list of lists, each inner list containing sample indexes and corresponding size
-			'''
-			if (sum(i[1] for i in batch_idxs) > self.batch_tokens) or (len(batch_idxs) > self.max_batch_size):
-				split = len(batch_idxs) // 2
-				return batch_subset(batch_idxs[:split]) + batch_subset(batch_idxs[split:])
-			else: 
-				return [batch_idxs]
-
-
-		# parallel processing
-		with ThreadPoolExecutor(max_workers=16) as executor:
-			
-			# submit tasks
-			futures = [executor.submit(batch_subset, batch) for batch in random_idx_batches]
-			
-			# collect results
-			for future in as_completed(futures):
-
-				result = future.result()
-				if result is not None:  # Ignore failed results
-					self.batches.extend(result)
-
-		# shuffle batches, as mini batches are ordered by number of samples (ascending) due to previous logic
-		random.shuffle(self.batches)
-
-	def __len__(self):
-		return len(self.batches)
-
-	def __getitem__(self, idx):
-		return self.biounits[idx]
-
-class BioUnitCache():
-	'''
-	Caches the biounits that have already been loaded from disk to memory for faster retrieval
-	'''
-	def __init__(self):
-
-		self.biounits = {}
-		self.lock = Lock()
-
-	def add_biounit(self, biounit, biounit_id):
-		with self.lock:
-			self.biounits[biounit_id] = biounit 
-
-	def __getitem__(self, biounit_id):
-		with self.lock:
-			try:
-				return self.biounits[biounit_id]
-			except KeyError:
-				return None
-
-class BioUnit():
-	def __init__(self, biounit_dict):
-		self.coords = biounit_dict["coords"]
-		self.labels = biounit_dict["labels"] # no mask needed, masked vals have -1 for labels
-		self.chain_idxs = biounit_cache["chain_idxs"] # dict of chain [start, end)
-
-	def __len__(self):
-		return self.labels.size(0)
-
 class DataCleaner():
 
 	'''
@@ -447,8 +461,8 @@ class DataCleaner():
 			# now deal with the results
 
 			# assign BIOUNIT and BIOUNIT_SIZE for the chains
-			self.cluster_info.loc[self.cluster_info.CHAINID.isin(pdb_biounits.keys()), "BIOUNIT"] = self.cluster_info.loc[self.cluster_info.CHAINID.isin(pdb_biounits.keys()), :].apply(lambda row: pdb_biounits[row.CHAINID]["BIOUNIT"], axis=1)
-			self.cluster_info.loc[self.cluster_info.CHAINID.isin(pdb_biounits.keys()), "BIOUNIT_SIZE"] = self.cluster_info.loc[self.cluster_info.CHAINID.isin(pdb_biounits.keys()), :].apply(lambda row: pdb_biounits[row.CHAINID]["BIOUNIT_SIZE"], axis=1)
+			self.cluster_info.loc[self.cluster_info.CHAINID.isin(pdb_biounits.keys()), "BIOUNIT"] = self.cluster_info.loc[self.cluster_info.CHAINID.isin(pdb_biounits.keys()), :].apply(lambda row: ';'.join(pdb_biounits[row.CHAINID]["BIOUNIT"]), axis=1)
+			self.cluster_info.loc[self.cluster_info.CHAINID.isin(pdb_biounits.keys()), "BIOUNIT_SIZE"] = self.cluster_info.loc[self.cluster_info.CHAINID.isin(pdb_biounits.keys()), :].apply(lambda row: ';'.join(pdb_biounits[row.CHAINID]["BIOUNIT_SIZE"]), axis=1)
 
 			# remove unused chains, i.e. the pt file doesnt exist
 			self.cluster_info = self.cluster_info.dropna(subset="BIOUNIT").reset_index(drop=True)

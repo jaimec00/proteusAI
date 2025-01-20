@@ -75,7 +75,7 @@ class MASK_injection():
 		
 		return stage_value
 
-	def inject_MASK(self, prediction, key_padding_mask, MASK_injection_mean, MASK_injection_stdev, min_pct=0.01):
+	def inject_MASK(self, prediction, key_padding_mask, chain_mask, min_pct=0.01):
 		'''
 		initial predictions are assumed to be one hot tensor of ground truth labels
 		'''
@@ -87,7 +87,7 @@ class MASK_injection():
 		# do min pct to increase the probability that at least a few tookens are MASK, but will explicitly 
 		# add MASK tokens to samples with no MASK token later anyways
 		MASK_pct = torch.clamp(
-			torch.normal(MASK_injection_mean, MASK_injection_stdev, size=(batch,), device=prediction.device),
+			torch.normal(self.MASK_injection_mean, self.MASK_injection_stdev, size=(batch,), device=prediction.device),
 			min=min_pct, max=1.0
 		)
 
@@ -104,11 +104,14 @@ class MASK_injection():
 
 		# ensure at least one position per sample is MASK labeled
 		# true for samples with all one-hot or masked
-		no_MASK = ~torch.any(MASK_mask & valid_pos, dim=1) # batch x N --> batch,
+		# we add MASK across the whole sample, but have to ensure at least one MASK per sample for positions which the 
+		# loss will be computed for, so this step only checks if the cluster representative chain (not the whole biounit) 
+		# has at least one MASK token
+		no_MASK = ~torch.any(MASK_mask & valid_pos & (~chain_mask), dim=1) # batch x N --> batch,
 
 		# for samples with no MASK tokens, randomly choose one valid position to MASK
 		# first need to redetermine valid positions for those samples
-		no_MASK_and_valid = valid_pos & no_MASK.unsqueeze(-1) # batch x N
+		no_MASK_and_valid = (~chain_mask) & valid_pos & no_MASK.unsqueeze(-1) # batch x N
 
 		# multiply valid positions with all one hot by rand number and get the maximum value (may be more than one value, which is ok)
 		no_MASK_and_valid = no_MASK_and_valid * torch.rand(no_MASK_and_valid.shape, device=no_MASK_and_valid.device) # batch x N
@@ -132,7 +135,7 @@ class MASK_injection():
 
 	def MASK_tokens(self, batch):
 		
-		batch.predictions, batch.onehot_mask = self.inject_MASK(batch.predictions, batch.key_padding_mask, self.MASK_injection_mean, self.MASK_injection_stdev)
+		batch.predictions, batch.onehot_mask = self.inject_MASK(batch.predictions, batch.key_padding_mask, batch.chain_mask)
 		
 		# skip rand token injection for now
 		# make a percentage of the masked positions have an incorrect class

@@ -144,15 +144,15 @@ class GeoAttention(nn.Module):
 		# QKV weight matrices
 
 		# init xavier distribution
-		xavier_scale = math.sqrt(6/(d_k + d_model))
+		xavier_scale = math.sqrt(6/(self.d_k + d_model))
 
 		self.q_proj = nn.Parameter(-xavier_scale + torch.rand(self.nhead, self.d_model, self.d_k) * (2*xavier_scale)) # nhead x d_model x d_k
 		self.k_proj = nn.Parameter(-xavier_scale + torch.rand(self.nhead, self.d_model, self.d_k) * (2*xavier_scale)) # nhead x d_model x d_k
 		self.v_proj = nn.Parameter(-xavier_scale + torch.rand(self.nhead, self.d_model, self.d_k) * (2*xavier_scale)) # nhead x d_model x d_k
 
-		self.q_bias = nn.Parameter(torch.zeros(self.nhead, self.dk))
-		self.k_bias = nn.Parameter(torch.zeros(self.nhead, self.dk))
-		self.v_bias = nn.Parameter(torch.zeros(self.nhead, self.dk))
+		self.q_bias = nn.Parameter(torch.zeros(self.nhead, self.d_k))
+		self.k_bias = nn.Parameter(torch.zeros(self.nhead, self.d_k))
+		self.v_bias = nn.Parameter(torch.zeros(self.nhead, self.d_k))
 
 		self.out_proj = nn.Linear(d_model, d_model)
 
@@ -305,6 +305,8 @@ class proteusAI(nn.Module):
 		aa_onehot = aas[:, :, :20]
 
 		for position in range(aas.size(1)):
+
+			aas = torch.where((aa_onehot==0).all(dim=2, keepdim=True), aas, torch.cat([aa_onehot, torch.zeros(aa_onehot.shape[:2] + (1,), device=aa_onehot.device)], dim=2))
 			
 			aa_embedded = self.aa_embedding(aas) + wf
 

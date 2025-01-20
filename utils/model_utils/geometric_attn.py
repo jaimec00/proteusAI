@@ -40,7 +40,7 @@ def keep_fwd(conf):
 	if autotune == "1":
 		return (BLOCK_I * BLOCK_J) <= 1024
 	else:
-		return ((BLOCK_I == 16) and (BLOCK_J == 64) and (conf.num_warps==4))
+		return ((BLOCK_I == 32) and (BLOCK_J == 64) and (conf.num_warps==4))
 
 def keep_bwd(conf):
 	autotune = os.environ.get("ATTN_AUTOTUNE")
@@ -49,10 +49,10 @@ def keep_bwd(conf):
 	if autotune == "1":
 		return (BLOCK_I * BLOCK_J) <= 1024
 	else:
-		return ((BLOCK_I == 16) and (BLOCK_J == 64) and (conf.num_warps==4))
+		return ((BLOCK_I == 64) and (BLOCK_J == 32) and (conf.num_warps==4))
 
 @triton.autotune(list(filter(keep_fwd, configs)),
-				 key=['tot_N', 'tot_Z', 'nheads', 'min_d_k'], # triton will not recompile if these inputs are the same (size of input tensor)
+				 key=['tot_N', 'tot_Z', 'nheads', 'min_d_k'], # triton will not rerun autotune if these inputs are the same (size of input tensor)
 				 restore_value=["O_ptr", "L_ptr"]) # make sure autotuning resets the outputs of this function for each configuration
 @triton.jit
 def _attn_fwd(
@@ -697,5 +697,4 @@ class _geometric_attn(torch.autograd.Function):
 		d_spreads = d_spreads.to(ctx.spreads_dtype)
 
 		# return the gradients
-		return dQ, dK, dV, None, d_spreads, None, None, None, None, None
-
+		return dQ, dK, dV, None, d_spreads, None, None
