@@ -12,7 +12,7 @@ description:	converts alpha carbon coordinates to features by modeling each Ca a
 				the solution to this eq. is:
 							 				  exp( ik * |r - r_n| )
 					psi_k(r) =	sum_n=0^N   -----------------------
-											       |r - r_n| 
+												   |r - r_n| 
 
 				since this corresponds to single wavenumber, k=(2pi / wavelength), we can assign a k value, and 
 				thus a wavelength to each feature space. note that the output of psi_k(r) is a complex number,
@@ -31,14 +31,14 @@ description:	converts alpha carbon coordinates to features by modeling each Ca a
 
 												  cos( k * |r - r_n| )
 								sum_n=0^N   	-----------------------
-												       |r - r_n| 
+													   |r - r_n| 
 								
 				WF(r, 2i+1) = 	lambda <- min_wl + ( (max_wl-min_wl) * (base^(2i/d_model) - 1) / (base-1) )
 								k <- 2pi / lambda	
 
 												  sin( k * |r - r_n| )
 								sum_n=0^N   	-----------------------
-												       |r - r_n| 
+													   |r - r_n| 
 
 				note that this is reminiscent of positional encoding:
 				
@@ -71,10 +71,10 @@ import os
 
 # define configurations for autotuning
 configs = [	triton.Config({"BLOCK_NI": i, "BLOCK_NJ": j}, num_warps=w, num_stages=s)
-			for i in [16, 32, 64, 128]
-			for j in [1, 16, 32, 64, 128]
+			for i in [16, 32, 64, 128, 256]
+			for j in [1, 2, 4, 8, 16]
 			for w in [4, 8]
-			for s in [2,3,4]
+			for s in [2]
 		]
 
 # filter out configs that are too big
@@ -111,9 +111,8 @@ def _wf_embedding_fwd(
 	# get i, j indices
 	NI_start = tl.program_id(0)
 	NI_offs = NI_start*BLOCK_NI
-	
-	NJ_start = tl.program_id(1)
-	NJ_offs = NJ_start*BLOCK_NJ
+
+	K_offs = tl.program_id(1)
 
 	# get batch and wavenumber indices
 	Z = tl.program_id(2)
@@ -139,77 +138,97 @@ def _wf_embedding_fwd(
 		base=coords_ptr + (Z*stride_coords_Z),
 		shape=(tot_N, 3),
 		strides=(stride_coords_N, stride_coords_space),
-		offsets=(NJ_offs, 0),
+		offsets=(0, 0),
 		block_shape=(BLOCK_NJ, 4), # 4th value is masked, tensor needs to be power of two (x,y,z,masked)
 		order=(0, 1)
 	)
+	
 	mask_NJ_ptr = tl.make_block_ptr( # NJ,
 		base=mask_ptr + (Z*stride_mask_Z),
 		shape=(tot_N, ),
 		strides=(stride_mask_N, ),
-		offsets=(NJ_offs, ),
+		offsets=(0, ),
 		block_shape=(BLOCK_NJ, ),
 		order=(0, )
 	)
 
-	# initilize output pointer. atomic add does not support block pointers
-	NI_out = NI_offs + tl.arange(0, BLOCK_NI)[:, None] # NI, 1
-	out_ptr = out_ptr + Z*stride_out_Z + (NI_out*stride_out_N) + (tl.arange(0,2)*stride_out_D) # NI x 2
+	# load wavenumbers
+	wavenumber = tl.load(wavenumber_ptr + (K_offs*stride_wavenumber_K))
 
-	# load coords
-	coords_NI = tl.load(coords_NI_ptr, boundary_check=(0,1), padding_option="zero") # N x 3
-	coords_NJ = tl.load(coords_NJ_ptr, boundary_check=(0,1), padding_option="zero") # N x 3
+	# init outputs
+	cos_sums = tl.zeros((BLOCK_NI, 1), dtype=tl.float32)
+	sin_sums = tl.zeros((BLOCK_NI, 1), dtype=tl.float32)
+	output = tl.zeros((BLOCK_NI, 2), dtype=tl.float32)
 
-	# compute dists
-	dists_raw = coords_NI[:, None, :] - coords_NJ[None, :, :] # NI x NJ x 4
-	dists = tl.sqrt(tl.sum(dists_raw * dists_raw, axis=2)) # NI x NJ
-	
-	# compute mask
+	# load coords and mask for i
+	coords_NI = tl.load(coords_NI_ptr, boundary_check=(0,1), padding_option="zero") # N x 4
 	mask_NI = tl.load(mask_NI_ptr, boundary_check=(0,), padding_option="zero").to(tl.int1) # NI
-	mask_NJ = tl.load(mask_NJ_ptr, boundary_check=(0,), padding_option="zero").to(tl.int1) # NJ
-	mask_IJ = mask_NI[:, None] & mask_NJ[None, :] # NI x NJ
-	mask_IJ = mask_IJ & (dists!=0)
 
-	# init pointer for storing sum of cosines and sins
-	cos_sum_ptr = cos_sums_ptr + (Z*stride_cos_sums_Z) + ((NI_offs + tl.arange(0, BLOCK_NI))*stride_cos_sums_N)
-	sin_sum_ptr = sin_sums_ptr + (Z*stride_sin_sums_Z) + ((NI_offs + tl.arange(0, BLOCK_NI))*stride_sin_sums_N)
+	for j in tl.range(0, triton.cdiv(tot_N, BLOCK_NJ), 1):
 
-	# loop through wavenumbers
-	num_wn = d_model//2
-	for d in tl.range(0, num_wn, 1):
+		# load coords for j
+		coords_NJ = tl.load(coords_NJ_ptr, boundary_check=(0,1), padding_option="zero") # N x 4
+
+		# compute dists
+		dists_raw = coords_NI[:, None, :] - coords_NJ[None, :, :] # NI x NJ x 4
+		dists = tl.sqrt(tl.sum(dists_raw * dists_raw, axis=2)) # NI x NJ
+		
+		# compute mask
+		mask_NJ = tl.load(mask_NJ_ptr, boundary_check=(0,), padding_option="zero").to(tl.int1) # NJ
+		mask_IJ = mask_NI[:, None] & mask_NJ[None, :] # NI x NJ
+		mask_IJ = mask_IJ & (dists!=0)
 
 		# load wavenumber and compute phase
-		phase = (dists*tl.load(wavenumber_ptr, mask=d<num_wn, other=0)) # NI x NJ
+		phase = dists*wavenumber # NI x NJ 
 
 		# accumulate sum of cosines and sins for this wavenumber for bwd pass
-		cos_sums = tl.sum(tl.where(mask_IJ, tl.cos(phase), 0.0), axis=1)
-		sin_sums = tl.sum(tl.where(mask_IJ, tl.sin(phase), 0.0), axis=1)
-
-		# store for bwd
-		tl.atomic_add(cos_sum_ptr, cos_sums, mask=mask_NI)
-		tl.atomic_add(sin_sum_ptr, sin_sums, mask=mask_NI)
-
+		cos_sums += tl.sum(tl.where(mask_IJ, tl.cos(phase), 0.0), axis=1)[:, None] # NI
+		sin_sums += tl.sum(tl.where(mask_IJ, tl.sin(phase), 0.0), axis=1)[:, None] # NI
+		
 		# compute real and imag parts
 		real = tl.cos(phase) / tl.where(mask_IJ, dists, float("inf")) # NI x NJ
 		imag = tl.sin(phase) / tl.where(mask_IJ, dists, float("inf")) # NI x NJ
 
 		# superpose real and imag parts in the tile
-		real_superposition = tl.sum(real, axis=1) # NI,
-		imag_superposition = tl.sum(imag, axis=1) # NI,
+		real_superposition = tl.sum(real, axis=1) # NI
+		imag_superposition = tl.sum(imag, axis=1) # NI
 
 		# join into features -> NI x 2
-		features = tl.join(real_superposition, imag_superposition)
+		output += tl.join(real_superposition, imag_superposition)
 
-		# make sure d_model dimension is less than d_model and add features to output tensor
-		mask_D = ((d*2 + tl.arange(0, 2)) < d_model).to(tl.int1) # 2,
-		output_mask = mask_NI[:, None] & mask_D[None, :] # NI x 2
-		tl.atomic_add(out_ptr, features, mask=output_mask)
+		coords_NJ_ptr = tl.advance(coords_NJ_ptr, (BLOCK_NJ, 0))
+		mask_NJ_ptr = tl.advance(mask_NJ_ptr, (BLOCK_NJ, ))
 
-		# advance pointers
-		wavenumber_ptr += 1*stride_wavenumber_K
-		cos_sum_ptr += 1*stride_cos_sums_K
-		sin_sum_ptr += 1*stride_sin_sums_K
-		out_ptr += 2*stride_out_D
+	out_ptr = tl.make_block_ptr(
+		base=out_ptr + (Z*stride_out_Z),
+		shape=(tot_N, d_model),
+		strides=(stride_out_N, stride_out_D),
+		offsets=(NI_offs, K_offs*2),
+		block_shape=(BLOCK_NI, 2),
+		order=(0, 1)
+	)
+
+	cos_sums_ptr = tl.make_block_ptr(
+		base=cos_sums_ptr + (Z*stride_cos_sums_Z),
+		shape=(tot_N, d_model//2),
+		strides=(stride_cos_sums_N, stride_cos_sums_K),
+		offsets=(NI_offs, K_offs),
+		block_shape=(BLOCK_NI, 1),
+		order=(0, 1)
+	)
+
+	sin_sums_ptr = tl.make_block_ptr(
+		base=sin_sums_ptr + (Z*stride_sin_sums_Z),
+		shape=(tot_N, d_model//2),
+		strides=(stride_sin_sums_N, stride_sin_sums_K),
+		offsets=(NI_offs, K_offs),
+		block_shape=(BLOCK_NI, 1),
+		order=(0, 1)
+	)
+
+	tl.store(out_ptr, output, boundary_check=(0,1))
+	tl.store(cos_sums_ptr, cos_sums, boundary_check=(0,1))
+	tl.store(sin_sums_ptr, sin_sums, boundary_check=(0,1))
 
 def wf_embedding(coords, wavenumbers, mask=None):
 	'''wrapper to call protein_to_wavefunc w/ kwargs'''
@@ -264,7 +283,7 @@ class _wf_embedding(torch.autograd.Function):
 
 		# define the grid
 		grid = lambda args: (	triton.cdiv(args["tot_N"], args["BLOCK_NI"]), 
-								triton.cdiv(args["tot_N"], args["BLOCK_NJ"]), 
+								args["d_model"]//2, #triton.cdiv(args["tot_N"], args["BLOCK_NJ"]), 
 								args["tot_Z"]
 							)
 

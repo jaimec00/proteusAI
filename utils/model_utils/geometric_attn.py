@@ -27,8 +27,8 @@ import os
 
 # define configurations for autotuning
 configs = [	triton.Config({"BLOCK_I": i, "BLOCK_J": j}, num_warps=w)
-			for i in [16, 32, 64, 128]
-			for j in [16, 32, 64, 128]
+			for i in [16, 32, 64, 128, 256]
+			for j in [16, 32, 64, 128, 256]
 			for w in [4, 8]
 		]
 
@@ -40,7 +40,7 @@ def keep_fwd(conf):
 	if autotune == "1":
 		return (BLOCK_I * BLOCK_J) <= 2048
 	else:
-		return ((BLOCK_I == 128) and (BLOCK_J == 16) and (conf.num_warps==8))
+		return ((BLOCK_I == 128) and (BLOCK_J == 32) and (conf.num_warps==8))
 
 def keep_bwd(conf):
 	autotune = os.environ.get("ATTN_AUTOTUNE")
@@ -49,8 +49,14 @@ def keep_bwd(conf):
 	if autotune == "1":
 		return (BLOCK_I * BLOCK_J) <= 2048
 	else:
-		return ((BLOCK_I == 16) and (BLOCK_J == 64) and (conf.num_warps==4))
+		return ((BLOCK_I == 64) and (BLOCK_J == 64) and (conf.num_warps==8))
 
+
+# @triton.heuristics(values={
+# 	"BLOCK_I": lambda args: get_BLOCK_I(args["tot_Z"], args["nheads"], args["tot_N"], args["d_k"]),
+# 	"BLOCK_J": lambda args: get_BLOCK_J(args["tot_Z"], args["nheads"], args["tot_N"], args["d_k"]),
+# 	"num_warps": lambda args: get_num_warps(args["tot_Z"], args["nheads"], args["tot_N"], args["d_k"])
+# })
 @triton.autotune(list(filter(keep_fwd, configs)),
 				 key=['tot_N', 'tot_Z', 'nheads', 'min_d_k'], # triton will not rerun autotune if these inputs are the same (size of input tensor)
 				 restore_value=["O_ptr", "L_ptr"]) # make sure autotuning resets the outputs of this function for each configuration
@@ -590,10 +596,10 @@ class _geometric_attn(torch.autograd.Function):
 		assert spreads.size(0) == nheads, f"number of spreads per batch must be equal to nheads, not {spreads.size(0)=} and {nheads=}"
 		assert torch.all(spreads > 0), f"spreads must be a tensor of positive, non-zero floats, not {spreads}"
 
-		ctx.Q_dtype = Q.dtype
-		ctx.K_dtype = K.dtype
-		ctx.V_dtype = V.dtype
-		ctx.spreads_dtype = spreads.dtype
+		# ctx.Q_dtype = Q.dtype
+		# ctx.K_dtype = K.dtype
+		# ctx.V_dtype = V.dtype
+		# ctx.spreads_dtype = spreads.dtype
 
 		# matmults done in fp16
 		Q = Q.to(torch.float16).contiguous()
@@ -641,7 +647,7 @@ class _geometric_attn(torch.autograd.Function):
 		ctx.softmax_scale = softmax_scale
 		ctx.dropout = dropout
 
-		return out.to(ctx.Q_dtype)
+		return out#.to(ctx.Q_dtype)
 
 	@staticmethod
 	def backward(ctx, dO):
@@ -691,10 +697,10 @@ class _geometric_attn(torch.autograd.Function):
 							ctx.dropout
 						 )
 
-		dQ = dQ.to(ctx.Q_dtype)
-		dK = dK.to(ctx.K_dtype)
-		dV = dV.to(ctx.V_dtype)
-		d_spreads = d_spreads.to(ctx.spreads_dtype)
+		dQ = dQ#.to(ctx.Q_dtype)
+		dK = dK#.to(ctx.K_dtype)
+		dV = dV#.to(ctx.V_dtype)
+		d_spreads = d_spreads#.to(ctx.spreads_dtype)
 
 		# return the gradients
 		return dQ, dK, dV, None, d_spreads, None, None
