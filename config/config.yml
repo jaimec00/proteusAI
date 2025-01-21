@@ -26,10 +26,10 @@ num_test: -1  # number of test samples to use; -1 means all available
 epochs: 50  # number of epochs
 
 # want as few combinations as possible to speed up triton autotuning
-max_batch_size: 128  # possible samples per batch
+max_batch_size: 256  # possible samples per batch
 min_seq_size: 64 # possible sequence lengths
 max_seq_size: 8192 # possible sequence lengths
-batch_tokens: 8192 # number of valid tokens per batch 
+batch_tokens: 16384 # number of valid tokens per batch 
 min_resolution: 3.5
 
 accumulation_steps: 2  # grad accumulation; how many batches to process before learning step

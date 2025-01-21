@@ -70,22 +70,22 @@ import triton.language as tl
 import os
 
 # define configurations for autotuning
-configs = [	triton.Config({"BLOCK_NI": i, "BLOCK_NJ": j}, num_warps=w, num_stages=s)
-			for j in [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096]
-			for i in [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096]
-			for w in [4, 8]
-			for s in [2]
-		]
+# configs = [	triton.Config({"BLOCK_NI": i, "BLOCK_NJ": j}, num_warps=w, num_stages=s)
+# 			for j in [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096]
+# 			for i in [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096]
+# 			for w in [4, 8]
+# 			for s in [2]
+# 		]
 
-# filter out configs that are too big
-def keep_fwd(conf):
-	autotune = os.environ.get("WF_AUTOTUNE")
-	BLOCK_NI = conf.kwargs["BLOCK_NI"]
-	BLOCK_NJ = conf.kwargs["BLOCK_NJ"]
-	if autotune == "1":
-		return (BLOCK_NI * BLOCK_NJ) <= 2048
-	else:
-		return ((BLOCK_NI == 2) and (BLOCK_NJ == 1024) and (conf.num_warps==4) and (conf.num_stages==2))
+# # filter out configs that are too big
+# def keep_fwd(conf):
+# 	autotune = os.environ.get("WF_AUTOTUNE")
+# 	BLOCK_NI = conf.kwargs["BLOCK_NI"]
+# 	BLOCK_NJ = conf.kwargs["BLOCK_NJ"]
+# 	if autotune == "1":
+# 		return (BLOCK_NI * BLOCK_NJ) <= 2048
+# 	else:
+# 		return ((BLOCK_NI == 2) and (BLOCK_NJ == 1024) and (conf.num_warps==4) and (conf.num_stages==2))
 
 # @triton.autotune(list(filter(keep_fwd, configs)),
 # 				 key=['tot_Z', 'tot_N', 'd_model'], # triton will not recompile if these inputs are the same (size of input tensor)
@@ -113,7 +113,8 @@ def _wf_embedding_fwd(
 		d_model:tl.constexpr, 
 
 		BLOCK_NI: tl.constexpr,
-		BLOCK_NJ: tl.constexpr
+		BLOCK_NJ: tl.constexpr,
+		num_warps: tl.constexpr
 ):
 
 	# get i, j indices
@@ -181,8 +182,6 @@ def _wf_embedding_fwd(
 	phase = dists*tl.load(wavenumber_ptr + (K_offs*stride_wavenumber_K))
 	cos = tl.cos(phase)
 	sin = tl.sin(phase)
-	# cos = 1
-	# sin = 1
 
 	# accumulate sum of cosines and sins for this wavenumber for bwd pass
 	tl.atomic_add(cos_sums_ptr + (Z_offs*stride_cos_sums_Z) + ((NI_offs + tl.arange(0,BLOCK_NI))*stride_cos_sums_N) + (K_offs*stride_cos_sums_K), tl.sum(tl.where(mask_IJ, cos, 0.0), axis=1), mask=mask_NI) # NI

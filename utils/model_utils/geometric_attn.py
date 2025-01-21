@@ -212,6 +212,7 @@ def _attn_fwd(
 		
 		# compute the rbfs
 		Rij = tl.exp(-(dists*dists) / (2*spread*spread)) # N x N (fp32)
+		dist_mask = Rij > 0.01
 
 		# negative logits with close distances should be less negative
 		# eps = min_rbf, so maximum rbf (1) would result in logits of min_rbf
@@ -220,7 +221,7 @@ def _attn_fwd(
 		Rij = tl.where(Sij < 0, 2-Rij, Rij + 1) # N x N (fp32)
 
 		# set masked positions to -inf, include out of range dists in mask
-		attn_mask = (mask_i[:, None]) & (tl.load(mask_j_ptr, boundary_check=(0,), padding_option="zero").to(tl.int1)[None, :]) # N x N
+		attn_mask = (dist_mask) & (mask_i[:, None]) & (tl.load(mask_j_ptr, boundary_check=(0,), padding_option="zero").to(tl.int1)[None, :]) # N x N
 
 		# scale attention logits by Rij and mask invalid pairs
 		SRij = tl.where(attn_mask, Sij*Rij, -inf) # N x N (fp32)
@@ -469,6 +470,7 @@ def _attn_bwd(
 
 		# compute rbfs (fp32)
 		Rij = tl.exp(-(dists*dists) / (2.0*spread*spread)) # N x N (fp32)
+		dist_mask = Rij > 0.01
 
 		# for positive logits, scale by 1 + rbf, so that SR = S + S*R. for smoother gradients
 		# for negative logits, small dists should be scaled to be less negative than for far distances, s.t. SR = 2S - S*R
@@ -478,7 +480,7 @@ def _attn_bwd(
 
 		# mask out attention that is not relevant to this head
 		mask_i = tl.load(mask_i_ptr, boundary_check=(0, ), padding_option="zero").to(tl.int1)
-		attn_mask = mask_i[:, None] & (mask_j[None, :])  # N x N
+		attn_mask = (dist_mask) & (mask_i[:, None]) & (mask_j[None, :])  # N x N
 
 		# scale attention logits by RBFs
 		SRij = tl.where(attn_mask, Sij*Rij, -inf) # N x N (fp32)

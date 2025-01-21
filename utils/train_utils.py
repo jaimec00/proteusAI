@@ -151,6 +151,9 @@ class TrainingRun():
 		
 		self.training_parameters.num_params = sum(p.numel() for p in self.model.parameters())
 
+		# compile the model
+		torch.compile(self.model)
+
 	def setup_optim(self):
 		'''
 		sets up the optimizer, zeros out the gradient
