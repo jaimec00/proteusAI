@@ -258,6 +258,7 @@ class _wf_embedding(torch.autograd.Function):
 
 
 		# run the kernel
+
 		_wf_embedding_fwd[grid](  	out, out.stride(0), out.stride(1), out.stride(2),
 											coords, coords.stride(0), coords.stride(1), coords.stride(2),
 											wavenumbers, wavenumbers.stride(0),

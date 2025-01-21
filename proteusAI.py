@@ -46,12 +46,18 @@ class AminoAcidEmbedding(nn.Module):
 	def __init__(self, num_aas=21, d_model=512, d_hidden_aa=1024, hidden_layers_aa=0, dropout=0.0):
 		super(AminoAcidEmbedding, self).__init__()
 		
-		self.ffn = MLP(num_aas, d_model, d_hidden_aa, hidden_layers_aa, dropout)
-		# self.norm = nn.LayerNorm(d_model)
+		self.linear = nn.Linear(num_aas, d_model)
+		self.ffn = MLP(d_model, d_model, d_hidden_aa, hidden_layers_aa, dropout)
+		self.dropout = nn.Dropout(dropout)
+		self.norm1 = nn.LayerNorm(d_model)
+		self.norm2 = nn.LayerNorm(d_model)
 
-	def forward(self, aa):
-		return self.ffn(aa)
-		# return self.norm(self.ffn(aa))
+
+	def forward(self, aa, wf):
+		aas = self.norm1(self.linear(aa) + wf)
+		aas = self.norm2(aas + self.dropout(self.ffn(aas)))
+
+		return aas
 
 class WavefunctionEmbedding(nn.Module):
 	'''
@@ -82,9 +88,6 @@ class WavefunctionEmbedding(nn.Module):
 		# note that will be doing a weighted sum of wavelengths, not wavenumbers, compute the wavenumbers after computing weighted sum 
 		# of wavelengths, to ensure the wavelengths are always within min wavelength and max wavelength		
 
-		# self.mlp = MLP(d_model, d_model, d_hidden, hidden_layers, dropout)
-		# self.norm = nn.LayerNorm(d_model)
-		# self.dropout = nn.Dropout(dropout)
 
 	def forward(self, coords, key_padding_mask):
 
@@ -93,18 +96,10 @@ class WavefunctionEmbedding(nn.Module):
 		# wavelength of its corresponding index
 		wavelength_weights = torch.softmax(self.wavelength_weights, dim=1)
 		wavelengths = torch.matmul(wavelength_weights, self.wavelengths.unsqueeze(1)).squeeze(1) # d_model//2 x d_model//2 @ d_model//2 x 1 -> d_model//2
-
 		wavenumbers = 2 * torch.pi / wavelengths
 
 		# convert to wf features if not already precomputed
 		wf = wf_embedding(coords, wavenumbers, key_padding_mask) # batch x N x 3 --> batch x N x d_model
-
-		# pass through ffn
-		# wf2 = self.mlp(wf)
-
-		# add and norm w dropout
-		# wf = wf + self.dropout(wf2)
-		# wf = self.norm(wf)
 
 		return wf
 
@@ -128,7 +123,8 @@ class GeoAttention(nn.Module):
 		self.dropout = dropout
 
 		# define spreads and spread weights matrix so each head's spread is a weighted sum of the allowed spreads
-		self.register_buffer("spreads", min_spread + (max_spread - min_spread) * (torch.logspace(0,1,nhead, base) - 1) / (base - 1))
+		num_spreads = nhead*4
+		self.register_buffer("spreads", min_spread + (max_spread - min_spread) * (torch.logspace(0,1,num_spreads, base) - 1) / (base - 1))
 
 		# compute the values to initialize the weights, so that post softmax, the diagonals have the most weight
 		# and the farther a column index is from the diagonal, the less weight it receives
@@ -139,9 +135,14 @@ class GeoAttention(nn.Module):
 		dist_pct = dist / (nhead) # as a percentage
 		inv_dist_pct = 1 - (dist_pct**(1/(2*nhead))) # invert by subtracting pct from 1, also take the 2*nhead root to emphasize the diagonals more
 		log_inv = torch.log(inv_dist_pct) # take the log to prepare it for softmax
-		self.spread_weights = nn.Parameter(log_inv)# initialize the learnable weight matrix
 
-		# QKV weight matrices
+		# this is for when there are more spreads than heads, i.e. the learnable weights is not a square matrix. 
+		# most weight goes to num_spreads//nhead first spreads 
+		# (i.e. first 4 idxs if num_spreads is 4 times bigger), etc.
+		init_spread_weights = log_inv.unsqueeze(2).expand(-1, -1, num_spreads//nhead).reshape(nhead, num_spreads)
+		self.spread_weights = nn.Parameter(init_spread_weights)# initialize the learnable weight matrix
+
+		# QKV weight and bias matrices
 
 		# init xavier distribution
 		xavier_scale = math.sqrt(6/(self.d_k + d_model))
@@ -150,9 +151,9 @@ class GeoAttention(nn.Module):
 		self.k_proj = nn.Parameter(-xavier_scale + torch.rand(self.nhead, self.d_model, self.d_k) * (2*xavier_scale)) # nhead x d_model x d_k
 		self.v_proj = nn.Parameter(-xavier_scale + torch.rand(self.nhead, self.d_model, self.d_k) * (2*xavier_scale)) # nhead x d_model x d_k
 
-		self.q_bias = nn.Parameter(torch.zeros(self.nhead, self.d_k))
-		self.k_bias = nn.Parameter(torch.zeros(self.nhead, self.d_k))
-		self.v_bias = nn.Parameter(torch.zeros(self.nhead, self.d_k))
+		self.q_bias = nn.Parameter(torch.zeros(self.nhead, self.d_k)) # nhead x d_k
+		self.k_bias = nn.Parameter(torch.zeros(self.nhead, self.d_k)) # nhead x d_k
+		self.v_bias = nn.Parameter(torch.zeros(self.nhead, self.d_k)) # nhead x d_k
 
 		self.out_proj = nn.Linear(d_model, d_model)
 
@@ -176,7 +177,7 @@ class GeoAttention(nn.Module):
 		
 		# get spread for each head, which is a learnable weighted sum of the allowed spreads
 		spread_weights = torch.softmax(self.spread_weights, dim=1) 
-		spreads = torch.matmul(spread_weights, self.spreads.unsqueeze(1)).squeeze(1) # nhead x nhead @ nhead x 1 -> nhead
+		spreads = torch.matmul(spread_weights, self.spreads.unsqueeze(1)).squeeze(1) # nhead x nspread @ nspread x 1 -> nhead
 
 		# perform attention
 		out = geometric_attn(Q, K, V, coords, spreads, mask=key_padding_mask, dropout=dropout)  # batch x nhead x N x d_k
@@ -278,11 +279,8 @@ class proteusAI(nn.Module):
 		if auto_regressive:
 			return self.auto_regressive(wf, coords, aas, key_padding_mask, temp)
 
-		# simple mlp to get aas to target feature space
-		# aas = self.aa_embedding(aas)
-
-		# simple addition of WE and AA embeddings
-		aas = wf #aas + wf
+		# aa embedding + wf_encoding + ffn
+		aas = self.aa_embedding(aas, wf)
 
 		# bidirectional encoder
 		seq_probs = self.encode(aas, coords, key_padding_mask) # batch x N x d_model (returns aa probability logits)
