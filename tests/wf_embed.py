@@ -37,7 +37,7 @@ def main():
 	end_event = torch.cuda.Event(enable_timing=True)
 	atol, rtol = 1e-4, 0
 
-	# wf_embedding_torch = wf_embedding
+	wf_embedding_torch = wf_embedding
 
 	triton_out, triton_time, triton_memory = profile_func(wf_embedding, params, start_event, end_event)
 	torch_out, torch_time, torch_memory = profile_func(wf_embedding_torch, params, start_event, end_event)

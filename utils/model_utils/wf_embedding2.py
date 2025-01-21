@@ -92,13 +92,13 @@ import os
 # 				 restore_value=["out_ptr"] # make sure autotuning resets the outputs of this function for each configuration
 # ) 
 
-@triton.heuristics(
-	values = {
-		"BLOCK_NI": lambda args: 2048 // min(1024, triton.next_power_of_2(args['tot_N'])),
-		"BLOCK_NJ": lambda args: min(1024, triton.next_power_of_2(args['tot_N'])),
-		"num_warps": lambda args: 4
-	}
-)
+# @triton.heuristics(
+# 	values = {
+# 		"BLOCK_NI": lambda args: 2048 // min(1024, triton.next_power_of_2(args['tot_N'])),
+# 		"BLOCK_NJ": lambda args: min(1024, triton.next_power_of_2(args['tot_N'])),
+# 		"num_warps": lambda args: 4
+# 	}
+# )
 @triton.jit
 def _wf_embedding_fwd(
 		out_ptr, stride_out_Z, stride_out_N, stride_out_D,
@@ -114,7 +114,7 @@ def _wf_embedding_fwd(
 
 		BLOCK_NI: tl.constexpr,
 		BLOCK_NJ: tl.constexpr,
-		num_warps: tl.constexpr
+		# num_warps: tl.constexpr
 ):
 
 	# get i, j indices
@@ -252,6 +252,11 @@ class _wf_embedding(torch.autograd.Function):
 								args["tot_Z"]*(args["d_model"]//2)
 							)
 
+		BLOCK_NI = 2048 // min(1024, triton.next_power_of_2(N))
+		BLOCK_NJ = min(1024, triton.next_power_of_2(N))
+		# num_warps = 8
+
+
 		# run the kernel
 		_wf_embedding_fwd[grid](  	out, out.stride(0), out.stride(1), out.stride(2),
 											coords, coords.stride(0), coords.stride(1), coords.stride(2),
@@ -259,7 +264,8 @@ class _wf_embedding(torch.autograd.Function):
 											cos_sums, cos_sums.stride(0), cos_sums.stride(1), cos_sums.stride(2),
 											sin_sums, sin_sums.stride(0), sin_sums.stride(1), sin_sums.stride(2),
 											mask, mask.stride(0), mask.stride(1),
-											batch, N, d_model
+											batch, N, d_model,
+											BLOCK_NI, BLOCK_NJ
 										)
 
 		ctx.save_for_backward(cos_sums, sin_sums)
