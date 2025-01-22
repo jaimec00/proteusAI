@@ -5,7 +5,7 @@
 
 // declare the cuda kernel implemented in wf_embedding_kernel.cu
 void wf_embedding_kernel_forward(
-    const float* coords, int stride_coords_Z, int stride_coords_N, int stride_coords_S,
+    const float* coords, int stride_coords_Z, int stride_coords_S, int stride_coords_N,
     const float* wavenumbers, int stride_wavenumbers_K, 
     const bool* mask, int stride_mask_Z, int stride_mask_N,
 
@@ -41,7 +41,7 @@ void wf_embedding_forward(
 
     // get tensor sizes 
     int tot_Z = coords.size(0); // batch size
-    int tot_N = coords.size(1); // sequence size
+    int tot_N = coords.size(2); // sequence size
     int d_model = wavenumbers.size(0)*2; // feature size (num_wn == d_model//2)
 
     TORCH_CHECK(out.size(0) == tot_Z, "out batch size mismatch");
@@ -72,6 +72,6 @@ void wf_embedding_forward(
     cudaDeviceSynchronize();
 }
 
-PYBIND11_MODULE(wf_embedding, m) {
+PYBIND11_MODULE(wf_embedding_kernel, m) {
     m.def("forward", &wf_embedding_forward, "Wavefunction Embedding Forward Method");
 }

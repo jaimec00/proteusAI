@@ -1,65 +1,53 @@
 import torch
 # import wf_embedding_kernel
 from torch.utils.cpp_extension import load
+import os
 
+base_dir = os.path.dirname(os.path.abspath(__file__))
 # dynamically compile and load the extension
 wf_embedding_kernel = load(
-    name="wf_embedding_kernel",
-    sources=["wf_embedding_if.cpp", "wf_embedding_kernel.cu"]
+	name="wf_embedding_kernel",
+	sources=[os.path.join(base_dir, "wf_embedding_if.cpp"), os.path.join(base_dir, "wf_embedding_kernel.cu")],
+	verbose=True  # Verbose output for debugging
 )
 
-def main():
-    # for testing, will remove later
-    batch, N, d_model, space = 2, 4, 8, 3
-    device = torch.device("cuda")
-    torch.manual_seed(37)
-
-    coords = 20 * torch.randn(batch, N, space, dtype=torch.float32, device=device)
-    wavenumbers = torch.rand(d_model//2, dtype=torch.float32, device=device)
-    mask = torch.zeros(batch, N, dtype=torch.bool, device=device)
-    
-    output = wf_embedding(coords, wavenumbers, mask)
-
-    print(output)
-
-
 def wf_embedding(coords, wavenumbers, mask=None):
-    return _wf_embedding.apply(coords, wavenummbers, mask)
+	return _wf_embedding.apply(coords, wavenumbers, mask)
 
 class _wf_embedding(torch.autograd.Function):
 
-    @staticmethod
-    def forward(ctx, coords, wavenumbers, mask):
-        
-        # ceonvert dtypes and make contiguous
-        coords = coords.to(torch.float32).contiguous()
-        wavenumbers = wavenumbers.to(torch.float32).contiguous()
-        mask = mask.contiguous()
+	@staticmethod
+	def forward(ctx, coords, wavenumbers, mask):
+		
+		# ceonvert dtypes and make contiguous
+		coords = coords.transpose(1, 2).to(torch.float32).contiguous() # transpose to make memory access more efficient in the kernel
+		wavenumbers = wavenumbers.to(torch.float32).contiguous()
+		mask = mask.contiguous()
 
-        # get tensor sizes
-        batch, N, space = coords.shape
-        d_model = 2 * wavenumbers.shape[0]
+		# get tensor sizes
+		batch, N, space = coords.shape
+		d_model = 2 * wavenumbers.shape[0]
 
-        # instantiate the output tensor
-        out = torch.zeros(batch, N, d_model, dtype=coords.dtype, device=coords.device).contiguous()
+		# instantiate the output tensor
+		out = torch.zeros(batch, N, d_model, dtype=coords.dtype, device=coords.device).contiguous()
 
-        # for bwd pass
-        cos_sums = torch.zeros(batch, N, d_model//2, dtype=coords.dtype, device=coords.device).contiguous()
-        sin_sums = torch.zeros_like(cos_sums).contiguous()
+		# for bwd pass
+		cos_sums = torch.zeros(batch, N, d_model//2, dtype=coords.dtype, device=coords.device).contiguous()
+		sin_sums = torch.zeros_like(cos_sums).contiguous()
 
-        # call the kernel
-        wf_embedding_kernel.forward(    coords, wavenumbers, mask, 
-                                        out,
-                                        cos_sums, sin_sums
-                                )
+		# call the kernel
+		wf_embedding_kernel.forward(    coords, wavenumbers, mask, 
+										out,
+										cos_sums, sin_sums
+								)
 
-        # save for the backward
-        ctx.save_for_backward(cos_sums, sin_sums)
+		# save for the backward
+		ctx.save_for_backward(cos_sums, sin_sums)
 
-        return out
+		return out
 
-    @staticmethod
-    def backward(ctx, dO):
+	@staticmethod
+	def backward(ctx, dO):
 
 		# note, masks already applied to O and cos and sin sums, masked vals are zero, 
 		# so multiplication ensures non valid positions dont contribute to the gradients
@@ -79,6 +67,3 @@ class _wf_embedding(torch.autograd.Function):
 		dk = ((imag_dO*cos_sums) - (real_dO*sin_sums)).sum(dim=1).sum(dim=0) # d_model//2
 
 		return None, dk, None 
-
-if __name__ == "__main__":
-    main()
