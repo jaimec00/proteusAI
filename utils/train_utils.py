@@ -402,8 +402,8 @@ class Epoch():
 		self.training_run_parent.output.log_epoch_losses(self, self.training_run_parent.train_losses)
 
 		# run validation
-		self.training_run_parent.all_MASK_validation()
 		self.training_run_parent.batch_MASK_validation(self)
+		self.training_run_parent.all_MASK_validation()
 
 		# lr scheduler update
 		self.training_run_parent.scheduler.step(self.training_run_parent.val_losses_context.losses[-1])

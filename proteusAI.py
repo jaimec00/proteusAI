@@ -12,7 +12,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 from utils.model_utils.wf_embedding2 import wf_embedding
+
+# for testing different attention methods, specifically how RBFs interact w/ attn logits (multiplicative, additive, no spatial info)
 from utils.model_utils.geometric_attn import geometric_attn
+# from utils.model_utils.geometric_attn_bias import geometric_attn
+# from utils.model_utils.flash_attn import geometric_attn
 
 # ----------------------------------------------------------------------------------------------------------------------
 
@@ -172,7 +176,7 @@ class GeoAttention(nn.Module):
 		K = torch.matmul(k.unsqueeze(1), self.k_proj.unsqueeze(0)) + self.k_bias.unsqueeze(0).unsqueeze(2) # batch x nhead x N x d_k
 		V = torch.matmul(v.unsqueeze(1), self.v_proj.unsqueeze(0)) + self.v_bias.unsqueeze(0).unsqueeze(2) # batch x nhead x N x d_k
 
-		# define dropout
+		# define dropout for geo attention
 		dropout = self.dropout if self.training else 0.0
 		
 		# get spread for each head, which is a learnable weighted sum of the allowed spreads
@@ -213,7 +217,7 @@ class Encoder(nn.Module):
 
 		aas2 = self.attn(	aas, aas, aas,
 							coords=coords,
-							key_padding_mask=key_padding_mask,
+							key_padding_mask=key_padding_mask
 						)
 
 		aas = self.attn_norm(aas + self.attn_dropout(aas2))
@@ -304,9 +308,11 @@ class proteusAI(nn.Module):
 
 		for position in range(aas.size(1)):
 
+			# update original aa tensor to include previously predicted positions
 			aas = torch.where((aa_onehot==0).all(dim=2, keepdim=True), aas, torch.cat([aa_onehot, torch.zeros(aa_onehot.shape[:2] + (1,), device=aa_onehot.device)], dim=2))
 			
-			aa_embedded = self.aa_embedding(aas) + wf
+			# embed to feature space
+			aa_embedded = self.aa_embedding(aas, wf)
 
 			# decode the wavefunction
 			seq_probs = self.encode(aa_embedded, coords, key_padding_mask) # batch x N x 512 --> batch x N X 20 
