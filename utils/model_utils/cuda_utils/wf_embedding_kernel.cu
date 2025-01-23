@@ -3,231 +3,252 @@
 author:         jaime cardenas
 title:          wf_embedding_kernel.cu
 descripiton:    cuda kernel to embed 3d coordinates to target feature space using 
-                green's function solution to the helmholtz equation, modeling each
-                token as a point source in 3d space, and superposing the effects of 
-                the point sources 
+				green's function solution to the helmholtz equation, modeling each
+				token as a point source in 3d space, and superposing the effects of 
+				the point sources 
 */
 
 #include <cuda_runtime.h>
+#include <cuda_fp16.h> // for half-precision operations
 
 // device kernel for wavefunction embedding
 __global__ void wf_embedding_kernel(
-    const float* coords_ptr, int stride_coords_Z, int stride_coords_N, int stride_coords_S,
-    const float* wavenumbers_ptr, int stride_wavenumbers_K, 
-    const bool* mask_ptr, int stride_mask_Z, int stride_mask_N,
+	const __half* coords_ptr, int stride_coords_Z, int stride_coords_N, int stride_coords_S,
+	const __half* wavenumbers_ptr, int stride_wavenumbers_K, 
+	const bool* mask_ptr, int stride_mask_Z, int stride_mask_N,
 
-    float* out_ptr, int stride_out_Z, int stride_out_N, int stride_out_D,
-    float* cos_sums_ptr, int stride_cos_sums_Z, int stride_cos_sums_N, int stride_cos_sums_K,
-    float* sin_sums_ptr, int stride_sin_sums_Z, int stride_sin_sums_N, int stride_sin_sums_K,
+	__half* out_ptr, int stride_out_Z, int stride_out_N, int stride_out_D,
+	__half* cos_sums_ptr, int stride_cos_sums_Z, int stride_cos_sums_N, int stride_cos_sums_K,
+	__half* sin_sums_ptr, int stride_sin_sums_Z, int stride_sin_sums_N, int stride_sin_sums_K,
 
-    int tot_Z, int tot_N, int d_model
+	int tot_Z, int tot_N, int d_model
 ) {
-    // have 32 warps per block (1024 threads_per_block / 32 threads_per_warp)
-    // since block_NI is 32, each warp works on a distinct NI (will reduce along NJ, as each NI is independant)
-    // there are 32 threads per warp, which equals block_NJ, so each thread within a 
-    // warp works to compute it's NJ's impact on the warp's NI
-    // first 32 threads along x dimension are the first warp, each having the same NI but different NJ
+	
+	// compute global thread index. only computes the starting offset of the block, as i will partition NI, NJ loads to 
+	// specific warps to read from global memory before making use of threadIdxs
+	int offs_NI = blockIdx.y * blockDim.y;  // NI index, 4 unique thread ids (not used yet)
+	int offs_Z = blockIdx.z * blockDim.z;  // batch index, 1 thread id
 
-    // compute global thread index
-    int offs_NJ = blockIdx.x * blockDim.x + threadIdx.x;  // NJ index
-    int offs_NI = blockIdx.y * blockDim.y + threadIdx.y;  // NI index
-    int offs_Z = blockIdx.z * blockDim.z + threadIdx.z;  // batch index
+	// calculate the unique local id for each thread
+	int thread_id = threadIdx.x + threadIdx.y * blockDim.x + threadIdx.z * blockDim.x * blockDim.y;
+	int num_threads = blockDim.x * blockDim.y * blockDim.z; // number of threads in a block
+	
+	// compute warp id (within a block), then the lane id (thread id within a warp)
+	int num_warps = num_threads / warpSize; // warps per block
+	int warp_id = thread_id / warpSize;
+	int lane_id = thread_id % warpSize;
 
-    // calculate the unique local id for each thread
-    int thread_id = threadIdx.x + threadIdx.y * blockDim.x + threadIdx.z * blockDim.x * blockDim.y;
-    
-    // compute warp id (within a block), then the lane id (thread id within a warp)
-    int warp_id = thread_id / warpSize;
-    int lane_id = thread_id % warpSize;
+	// shared memory for these values, warps fetch these from global memory in parallel (static to be able to define multiple)
+	__shared__ __align__(4) __half wavenumbers[256]; 
 
-    // shared memory for these values, as only the necessary warps fetch these from global memory in parallel
-    extern __shared__ float wavenumbers[];
+	__shared__ __align__(4) __half coords_NI_x[4]; 
+	__shared__ __align__(4) __half coords_NI_y[4];
+	__shared__ __align__(4) __half coords_NI_z[4];
+	__shared__ __align__(4) bool mask_NI[4];
 
-    extern __shared__ float coords_NI_x[];
-    extern __shared__ float coords_NI_y[];
-    extern __shared__ float coords_NI_z[];
+	// store x and y into single array to avoid bank conflicts, and pad z. not necessary for NI, NI is same for a warp and is broadcast to threads
+	__shared__ __align__(4) __half coords_NJ_xy[64]; // stride of 2 
+	__shared__ __align__(4) __half coords_NJ_z[64];  // padded, stride 2
+	__shared__ __align__(4) unsigned int mask_NJ; // to avoid bank conflicts, all threads load the same 32 bit int, but perform operations to modify/read the position of interest
 
-    extern __shared__ float coords_NJ_x[];
-    extern __shared__ float coords_NJ_y[];
-    extern __shared__ float coords_NJ_z[];
+	// init outputs in shared memory
+	__shared__ __align__(4) __half out[2048]; 	// format is not the same as the actual output. actual output is interleaved real and imag,
+												// but since this is half type, this would give a bank conflict if stored them like this
+												// instead do real1, real_(d/2), imag1, imag_(d/2), real3, real_(d/2+1),...
+												// this spaces 
+	__shared__ __align__(4) __half trig_sums[2048]; // combine cos sums and sin sums to single array w/ stride 2 to avoid bank conflicts (cos1, sin1, cos2, sin2)
 
-    extern __shared__ bool mask_NI[];
-    extern __shared__ bool mask_NJ[];
+	// first load wavenumbers
+	int num_wn = d_model/2;
 
-    // now, assign each warp a subset of wavenumber idxs, so each warp loads from global memory into shared memory in parallel
-    // since there are 1024 threads, and for my case there are 256 wavenumbers, only 8/32 warps fetch this memory, 
-    // i wont code the case where there are more wavenumbers than threads because i need max performance for my model, 
-    // but if this kernel becomes popular i'll add it
-    // while this is happening, the idle warps will load the NI coords and NJ coords there are only 32 NI and 32 NJ 
-    // values, however, we have xyz coordinates, so need 64 warps total, note that the coords tensor is transposed 
-    // before being passed to the kernel, so all x values are contiguous, and y, and z, so one warp gets 32 x vals, 
-    // another the corresponding y, etc and an additional two get the masks
-    // this brings the total to 16 warps being active while the other half are inactive
+	// number of iterations needed
+	int k_iters = (num_wn + num_threads - 1) / num_threads; // cdiv
 
-    // all available to start
-    bool available_warps = thread_id > -1 
+	// loop through wavenumbers to load to SRAM, stays there throughout
+	for (int k = 0; k < k_iters; ++k){
+		wavenumbers[k*num_threads + thread_id] = wavenumbers_ptr[k*num_threads + thread_id];
+	}
 
-    int num_wavenumbers = d_model/2;
-    int num_wavenumber_warps = num_wavenumbers / warpSize
-    bool read_wavenumbers = warp_id < num_wavenumber_warps 
-    available_warps = available_warps ^ read_wavenumbers // XOR to remove these warps from being available
+	// now load the first NJ block, which includes the NI for this block
+	// first move the coords and mask pointer to this batch
+	__half* coords_base_ptr = coords_ptr + (offs_Z*stride_coords_Z);
+	bool* mask_base_ptr = mask_ptr + (offs_Z*stride_mask_Z);
 
-    // partition warps to 
-    bool read_NI_x = warp_id   
+	// loop through blocks of NJ
+	int NJ_iters = (tot_N + blockDim.x - 1) / blockDim.x;
+	for (int j = 0; j < NJ_iters; ++j){
 
-    // move the pointer to this batch
-    float* coords_base_ptr = coords_ptr + (offs_Z*stride_coords_Z)
+		int offs_NJ = (offs_NI + j*warpSize + lane_id) % tot_N;   // cycles to beginning when reach the end of the sequence
+		bool thread_mask = (offs_Z < tot_Z) && (j*warpSize + lane_id < tot_N); 	// j*warpSize+laneid checks how many elements have 
+																				// been processed to mask already computed values
 
-    // read from global and write to shared memory
-    if (read_wavenumbers){
-        wavenumbers[thread_id] = wavenumbers_ptr[thread_id*stride_wavenumbers_K];
-    } elif (read_NI_x) {
-        coords_NI_x[]
-    } elif (read_NI_y) {
+		// now assign one warp for x, another y, another z, and another mask to read from HBM in coalesced manner and in parallel
+		// bank conflcts since dealing w/ half and bools
+		// stride of 2 for coords_xy (0 dim is x, 1 dim is y), and stride 2 for z ()
+		// invalid threads read the first element
+		switch (warp_id) {
+			// read x
+			case 0: coords_NJ_xy[lane_id*2] = coords_base_ptr[0*stride_coords_S + offs_NJ*thread_mask]; break;
+			// read y
+			case 1: coords_NJ_xy[1 + lane_id*2] = coords_base_ptr[1*stride_coords_S + offs_NJ*thread_mask]; break;
+			// read z
+			case 2: coords_NJ_z[lane_id*2] = coords_base_ptr[2*stride_coords_S + offs_NJ*thread_mask]; break;
+			// read mask
+			case 3: {
+				bool valid = !mask_base_ptr[offs_NJ*thread_mask];
+				mask_NJ = __ballot_sync(0xFFFFFFFF, valid); // creates 32-bit bit mask based on each threads value w/ in the warp
+				break;
+			}
+		}
 
-    } elif (read_NI_z) {
+		// synchronize the threads before using the shared memory
+		__syncthreads();
+	
+		if (j==0) { // in the first iteration, we loaded the NI tokens to shared mem as the first 4 tokens in NJ
+			if (lane_id==0){ // only first thread in the warp writes NI to shared mem 
+							// these are ordered, so first 4 (if have four warps) are the NI
+				coords_NI_x[warp_id] = coords_NJ_xy[warp_id*2];
+				coords_NI_y[warp_id] = coords_NJ_xy[1 + warp_id*2];
+				coords_NI_z[warp_id] = coords_NJ_z[warp_id*2];
+				mask_NI[warp_id] = (mask_NJ & (1U << warp_id)) != 0; // converts back to bool
 
-    } elif (read_NJ_x) {
+			}
+			// and again
+			__syncthreads();
+		}
 
-    } elif (read_NJ_y) {
+		// the distance computations. each warp has a unique NI, shared among its threads, but each thread among the warp has a unique NJ 
+		// think it is best to convert these to full, do everything, then convert to half when writing to shared
+		float dist_x = __half2float(__hsub(coords_NI_x[warp_id], coords_NJ_xy[lane_id*2]));
+		float dist_y = __half2float(__hsub(coords_NI_y[warp_id], coords_NJ_xy[1 + lane_id*2]));
+		float dist_z = __half2float(__hsub(coords_NI_z[warp_id], coords_NJ_z[lane_id*2]));
 
-    } elif (read_NJ_z) {
+		// compute the distance and the masks
+		float dists_raw = dist_x*dist_x + dist_y*dist_y + dist_z*dist_z;
+		bool mask_IJ = (thread_mask) && (mask_NI[warp_id]) && ((mask_NJ & (1U << lane_id)) != 0) && (dists_raw!=0); 
+		float dists = dists_raw * rsqrtf(dists_raw + (1-mask_IJ)); // fast approximation of sqrt (1-mask avoids div by 0)
 
-    } elif (read_NI_mask) {
+		// loop over wavenumbers in shared memory
+		for (int k = 0; k < num_wn; ++k) {
 
-    } elif (read_NJ_masl) {
+			// all threads access the same k from shared memory
+			float wavenumber = __half2float(wavenumbers[k]);
 
-    }
+			// compute the phase
+			float phase = dists * wavenumber;
 
-    // mask out of bounds threads
-    const bool thread_mask_NI = (offs_Z < tot_Z) && (offs_NI < tot_N); 
-    const bool thread_mask_NJ = (offs_Z < tot_Z) && (offs_NJ < tot_N);
+			// compute sine and cosine
+			// multiply by mask to zero out invalid threads
+			float cos = mask_IJ * __cosf(phase);  // Fast approximation of cosine
+			float sin = mask_IJ * __sinf(phase);  // Fast approximation of sine
 
-    // move the NI and NJ coords pointers
-    // access zeroth element of the coords if thread should be masked.
-    // need to be sure that consistently do this throughout the rest of the code, 
-    // as invalid threads now have an arbitrary value. still best to do this, as it ensures no warp divergence
-    
-    // to avoid out-of-bounds memory accesses, if a thread is invalid, thread_mask==0 and it accesses the first element
-    // masks from torch are 0 for valid positions, so invert it w/ !
-    const bool mask_NI = (thread_mask_NI) && !(mask_ptr[thread_mask_NI*(offs_Z*stride_mask_Z + offs_NI*stride_mask_N)]);
-    const float* coords_NI_ptr = coords_ptr + mask_NI * (offs_Z*stride_coords_Z + offs_NI*stride_coords_N);
-    float3 coords_NI = make_float3(coords_NI_ptr) // assumes coalesced mem, which should be true
+			// compute real and imaginary parts
+			// divide by one for invalid to avoid nans
+			// note that cos and sin are 0 for invalid threads already
+			float real = cos / (dists + (1-mask_IJ));
+			float imag = sin / (dists + (1-mask_IJ));
 
-    const bool mask_NJ = (thread_mask_NJ) && !(mask_ptr[thread_mask_NJ*(offs_Z*stride_mask_Z + offs_NJ*stride_mask_N)]);
-    const float* coords_NJ_ptr = coords_ptr + mask_NJ * (offs_Z*stride_coords_Z + offs_NJ*stride_coords_N);
-    float3 coords_NJ = make_float3(coords_NJ_ptr)
+			// have each warp sum the contributions of its threads
+			float real_superposition = warp_reduce_sum(real);
+			float imag_superposition = warp_reduce_sum(imag);
+			float cos_sums = warp_reduce_sum(cos);
+			float sin_sums = warp_reduce_sum(sin);
 
+			if (lane_id==0){ // first thread in the warp writes to mem
 
+				// convert back to half precision and save in shared
+				// no bank conflicts, since only the first thread in the warp is writing
 
+				// save the intermediate output
+				// writing as real1, real_d/2, imag1, imag_d/2, real2, real_d/2+1, ...
+				// for efficient shared mem access w/ no bank conflicts in shared memory
+				// 4*k & ((d_model/2) - 1) is equivilant to 4*k % (d_model/2) but faster
+				int base_idx = (offs_NI + warp_id)*num_wn + ((4 * k) & ((d_model/2) - 1));
+				out[base_idx + (k >= d_model/2)] += float2half(real_superposition);
+				out[base_idx + 2 + (k >= d_model/2)] += float2half(imag_superposition);
 
+				// save these for bwd
+				trig_sums[(offs_NI+warp_id)*num_wn + (2*k)] += float2half(cos_sums);
+				trig_sums[(offs_NI+warp_id)*num_wn + (2*k + 1)] += float2half(sin_sums);
 
-    bool mask_IJ = (mask_NI && mask_NJ);
+			}
 
+		}
+	}
 
-    // compute the distances
-    float3 dists_raw = make_float3( coords_NI_ptr[0*stride_coords_S] - coords_NJ_ptr[0*stride_coords_S], 
-                                    coords_NI_ptr[1*stride_coords_S] - coords_NJ_ptr[1*stride_coords_S], 
-                                    coords_NI_ptr[2*stride_coords_S] - coords_NJ_ptr[2*stride_coords_S]
-                                );
-    float dists_sqrd = dists_raw.x*dists_raw.x + dists_raw.y*dists_raw.y + dists_raw.z*dists_raw.z; // x^2 + y^2 + z^2
-    
-    // mask 0 distances, do this before compute rsqrtf as sqrt(0)=0, to avoids division by zero in rsqrtf
-    // in theory, this should already be taken care of with NI!=NJ in thread_mask, but just in case
-    mask_IJ = mask_IJ && (dists_sqrd!=0);
+	// initialize pointers for output and move them to proper NI
+	__half* block_out_ptr = out_ptr + (offs_Z*stride_out_Z) + ((offs_NI+warp_id)*stride_out_N);
+	__half* block_cos_sums_ptr = cos_sums_ptr + (offs_Z*stride_cos_sums_Z) + ((offs_NI+warp_id)*stride_cos_sums_N);
+	__half* block_sin_sums_ptr = sin_sums_ptr + (offs_Z*stride_sin_sums_Z) + ((offs_NI+warp_id)*stride_sin_sums_N);
 
-    float dists = dists_sqrd * rsqrtf(dists_sqrd + (1-mask_IJ)); // fast approximation of sqrt
-                                                                // add 1-mask_IJ so for valid threads, 1-1 = 0,
-                                                                // but for invalid, 1-0 = 1, avoiding division
-                                                                // by zero (invalid threads accessed coords[0] for both NI and NJ, so this is necessary)
-
-
-
-    // sync the threads, all wavenumbers must be loaded
-    __syncthreads();
-
-    // initialize base pointers for output to avoid recomputing in the loop, only have to increment the feature index
-    // note that only writing for NI
-    float* block_out_ptr = out_ptr + (offs_Z*stride_out_Z) + (offs_NI*stride_out_N);
-    float* block_cos_sums_ptr = cos_sums_ptr + (offs_Z*stride_cos_sums_Z) + (offs_NI*stride_cos_sums_N);
-    float* block_sin_sums_ptr = sin_sums_ptr + (offs_Z*stride_sin_sums_Z) + (offs_NI*stride_sin_sums_N);
-
-    // Loop over wavenumbers in shared memory
-    for (int k = 0; k < num_wavenumbers; ++k) {
-
-        // all threads access the same k from shared memory
-        float wavenumber = wavenumbers[k];
-
-        // compute the phase
-        float phase = dists * wavenumber;
-
-        // compute sine and cosine
-        // multiply by mask to zero out invalid threads
-        float cos = mask_IJ * __cosf(phase);  // Fast approximation of cosine
-        float sin = mask_IJ * __sinf(phase);  // Fast approximation of sine
-
-        // store sum of cosines and sins for backward pass
-        // masked threads write to first k, but their value is zero so no effect on output
-        atomicAdd(&block_cos_sums_ptr[k*stride_cos_sums_K*(mask_IJ)], cos);
-        atomicAdd(&block_sin_sums_ptr[k*stride_sin_sums_K*(mask_IJ)], sin);
-
-        // compute real and imaginary parts
-        // divide by one for invalid to avoid nans
-        // note that cos and sin are 0 for invalid threads already
-        float real = cos / (dists + (1-mask_IJ));
-        float imag = sin / (dists + (1-mask_IJ));
-
-        // store results, note that real and imaginary parts are interleaved
-        atomicAdd(&block_out_ptr[(2*k)*stride_out_D*(mask_IJ)], real);
-        atomicAdd(&block_out_ptr[(2*k + 1)*stride_out_D*(mask_IJ)], imag);
-
-    }   
+	// have threads write back to HBM in parallel
+	// two seperate loops, since out and the sums are different sizes in last dim
+	for (int k = 0; k < (k_iters); ++k){
+		// write to output
+		// note that the format is real1, real_d/2, imag1, imag_d/2, real2, real_d/2+1 ... in shared mem,
+		// but in global it is real1, imag1, real2, imag2 ...
+		// do two writes per iter, one for the first half and one for the second half
+		// the read from sram avoids bank conflicts (note that working w/ half), and the write to hbm is coalesced 
+		block_out_ptr[num_threads*k + thread_id] = out[num_threads*k + (2*thread_id)];
+		block_out_ptr[d_model/2 + num_threads*k + thread_id] = out[num_threads*k + (2*thread_id + 1)];
+	
+		// store for bwd
+		block_cos_sums_ptr[num_threads*k + thread_id] = trig_sums[num_threads*k + (2*thread_id)];
+		block_sin_sums_ptr[num_threads*k + thread_id] = trig_sums[num_threads*k + (2*thread_id + 1)];
+	}
 }
 
 // define function to sum the values of threads within a warp
 // scales O(log_2(32)) = O(5), very fast
-__device__ int warp_reduce_sum(int value) {
-    unsigned mask = 0xFFFFFFFF; // mask for active threads in the warp
-    for (int offset = 16; offset > 0; offset /= 2) {
-        value += __shfl_down_sync(mask, value, offset);
-    }
-    return value; // result is available in all threads of the warp
+__device__ float warp_reduce_sum(float value) {
+	unsigned mask = 0xFFFFFFFF; // mask for active threads in the warp
+
+	for (int offset = 16; offset > 0; offset /= 2) {
+		value += __shfl_down_sync(mask, value, offset); // Perform float operations
+	}
+
+	return value; 
 }
 
 // Host function to configure and launch the CUDA kernel
 void wf_embedding_kernel_forward(
-    const float* coords_ptr, int stride_coords_Z, int stride_coords_S, int stride_coords_N,
-    const float* wavenumbers_ptr, int stride_wavenumbers_K, 
-    const bool* mask_ptr, int stride_mask_Z, int stride_mask_N,
+	const __half* coords_ptr, int stride_coords_Z, int stride_coords_S, int stride_coords_N,
+	const __half* wavenumbers_ptr, int stride_wavenumbers_K, 
+	const bool* mask_ptr, int stride_mask_Z, int stride_mask_N,
 
-    float* out_ptr, int stride_out_Z, int stride_out_N, int stride_out_D,
-    float* cos_sums_ptr, int stride_cos_sums_Z, int stride_cos_sums_N, int stride_cos_sums_K,
-    float* sin_sums_ptr, int stride_sin_sums_Z, int stride_sin_sums_N, int stride_sin_sums_K,
+	__half* out_ptr, int stride_out_Z, int stride_out_N, int stride_out_D,
+	__half* cos_sums_ptr, int stride_cos_sums_Z, int stride_cos_sums_N, int stride_cos_sums_K,
+	__half* sin_sums_ptr, int stride_sin_sums_Z, int stride_sin_sums_N, int stride_sin_sums_K,
 
-    int tot_Z, int tot_N, int d_model, 
-    cudaStream_t stream
+	int tot_Z, int tot_N, int d_model, 
+	cudaStream_t stream
 ) {
-    // define block and grid dimensions
-    dim3 block_size(32, 32, 1); // 32 threads for NI, 32 NJ, 1 for Z (1 for Z to ensure max parallelism along batch dim)
-    dim3 grid_size(
-        (tot_N + block_size.x - 1) / block_size.x,
-        (tot_N + block_size.y - 1) / block_size.y,
-        (tot_Z + block_size.z - 1) / block_size.z 
-    );
+	// define block and grid dimensions
+	dim3 block_size(32, 4, 1); // 4 threads for NI, 32 NJ, 1 for Z (1 for Z so that all NI can make use of each NJ loaded in the block)
+	dim3 grid_size(
+		1, // choosing this as x to make it easier to assign warps. will be looping through NJ
+		(tot_N + block_size.y - 1) / block_size.y,
+		(tot_Z + block_size.z - 1) / block_size.z 
+	);
 
-    // wavenumbers will be in shared memory, which is of size d_model/2, and takes 4 bytes per float
-    int shared_mem = 16*32*4;   // in my kernel 16 warps fetch from global mem, 
-                                // each warp has 32 threads, each of which accesses 
-                                // a single element, each of which is 4 bytes
+	// configure the kernel to allow 96kb sram. not necessary since i am using static
+	// cudaFuncSetAttribute(wf_embedding_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, 96 * 1024);
 
-    // Launch the kernel
-    wf_embedding_kernel<<<grid_size, block_size, shared_mem, stream>>>(
-        coords_ptr, stride_coords_Z, stride_coords_N, stride_coords_S,
-        wavenumbers_ptr, stride_wavenumbers_K,
-        mask_ptr, stride_mask_Z, stride_mask_N,
-        out_ptr,  stride_out_Z, stride_out_N, stride_out_D,
-        cos_sums_ptr, stride_cos_sums_Z, stride_cos_sums_N, stride_cos_sums_K,
-        sin_sums_ptr, stride_sin_sums_Z, stride_sin_sums_N, stride_sin_sums_K,
-        tot_Z, tot_N, d_model
-    );
+	// define shared memory per block (switched to static but keeping it here in case switch back)
+	// int shared_mem = 2*(block_size.y*(8 + 2*d_model/2 + d_model) + block_size.x*(8) + d_model/2);   // NI (y dim) stores NIxd_model output, 
+																									// and two NIxd_model/2 (one for cos sums and another for sin) 
+																									// and requires 8 floating point numbers per NI. NJ (x dim) also requires 8 per,
+																									// and the wavenumbers requires another d_model/2 floating point numbers.
+																									// using fp 16 so multiple by 2 bytes
+
+	// Launch the kernel
+	wf_embedding_kernel<<<grid_size, block_size, stream>>>(
+		coords_ptr, stride_coords_Z, stride_coords_N, stride_coords_S,
+		wavenumbers_ptr, stride_wavenumbers_K,
+		mask_ptr, stride_mask_Z, stride_mask_N,
+		out_ptr,  stride_out_Z, stride_out_N, stride_out_D,
+		cos_sums_ptr, stride_cos_sums_Z, stride_cos_sums_N, stride_cos_sums_K,
+		sin_sums_ptr, stride_sin_sums_Z, stride_sin_sums_N, stride_sin_sums_K,
+		tot_Z, tot_N, d_model
+	);
 }

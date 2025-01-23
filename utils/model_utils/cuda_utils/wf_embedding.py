@@ -19,9 +19,9 @@ class _wf_embedding(torch.autograd.Function):
 	@staticmethod
 	def forward(ctx, coords, wavenumbers, mask):
 		
-		# ceonvert dtypes and make contiguous
-		coords = coords.transpose(1, 2).to(torch.float32).contiguous() # transpose to make memory access more efficient in the kernel
-		wavenumbers = wavenumbers.to(torch.float32).contiguous()
+		# convert dtypes and make contiguous. everything in fp16
+		coords = coords.transpose(1, 2).to(torch.float16).contiguous() # transpose to make memory access more efficient in the kernel
+		wavenumbers = wavenumbers.to(torch.float16).contiguous()
 		mask = mask.contiguous()
 
 		# get tensor sizes

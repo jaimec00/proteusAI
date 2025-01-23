@@ -32,16 +32,16 @@ void wf_embedding_forward(
     TORCH_CHECK(sin_sums.device().is_cuda(), "sin_sums must be a CUDA tensor");
 
     // some of these will be float16 later
-    TORCH_CHECK(coords.dtype() == torch::kFloat32, "coords must be of type float32");
-    TORCH_CHECK(wavenumbers.dtype() == torch::kFloat32, "wavenumbers must be of type float32");
+    TORCH_CHECK(coords.dtype() == torch::kFloat16, "coords must be of type float16");
+    TORCH_CHECK(wavenumbers.dtype() == torch::kFloat16, "wavenumbers must be of type float16");
     TORCH_CHECK(mask.dtype() == torch::kBool, "mask must be of type bool");
-    TORCH_CHECK(out.dtype() == torch::kFloat32, "out must be of type float32");
-    TORCH_CHECK(cos_sums.dtype() == torch::kFloat32, "out must be of type float32");
-    TORCH_CHECK(sin_sums.dtype() == torch::kFloat32, "out must be of type float32");
+    TORCH_CHECK(out.dtype() == torch::kFloat16, "out must be of type float16");
+    TORCH_CHECK(cos_sums.dtype() == torch::kFloat16, "out must be of type float16");
+    TORCH_CHECK(sin_sums.dtype() == torch::kFloat16, "out must be of type float16");
 
     // get tensor sizes 
     int tot_Z = coords.size(0); // batch size
-    int tot_N = coords.size(2); // sequence size
+    int tot_N = coords.size(2); // sequence size (transposed by my autograd to be Z x 3 x N for memory coalescing)
     int d_model = wavenumbers.size(0)*2; // feature size (num_wn == d_model//2)
 
     TORCH_CHECK(out.size(0) == tot_Z, "out batch size mismatch");
@@ -49,12 +49,12 @@ void wf_embedding_forward(
     TORCH_CHECK(out.size(2) == d_model, "out d_model size mismatch");
 
     // get raw pointers
-    const float* coords_ptr = coords.data_ptr<float>();
-    const float* wavenumbers_ptr = wavenumbers.data_ptr<float>();
+    const __half* coords_ptr = coords.data_ptr<at::Half>();
+    const __half* wavenumbers_ptr = wavenumbers.data_ptr<at::Half>();
     const bool* mask_ptr = mask.data_ptr<bool>();
-    float* out_ptr = out.data_ptr<float>();
-    float* cos_sums_ptr = cos_sums.data_ptr<float>();
-    float* sin_sums_ptr = sin_sums.data_ptr<float>();
+    __half* out_ptr = out.data_ptr<at::Half>();
+    __half* cos_sums_ptr = cos_sums.data_ptr<at::Half>();
+    __half* sin_sums_ptr = sin_sums.data_ptr<at::Half>();
 
     // launch the cuda kernel
     cudaStream_t stream = at::cuda::getCurrentCUDAStream();  // get pytorch's current cuda stream
