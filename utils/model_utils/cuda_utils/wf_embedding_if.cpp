@@ -6,12 +6,12 @@
 // declare the cuda kernel implemented in wf_embedding_kernel.cu
 void wf_embedding_kernel_forward(
     const float* coords, int stride_coords_Z, int stride_coords_S, int stride_coords_N,
-    const float* wavenumbers, int stride_wavenumbers_K, 
+    const __half* wavenumbers, int stride_wavenumbers_K, 
     const bool* mask, int stride_mask_Z, int stride_mask_N,
 
-    float* out, int stride_out_Z, int stride_out_N, int stride_out_D,
-    float* cos_sums, int stride_cos_sums_Z, int stride_cos_sums_N, int stride_cos_sums_K,
-    float* sin_sums, int stride_sin_sums_Z, int stride_sin_sums_N, int stride_sin_sums_K,
+    __half* out, int stride_out_Z, int stride_out_N, int stride_out_D,
+    __half* cos_sums, int stride_cos_sums_Z, int stride_cos_sums_N, int stride_cos_sums_K,
+    __half* sin_sums, int stride_sin_sums_Z, int stride_sin_sums_N, int stride_sin_sums_K,
 
     int tot_Z, int tot_N, int d_model, 
     cudaStream_t stream
@@ -32,7 +32,7 @@ void wf_embedding_forward(
     TORCH_CHECK(sin_sums.device().is_cuda(), "sin_sums must be a CUDA tensor");
 
     // some of these will be float16 later
-    TORCH_CHECK(coords.dtype() == torch::kFloat16, "coords must be of type float16");
+    TORCH_CHECK(coords.dtype() == torch::kFloat32, "coords must be of type float16");
     TORCH_CHECK(wavenumbers.dtype() == torch::kFloat16, "wavenumbers must be of type float16");
     TORCH_CHECK(mask.dtype() == torch::kBool, "mask must be of type bool");
     TORCH_CHECK(out.dtype() == torch::kFloat16, "out must be of type float16");
@@ -49,12 +49,12 @@ void wf_embedding_forward(
     TORCH_CHECK(out.size(2) == d_model, "out d_model size mismatch");
 
     // get raw pointers
-    const __half* coords_ptr = coords.data_ptr<at::Half>();
-    const __half* wavenumbers_ptr = wavenumbers.data_ptr<at::Half>();
+    const float* coords_ptr = reinterpret_cast<const float*>(coords.data_ptr<float>());
+    const __half* wavenumbers_ptr = reinterpret_cast<const __half*>(wavenumbers.data_ptr<at::Half>());
     const bool* mask_ptr = mask.data_ptr<bool>();
-    __half* out_ptr = out.data_ptr<at::Half>();
-    __half* cos_sums_ptr = cos_sums.data_ptr<at::Half>();
-    __half* sin_sums_ptr = sin_sums.data_ptr<at::Half>();
+    __half* out_ptr = reinterpret_cast<__half*>(out.data_ptr<at::Half>());
+    __half* cos_sums_ptr = reinterpret_cast<__half*>(cos_sums.data_ptr<at::Half>());
+    __half* sin_sums_ptr = reinterpret_cast<__half*>(sin_sums.data_ptr<at::Half>());
 
     // launch the cuda kernel
     cudaStream_t stream = at::cuda::getCurrentCUDAStream();  // get pytorch's current cuda stream

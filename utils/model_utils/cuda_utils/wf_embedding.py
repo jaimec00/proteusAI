@@ -20,19 +20,19 @@ class _wf_embedding(torch.autograd.Function):
 	def forward(ctx, coords, wavenumbers, mask):
 		
 		# convert dtypes and make contiguous. everything in fp16
-		coords = coords.transpose(1, 2).to(torch.float16).contiguous() # transpose to make memory access more efficient in the kernel
+		coords = coords.transpose(1, 2).to(torch.float32).contiguous() # transpose to make memory access more efficient in the kernel
 		wavenumbers = wavenumbers.to(torch.float16).contiguous()
 		mask = mask.contiguous()
 
 		# get tensor sizes
-		batch, N, space = coords.shape
+		batch, space, N = coords.shape
 		d_model = 2 * wavenumbers.shape[0]
 
 		# instantiate the output tensor
-		out = torch.zeros(batch, N, d_model, dtype=coords.dtype, device=coords.device).contiguous()
+		out = torch.zeros(batch, N, d_model, dtype=wavenumbers.dtype, device=wavenumbers.device).contiguous()
 
 		# for bwd pass
-		cos_sums = torch.zeros(batch, N, d_model//2, dtype=coords.dtype, device=coords.device).contiguous()
+		cos_sums = torch.zeros(batch, N, d_model//2, dtype=wavenumbers.dtype, device=wavenumbers.device).contiguous()
 		sin_sums = torch.zeros_like(cos_sums).contiguous()
 
 		# call the kernel
@@ -44,7 +44,7 @@ class _wf_embedding(torch.autograd.Function):
 		# save for the backward
 		ctx.save_for_backward(cos_sums, sin_sums)
 
-		return out
+		return out.to(torch.float)
 
 	@staticmethod
 	def backward(ctx, dO):
