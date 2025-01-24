@@ -44,9 +44,16 @@ def main():
 	# wf_embedding_torch = wf_embedding
 
 	triton_out, triton_time, triton_memory = profile_func(wf_embedding, params, start_event, end_event)
-	torch.cuda.synchronize()
+	# triton_out2 = triton_out.clone()
+	# triton_out.zero_() # avoid torch using same mem
+	# torch.cuda.synchronize()
+
+	# params = [i.clone() if isinstance(i, torch.Tensor) else i for i in params]
 
 	torch_out, torch_time, torch_memory = profile_func(wf_embedding_torch, params, start_event, end_event)
+	print(hex(triton_out.data_ptr()))
+	
+	print(hex(torch_out.data_ptr()))
 
 	rel_error, abs_error = calculate_error(torch_out, triton_out)
 	print(f"triton implementation is correct: {torch.allclose(triton_out, torch_out, atol=atol, rtol=rtol, equal_nan=False)}")
@@ -79,7 +86,7 @@ def main():
 	print(f"torch memory usage: {torch_memory / (1024 ** 3):.3f} GB")
 	print(f"triton kernel memory usage: {triton_memory / (1024 ** 3):.3f} GB")
 	# print(triton_dk, torch_dk)
-	# print(triton_out, torch_out)
+	# print(triton_out)#, torch_out)
 	# print(triton_out-torch_out)
 
 def wf_embedding_torch(coords, wavenumbers, mask=None):

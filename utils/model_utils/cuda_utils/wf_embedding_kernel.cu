@@ -9,6 +9,7 @@ descripiton:    cuda kernel to embed 3d coordinates to target feature space usin
 */
 
 #include <cuda_runtime.h>
+// #define M_PIf 3.1415927f
 
 // define function to sum the values of threads within a warp
 // scales O(log_2(32)) = O(5), very fast
@@ -78,8 +79,11 @@ __global__ void wf_embedding_kernel(
 	int k_iters = (num_wn + num_threads - 1) / num_threads; // cdiv
 
 	// loop through wavenumbers to load to SRAM, stays there throughout
+	#pragma unroll 1
 	for (int k = 0; k < k_iters; ++k){
-		wavenumbers[k*num_threads + thread_id] = wavenumbers_ptr[k*num_threads + thread_id];
+		int wavenumber_idx = k*num_threads + thread_id;
+		bool wavenumber_mask = wavenumber_idx < num_wn;
+		wavenumbers[wavenumber_idx*wavenumber_mask] = wavenumbers_ptr[wavenumber_idx*wavenumber_mask]; // threads over num wn read the first wavenumber and overwrite first element
 	}
 
 	// now load the first NJ block, which includes the NI for this block
@@ -88,6 +92,7 @@ __global__ void wf_embedding_kernel(
 
 	// loop through blocks of NJ
 	int NJ_iters = (tot_N + blockDim.y - 1) / blockDim.y;
+	#pragma unroll 1
 	for (int j = 0; j < NJ_iters; ++j){
 
 		int offs_NJ = (offs_NI + j*num_threads + thread_id) % tot_N;	// cycles to beginning when reach the end of the sequence, 
@@ -135,9 +140,10 @@ __global__ void wf_embedding_kernel(
 		// compute the distance and the masks
 		float dists_raw = dist_x*dist_x + dist_y*dist_y + dist_z*dist_z;
 		bool mask_IJ = mask_NI && mask_NJ && (dists_raw!=0); // prevent div by 0
-		float dists = sqrtf(dists_raw + (1-mask_IJ)); // fast approximation of sqrt (1-mask avoids div by 0)
+		float dists = dists_raw * rsqrtf(dists_raw + (1-mask_IJ)); // fast approximation of sqrt (1-mask avoids div by 0)
 
 		// loop over wavenumbers in shared memory
+		#pragma unroll 1
 		for (int k = 0; k < num_wn; ++k) {
 
 			// compute the phase
@@ -146,8 +152,8 @@ __global__ void wf_embedding_kernel(
 
 			// compute sine and cosine
 			// multiply by mask to zero out invalid threads
-			float cosine = mask_IJ * cosf(phase);  // Fast approximation of cosine
-			float sine = mask_IJ * sinf(phase);  // Fast approximation of sine
+			float cosine = mask_IJ * __cosf(phase);  // Fast approximation of cosine
+			float sine = mask_IJ * __sinf(phase);  // Fast approximation of sine
 
 			// compute real and imaginary parts
 			// divide by one for invalid to avoid nans
@@ -182,18 +188,31 @@ __global__ void wf_embedding_kernel(
 	float* block_cos_sums_ptr = cos_sums_ptr + (offs_Z*stride_cos_sums_Z) + (offs_NI*stride_cos_sums_N);
 	float* block_sin_sums_ptr = sin_sums_ptr + (offs_Z*stride_sin_sums_Z) + (offs_NI*stride_sin_sums_N);
 
+	// sync threads when writing output from shared mem
+	__syncthreads();
+
 	// have threads write back to HBM in parallel and coalesced manner
 	// no masking necessary, since if NI is invalid the program would have terminated in the first iteration
+	#pragma unroll 1
 	for (int k = 0; k < k_iters; ++k){
 		// write to output. do two iters of out so it fits in the same loop as the trig sums. 
 		// all memory writes are coalesced, and no bank conflicts, since each thread reads adjacent 32bit floats from out
 		// in shared mem and writes to adjacent indexes in HBM
-		block_out_ptr[num_threads*(2*k) + thread_id] = out[num_threads*(2*k) + thread_id];
-		block_out_ptr[num_threads*(2*k+1) + thread_id] = out[num_threads*(2*k+1) + thread_id];
+		int out1_idx = num_threads*(2*k) + thread_id;
+		int out2_idx = num_threads*(2*k + 1) + thread_id;
+
+		bool out1_mask = out1_idx < (2*num_wn);
+		bool out2_mask = out2_idx < (2*num_wn);
+
+		block_out_ptr[out1_idx*out1_mask] = out[out1_idx*out1_mask];
+		block_out_ptr[out2_idx*out2_mask] = out[out2_idx*out2_mask];
 	
 		// store for bwd
-		block_cos_sums_ptr[num_threads*k + thread_id] = cos_sums[num_threads*k + thread_id];
-		block_sin_sums_ptr[num_threads*k + thread_id] = sin_sums[num_threads*k + thread_id];	
+		int trig_idx = num_threads*k + thread_id;
+		bool trig_mask = trig_idx < num_wn;
+
+		block_cos_sums_ptr[trig_idx*trig_mask] = cos_sums[trig_idx*trig_mask];
+		block_sin_sums_ptr[trig_idx*trig_mask] = sin_sums[trig_idx*trig_mask];	
 	}
 }
 
