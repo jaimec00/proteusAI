@@ -44,7 +44,7 @@ __global__ void wf_embedding_kernel(
 	int num_threads = blockDim.x * blockDim.y * blockDim.z; // number of threads in a block
 	
 	// compute warp id (within a block), then the lane id (thread id within a warp)
-	int warp_id = thread_id / warpSize;
+	// int warp_id = thread_id / warpSize; // not used
 	int lane_id = thread_id % warpSize;
 
 	// shared memory for these values, warps fetch these from global memory in parallel
@@ -90,8 +90,8 @@ __global__ void wf_embedding_kernel(
 	int NJ_iters = (tot_N + blockDim.x - 1) / blockDim.x;
 	for (int j = 0; j < NJ_iters; ++j){
 
-		int offs_NJ = (offs_NI + j*warpSize + thread_id) % tot_N;   // cycles to beginning when reach the end of the sequence
-		bool thread_mask = (offs_Z < tot_Z) && ((j*warpSize + thread_id) < tot_N) && (offs_NI < tot_N); 	// j*warpSize+laneid checks how many elements have 
+		int offs_NJ = (offs_NI + j*num_threads + thread_id) % tot_N;   // cycles to beginning when reach the end of the sequence
+		bool thread_mask = (offs_Z < tot_Z) && ((j*num_threads + thread_id) < tot_N) && (offs_NI < tot_N); 	// j*num_threads+thread_id checks how many elements have 
 																										// been processed to mask already computed values
 
 		// each thread has a single NJ value in its register
@@ -144,20 +144,20 @@ __global__ void wf_embedding_kernel(
 
 			// compute sine and cosine
 			// multiply by mask to zero out invalid threads
-			float cos = mask_IJ * cosf(phase);  // Fast approximation of cosine
-			float sin = mask_IJ * sinf(phase);  // Fast approximation of sine
+			float cosine = mask_IJ * cosf(phase);  // Fast approximation of cosine
+			float sine = mask_IJ * sinf(phase);  // Fast approximation of sine
 
 			// compute real and imaginary parts
 			// divide by one for invalid to avoid nans
 			// note that cos and sin are 0 for invalid threads already
-			float real = cos / (dists + (1-mask_IJ));
-			float imag = sin / (dists + (1-mask_IJ));
+			float real = cosine / (dists + (1-mask_IJ));
+			float imag = sine / (dists + (1-mask_IJ));
 
 			// have each warp sum the contributions of its threads
 			float real_superposition = warp_reduce_sum(real);
 			float imag_superposition = warp_reduce_sum(imag);
-			float cos_superposition = warp_reduce_sum(cos);
-			float sin_superposition = warp_reduce_sum(sin);
+			float cos_superposition = warp_reduce_sum(cosine);
+			float sin_superposition = warp_reduce_sum(sine);
 
 			if (lane_id==0){ // first thread in the warp writes to mem
 
@@ -211,7 +211,7 @@ void wf_embedding_kernel_forward(
 	);
 
 	// configure the kernel to allow 164kb sram. to maximize blocks/SM. only works on a100
-	cudaFuncSetAttribute(wf_embedding_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, 164 * 1024);
+	cudaFuncSetAttribute(wf_embedding_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, 164 * 1000);
 
 	// define shared memory per block 
 	int shared_mem = 4*(block_size.x*(3 + 2*d_model/2 + d_model) + d_model/2);   // NI (x dim) stores NIxd_model output, 

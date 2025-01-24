@@ -48,7 +48,7 @@ class _wf_embedding(torch.autograd.Function):
 		# save for the backward
 		ctx.save_for_backward(cos_sums, sin_sums)
 
-		return out.to(torch.float)
+		return out
 
 	@staticmethod
 	def backward(ctx, dO):

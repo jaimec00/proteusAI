@@ -15,7 +15,7 @@ def main():
 	# device
 	device = torch.device('cuda')
 
-	batch, N, d_model = 1, 128, 512
+	batch, N, d_model = 1, 2048, 512
 	min_wl, max_wl, base = 3.7, 20, 20
 	coords = max_wl * torch.randn((batch, N, 3), dtype=torch.float32, device=device)
 	mask = (torch.rand((batch, N), device=device) > 1)
@@ -44,8 +44,8 @@ def main():
 	# wf_embedding_torch = wf_embedding
 
 	triton_out, triton_time, triton_memory = profile_func(wf_embedding, params, start_event, end_event)
-	print(triton_out)
-	return
+	torch.cuda.synchronize()
+
 	torch_out, torch_time, torch_memory = profile_func(wf_embedding_torch, params, start_event, end_event)
 
 	rel_error, abs_error = calculate_error(torch_out, triton_out)
@@ -79,8 +79,8 @@ def main():
 	print(f"torch memory usage: {torch_memory / (1024 ** 3):.3f} GB")
 	print(f"triton kernel memory usage: {triton_memory / (1024 ** 3):.3f} GB")
 	# print(triton_dk, torch_dk)
-	print(triton_out, torch_out)
-	print(triton_out-torch_out)
+	# print(triton_out, torch_out)
+	# print(triton_out-torch_out)
 
 def wf_embedding_torch(coords, wavenumbers, mask=None):
 
