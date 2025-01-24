@@ -19,24 +19,28 @@ class _wf_embedding(torch.autograd.Function):
 	@staticmethod
 	def forward(ctx, coords, wavenumbers, mask):
 		
+		# bake the mask into coords
+		coords = torch.where(mask, float("inf"), coords)
+
 		# convert dtypes and make contiguous. everything in fp16
 		coords = coords.transpose(1, 2).to(torch.float32).contiguous() # transpose to make memory access more efficient in the kernel
-		wavenumbers = wavenumbers.to(torch.float16).contiguous()
-		mask = mask.contiguous()
+		
+		# deal w/ wavenumbers
+		wavenumbers = wavenumbers.to(torch.float32).contiguous()
 
 		# get tensor sizes
 		batch, space, N = coords.shape
 		d_model = 2 * wavenumbers.shape[0]
 
 		# instantiate the output tensor
-		out = torch.zeros(batch, N, d_model, dtype=wavenumbers.dtype, device=wavenumbers.device).contiguous()
+		out = torch.zeros(batch, N, d_model, dtype=coords.dtype, device=coords.device).contiguous()
 
 		# for bwd pass
-		cos_sums = torch.zeros(batch, N, d_model//2, dtype=wavenumbers.dtype, device=wavenumbers.device).contiguous()
+		cos_sums = torch.zeros(batch, N, d_model//2, dtype=coords.dtype, device=coords.device).contiguous()
 		sin_sums = torch.zeros_like(cos_sums).contiguous()
 
 		# call the kernel
-		wf_embedding_kernel.forward(    coords, wavenumbers, mask, 
+		wf_embedding_kernel.forward(    coords, wavenumbers, 
 										out,
 										cos_sums, sin_sums
 								)
