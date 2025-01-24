@@ -64,6 +64,13 @@ __global__ void wf_embedding_kernel(
 	// other threads can move it to their register
 	float* coords_NI = sin_sums + 3;
 
+	// initialize these here to avoid compilation error, will be in registers
+	float coords_NI_x;
+	float coords_NI_y;
+	float coords_NI_z;
+	bool is_inf_NI;
+	bool mask_NI;
+
 	// first load wavenumbers
 	int num_wn = d_model/2;
 
@@ -83,15 +90,15 @@ __global__ void wf_embedding_kernel(
 	int NJ_iters = (tot_N + blockDim.x - 1) / blockDim.x;
 	for (int j = 0; j < NJ_iters; ++j){
 
-		int offs_NJ = (offs_NI + j*warpSize + lane_id) % tot_N;   // cycles to beginning when reach the end of the sequence
-		bool thread_mask = (offs_Z < tot_Z) && ((j*warpSize + lane_id) < tot_N) && (offs_NI < tot_N); 	// j*warpSize+laneid checks how many elements have 
+		int offs_NJ = (offs_NI + j*warpSize + thread_id) % tot_N;   // cycles to beginning when reach the end of the sequence
+		bool thread_mask = (offs_Z < tot_Z) && ((j*warpSize + thread_id) < tot_N) && (offs_NI < tot_N); 	// j*warpSize+laneid checks how many elements have 
 																										// been processed to mask already computed values
 
 		// each thread has a single NJ value in its register
 		float coords_NJ_x = coords_base_ptr[0*stride_coords_S + offs_NJ*thread_mask];
 		float coords_NJ_y = coords_base_ptr[1*stride_coords_S + offs_NJ*thread_mask];
 		float coords_NJ_z = coords_base_ptr[2*stride_coords_S + offs_NJ*thread_mask];
-		bool is_inf_NJ = coords_NJ_x > 1e38; // convenience for later
+		bool is_inf_NJ = coords_NJ_x > 1e30; // convenience for later
 		bool mask_NJ = thread_mask && (!is_inf_NJ); 
 	
 		if (j==0) { // in the first iteration, thread0 loaded the NI token, so now distribute that information to the other threads
@@ -110,8 +117,8 @@ __global__ void wf_embedding_kernel(
 			coords_NI_x = coords_NI[0]; // no bank conflicts, it is broadcast
 			coords_NI_y = coords_NI[1];
 			coords_NI_z = coords_NI[2];
-			bool is_inf_NI = coords_NI_x > 1e30; 
-			bool mask_NI = thread_mask && (!is_inf_NI); 
+			is_inf_NI = coords_NI_x > 1e30; 
+			mask_NI = thread_mask && (!is_inf_NI); 
 
 			// if NI is masked, stop the program. note all threads have the same NI, so the whole block will terminate
 			if (!mask_NI) return;
@@ -149,8 +156,8 @@ __global__ void wf_embedding_kernel(
 			// have each warp sum the contributions of its threads
 			float real_superposition = warp_reduce_sum(real);
 			float imag_superposition = warp_reduce_sum(imag);
-			float cos_sums = warp_reduce_sum(cos);
-			float sin_sums = warp_reduce_sum(sin);
+			float cos_superposition = warp_reduce_sum(cos);
+			float sin_superposition = warp_reduce_sum(sin);
 
 			if (lane_id==0){ // first thread in the warp writes to mem
 
@@ -159,8 +166,8 @@ __global__ void wf_embedding_kernel(
 				atomicAdd(&out[2*k + 1], imag_superposition);
 
 				// save these for bwd
-				atomicAdd(&cos_sums[k], cos_sums);
-				atomicAdd(&sin_sums[k], sin_sums);
+				atomicAdd(&cos_sums[k], cos_superposition);
+				atomicAdd(&sin_sums[k], sin_superposition);
 
 			}
 		}
@@ -203,7 +210,7 @@ void wf_embedding_kernel_forward(
 		tot_Z
 	);
 
-	// configure the kernel to allow 164kb sram. to maximize blocks/SM. only works on ampere
+	// configure the kernel to allow 164kb sram. to maximize blocks/SM. only works on a100
 	cudaFuncSetAttribute(wf_embedding_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, 164 * 1024);
 
 	// define shared memory per block 

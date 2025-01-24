@@ -20,7 +20,7 @@ class _wf_embedding(torch.autograd.Function):
 	def forward(ctx, coords, wavenumbers, mask):
 		
 		# bake the mask into coords
-		coords = torch.where(mask, float("inf"), coords)
+		coords = torch.where(mask.unsqueeze(2), float("inf"), coords)
 
 		# convert dtypes and make contiguous. everything in fp16
 		coords = coords.transpose(1, 2).to(torch.float32).contiguous() # transpose to make memory access more efficient in the kernel

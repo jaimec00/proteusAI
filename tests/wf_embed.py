@@ -44,6 +44,8 @@ def main():
 	# wf_embedding_torch = wf_embedding
 
 	triton_out, triton_time, triton_memory = profile_func(wf_embedding, params, start_event, end_event)
+	print(triton_out)
+	return
 	torch_out, torch_time, torch_memory = profile_func(wf_embedding_torch, params, start_event, end_event)
 
 	rel_error, abs_error = calculate_error(torch_out, triton_out)
