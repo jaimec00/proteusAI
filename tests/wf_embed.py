@@ -10,11 +10,12 @@ import math
 from utils.test_utils import calculate_error, profile_func, profile_bwd 
 
 def main():
+	# torch.set_printoptions(threshold=torch.inf)
 
 	# device
 	device = torch.device('cuda')
 
-	batch, N, d_model = 1, 1024, 512
+	batch, N, d_model = 1, 128, 512
 	min_wl, max_wl, base = 3.7, 20, 20
 	coords = max_wl * torch.randn((batch, N, 3), dtype=torch.float32, device=device)
 	mask = (torch.rand((batch, N), device=device) > 1)
@@ -23,7 +24,9 @@ def main():
 	# num_wl = int(d_model//2) # define the number of wave functions to compute
 	# wavelengths = (min_wl + (torch.logspace(0, 1, num_wl, base=base, device=coords.device, dtype=torch.float32) - 1) / (base - 1) * (max_wl - min_wl))
 	# wavenumbers = (2 * torch.pi / wavelengths).contiguous()
-	wavenumbers = torch.randint(1,10,(d_model//2,), device=coords.device, dtype=torch.float32, requires_grad=True)
+	# wavenumbers = torch.randint(1,10,(d_model//2,), device=coords.device, dtype=torch.float32, requires_grad=True)
+	wavenumbers = torch.randn((d_model//2,), device=coords.device, dtype=torch.float32, requires_grad=True)
+	# wavenumbers = torch.tensor([2*torch.pi]*(d_model//2), device=coords.device, dtype=torch.float32, requires_grad=True)
 	# torch.linspace(1,3,d_model//2, device=coords.device, dtype=torch.float32, requires_grad=True)
 
 	params = [coords, wavenumbers, mask]
@@ -73,7 +76,9 @@ def main():
 	print(f"triton time: {triton_time:.3f} ms")
 	print(f"torch memory usage: {torch_memory / (1024 ** 3):.3f} GB")
 	print(f"triton kernel memory usage: {triton_memory / (1024 ** 3):.3f} GB")
-	print(triton_dk, torch_dk)
+	# print(triton_dk, torch_dk)
+	print(triton_out, torch_out)
+	print(triton_out-torch_out)
 
 def wf_embedding_torch(coords, wavenumbers, mask=None):
 

@@ -10,6 +10,7 @@ descripiton:    cuda kernel to embed 3d coordinates to target feature space usin
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h> // for half-precision operations
+#include <stdio.h>
 
 // define function to sum the values of threads within a warp
 // scales O(log_2(32)) = O(5), very fast
@@ -90,7 +91,7 @@ __global__ void wf_embedding_kernel(
 	for (int j = 0; j < NJ_iters; ++j){
 
 		int offs_NJ = (offs_NI + j*warpSize + lane_id) % tot_N;   // cycles to beginning when reach the end of the sequence
-		bool thread_mask = (offs_Z < tot_Z) && ((j*warpSize + lane_id) < tot_N); 	// j*warpSize+laneid checks how many elements have 
+		bool thread_mask = (offs_Z < tot_Z) && ((j*warpSize + lane_id) < tot_N) && (offs_NI < tot_N); 	// j*warpSize+laneid checks how many elements have 
 																				// been processed to mask already computed values
 
 		// now assign one warp for x, another y, another z, and another mask to read from HBM in coalesced manner and in parallel
@@ -105,11 +106,7 @@ __global__ void wf_embedding_kernel(
 			// read z
 			case 2: coords_NJ_z[lane_id] = coords_base_ptr[2*stride_coords_S + offs_NJ*thread_mask]; break;
 			// read mask
-			case 3: {
-				bool valid = !mask_base_ptr[offs_NJ*thread_mask];
-				mask_NJ = __ballot_sync(0xFFFFFFFF, valid); // creates 32-bit bit mask based on each threads value w/ in the warp
-				break;
-			}
+			case 3: mask_NJ = __ballot_sync(0xFFFFFFFF, !mask_base_ptr[offs_NJ*thread_mask]); break; // creates 32-bit bit mask based on each threads value w/ in the warp				
 		}
 
 		// synchronize the threads before using the shared memory
@@ -173,16 +170,18 @@ __global__ void wf_embedding_kernel(
 				// save the intermediate output
 				// writing as real1, real_d/2, imag1, imag_d/2, real2, real_d/2+1, ...
 				// for efficient shared mem access w/ no bank conflicts in shared memory
-				// 4*k & ((d_model/2) - 1) is equivilant to 4*k % (d_model/2) but faster
-				int base_idx = (warp_id)*num_wn + ((4 * k) & ((d_model/2) - 1));
-				out[base_idx + (k > (d_model/2))] = __hadd(out[base_idx + (k > (d_model/2))], __float2half(real_superposition));
-				out[base_idx + 2 + (k > (d_model/2))] = __hadd(out[base_idx + 2 + (k > (d_model/2))], __float2half(imag_superposition));
+				// 4*k & (d_model - 1) is equivilant to 4*k % d_model but faster
+				int base_idx = warp_id*d_model + ((4 * k) & (d_model - 1));
+				out[base_idx + ((4*k) >= d_model)] = __hadd(out[base_idx + ((4*k) >= d_model)], __float2half(real_superposition));
+				out[base_idx + 2 + ((4*k) >= d_model)] = __hadd(out[base_idx + 2 + ((4*k) >= d_model)],__float2half(imag_superposition));
 
 				// save these for bwd
-				trig_sums[(warp_id)*num_wn + (2*k)] = __hadd(trig_sums[(warp_id)*num_wn + (2*k)], __float2half(cos_sums));
-				trig_sums[(warp_id)*num_wn + (2*k + 1)] = __hadd(trig_sums[(warp_id)*num_wn + (2*k + 1)], __float2half(sin_sums));
+				trig_sums[warp_id*d_model + (2*k)] = __hadd(trig_sums[warp_id*d_model + (2*k)], __float2half(cos_sums));
+				trig_sums[warp_id*d_model + (2*k + 1)] = __hadd(trig_sums[warp_id*d_model + (2*k + 1)], __float2half(sin_sums));
+
 
 			}
+
 
 		}
 	}
@@ -194,18 +193,24 @@ __global__ void wf_embedding_kernel(
 
 	// have threads write back to HBM in parallel
 	// two seperate loops, since out and the sums are different sizes in last dim
-	for (int k = 0; k < (k_iters); ++k){
+	if ((offs_NI+warp_id) < tot_N){
+	
+		int d_iters = (num_wn + warpSize - 1) / warpSize; // cdiv
+		
+		for (int k = 0; k < d_iters; ++k){
 		// write to output
 		// note that the format is real1, real_d/2, imag1, imag_d/2, real2, real_d/2+1 ... in shared mem,
 		// but in global it is real1, imag1, real2, imag2 ...
 		// do two writes per iter, one for the first half and one for the second half
 		// the read from sram avoids bank conflicts (note that working w/ half), and the write to hbm is coalesced 
-		block_out_ptr[num_threads*k + thread_id] = out[num_threads*k + (2*thread_id)];
-		block_out_ptr[d_model/2 + num_threads*k + thread_id] = out[num_threads*k + (2*thread_id + 1)];
-	
-		// store for bwd
-		block_cos_sums_ptr[num_threads*k + thread_id] = trig_sums[num_threads*k + (2*thread_id)];
-		block_sin_sums_ptr[num_threads*k + thread_id] = trig_sums[num_threads*k + (2*thread_id + 1)];
+			block_out_ptr[warpSize*k + lane_id] = out[warp_id*d_model + warpSize*k + (2*lane_id)];
+			block_out_ptr[(d_model/2) + warpSize*k + lane_id] = out[warp_id*d_model + warpSize*k + (2*lane_id + 1)];
+		
+			// store for bwd
+			block_cos_sums_ptr[warpSize*k + lane_id] = trig_sums[warp_id*d_model + warpSize*k + (2*lane_id)];
+			block_sin_sums_ptr[warpSize*k + lane_id] = trig_sums[warp_id*d_model + warpSize*k + (2*lane_id + 1)];
+		
+		}
 	}
 }
 
@@ -234,14 +239,14 @@ void wf_embedding_kernel_forward(
 	// cudaFuncSetAttribute(wf_embedding_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, 96 * 1024);
 
 	// define shared memory per block (switched to static but keeping it here in case switch back)
-	// int shared_mem = 2*(block_size.y*(8 + 2*d_model/2 + d_model) + block_size.x*(8) + d_model/2);   // NI (y dim) stores NIxd_model output, 
+	int shared_mem = 2*(block_size.y*(8 + 2*d_model/2 + d_model) + block_size.x*(8) + d_model/2);   // NI (y dim) stores NIxd_model output, 
 																									// and two NIxd_model/2 (one for cos sums and another for sin) 
 																									// and requires 8 floating point numbers per NI. NJ (x dim) also requires 8 per,
 																									// and the wavenumbers requires another d_model/2 floating point numbers.
 																									// using fp 16 so multiple by 2 bytes
 
 	// Launch the kernel
-	wf_embedding_kernel<<<grid_size, block_size, 0, stream>>>(
+	wf_embedding_kernel<<<grid_size, block_size, shared_mem, stream>>>(
 		coords_ptr, stride_coords_Z, stride_coords_N, stride_coords_S,
 		wavenumbers_ptr, stride_wavenumbers_K,
 		mask_ptr, stride_mask_Z, stride_mask_N,
