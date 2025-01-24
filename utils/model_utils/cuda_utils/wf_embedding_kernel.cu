@@ -47,7 +47,7 @@ __global__ void wf_embedding_kernel(
 	// int warp_id = thread_id / warpSize; // not used
 	int lane_id = thread_id % warpSize;
 
-	// shared memory for these values, warps fetch these from global memory in parallel
+	// init shared mem and split into seperate arrays, warps fetch these from global memory in parallel
 	extern __shared__ __align__(4) float shared_mem[];
 
 	// init wavenumbers, stay in sram throughout
@@ -87,18 +87,20 @@ __global__ void wf_embedding_kernel(
 	const float* coords_base_ptr = coords_ptr + (offs_Z*stride_coords_Z);
 
 	// loop through blocks of NJ
-	int NJ_iters = (tot_N + blockDim.x - 1) / blockDim.x;
+	int NJ_iters = (tot_N + blockDim.y - 1) / blockDim.y;
 	for (int j = 0; j < NJ_iters; ++j){
 
-		int offs_NJ = (offs_NI + j*num_threads + thread_id) % tot_N;   // cycles to beginning when reach the end of the sequence
+		int offs_NJ = (offs_NI + j*num_threads + thread_id) % tot_N;	// cycles to beginning when reach the end of the sequence, 
+																		// since starting at this blocks NI to get NI and NJ in the same iteration
 		bool thread_mask = (offs_Z < tot_Z) && ((j*num_threads + thread_id) < tot_N) && (offs_NI < tot_N); 	// j*num_threads+thread_id checks how many elements have 
-																										// been processed to mask already computed values
+																											// been processed to mask already computed values
 
 		// each thread has a single NJ value in its register
+		// coords was transposed by pytorch to get 3xN tensor, so all x values are contiguous, same w/ y and z 
 		float coords_NJ_x = coords_base_ptr[0*stride_coords_S + offs_NJ*thread_mask];
 		float coords_NJ_y = coords_base_ptr[1*stride_coords_S + offs_NJ*thread_mask];
 		float coords_NJ_z = coords_base_ptr[2*stride_coords_S + offs_NJ*thread_mask];
-		bool is_inf_NJ = coords_NJ_x > 1e30; // convenience for later
+		bool is_inf_NJ = coords_NJ_x > 1e30; // masked vals are inf, save this var to prevent NaNs
 		bool mask_NJ = thread_mask && (!is_inf_NJ); 
 	
 		if (j==0) { // in the first iteration, thread0 loaded the NI token, so now distribute that information to the other threads
@@ -110,7 +112,7 @@ __global__ void wf_embedding_kernel(
 				coords_NI[2] = coords_NJ_z;
 			}
 
-			// synchronize the threads before using the shared memory
+			// synchronize the threads before using the shared memory, only happens in the first iteration
 			__syncthreads();
 
 			// now all threads move it from shared mem to their register		 
@@ -132,7 +134,7 @@ __global__ void wf_embedding_kernel(
 
 		// compute the distance and the masks
 		float dists_raw = dist_x*dist_x + dist_y*dist_y + dist_z*dist_z;
-		bool mask_IJ = mask_NI && mask_NJ && (dists_raw!=0); 
+		bool mask_IJ = mask_NI && mask_NJ && (dists_raw!=0); // prevent div by 0
 		float dists = sqrtf(dists_raw + (1-mask_IJ)); // fast approximation of sqrt (1-mask avoids div by 0)
 
 		// loop over wavenumbers in shared memory
@@ -156,18 +158,20 @@ __global__ void wf_embedding_kernel(
 			// have each warp sum the contributions of its threads
 			float real_superposition = warp_reduce_sum(real);
 			float imag_superposition = warp_reduce_sum(imag);
-			float cos_superposition = warp_reduce_sum(cosine);
-			float sin_superposition = warp_reduce_sum(sine);
+			float cos_sum = warp_reduce_sum(cosine);
+			float sin_sum = warp_reduce_sum(sine);
 
 			if (lane_id==0){ // first thread in the warp writes to mem
 
 				// save the intermediate output in shared mem
+				// no bank conflicts, a single thread per warp writes these
+				// minimal contention, as only two threads overall are performing atomic adds
 				atomicAdd(&out[2*k], real_superposition);
 				atomicAdd(&out[2*k + 1], imag_superposition);
 
 				// save these for bwd
-				atomicAdd(&cos_sums[k], cos_superposition);
-				atomicAdd(&sin_sums[k], sin_superposition);
+				atomicAdd(&cos_sums[k], cos_sum);
+				atomicAdd(&sin_sums[k], sin_sum);
 
 			}
 		}
@@ -178,15 +182,18 @@ __global__ void wf_embedding_kernel(
 	float* block_cos_sums_ptr = cos_sums_ptr + (offs_Z*stride_cos_sums_Z) + (offs_NI*stride_cos_sums_N);
 	float* block_sin_sums_ptr = sin_sums_ptr + (offs_Z*stride_sin_sums_Z) + (offs_NI*stride_sin_sums_N);
 
-	// have threads write back to HBM in parallel and coalesced manner		
+	// have threads write back to HBM in parallel and coalesced manner
+	// no masking necessary, since if NI is invalid the program would have terminated in the first iteration
 	for (int k = 0; k < k_iters; ++k){
 		// write to output. do two iters of out so it fits in the same loop as the trig sums. 
+		// all memory writes are coalesced, and no bank conflicts, since each thread reads adjacent 32bit floats from out
+		// in shared mem and writes to adjacent indexes in HBM
 		block_out_ptr[num_threads*(2*k) + thread_id] = out[num_threads*(2*k) + thread_id];
 		block_out_ptr[num_threads*(2*k+1) + thread_id] = out[num_threads*(2*k+1) + thread_id];
 	
 		// store for bwd
 		block_cos_sums_ptr[num_threads*k + thread_id] = cos_sums[num_threads*k + thread_id];
-		block_sin_sums_ptr[num_threads*k + thread_id] = sin_sums[num_threads*k + thread_id];		
+		block_sin_sums_ptr[num_threads*k + thread_id] = sin_sums[num_threads*k + thread_id];	
 	}
 }
 
