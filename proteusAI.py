@@ -11,12 +11,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
-from utils.model_utils.wf_embedding2 import wf_embedding
+from utils.model_utils.wf_embedding.cuda import wf_embedding
 
 # for testing different attention methods, specifically how RBFs interact w/ attn logits (multiplicative, additive, no spatial info)
-from utils.model_utils.geometric_attn import geometric_attn
-# from utils.model_utils.geometric_attn_bias import geometric_attn
-# from utils.model_utils.flash_attn import geometric_attn
+from utils.model_utils.geometric_attn.geometric_attn import geometric_attn
+# from utils.model_utils.geometric_attn.geometric_attn_bias import geometric_attn
+# from utils.model_utils.geometric_attn.flash_attn import geometric_attn
 
 # ----------------------------------------------------------------------------------------------------------------------
 

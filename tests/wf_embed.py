@@ -1,93 +1,92 @@
 
 
 import torch
-from utils.model_utils.cuda_utils.wf_embedding import wf_embedding 
-# from utils.model_utils.wf_embedding2 import wf_embedding 
-
-import triton
-import triton.language as tl
 import math
 from utils.test_utils import calculate_error, profile_func, profile_bwd 
+from utils.model_utils.wf_embedding.cuda.wf_embedding import wf_embedding 
 
 def main():
-	# torch.set_printoptions(threshold=torch.inf)
 
 	# device
 	device = torch.device('cuda')
+	
+	# set rng seed
+	torch.manual_seed(0)
 
-	batch, N, d_model = 1, 2048, 512
+	# prepare inputs
+	batch, N, d_model = 1, 512, 512
 	min_wl, max_wl, base = 3.7, 20, 20
 	coords = max_wl * torch.randn((batch, N, 3), dtype=torch.float32, device=device)
-	mask = (torch.rand((batch, N), device=device) > 1)
-
-	# prepare the wavenumber values
-	# num_wl = int(d_model//2) # define the number of wave functions to compute
-	# wavelengths = (min_wl + (torch.logspace(0, 1, num_wl, base=base, device=coords.device, dtype=torch.float32) - 1) / (base - 1) * (max_wl - min_wl))
-	# wavenumbers = (2 * torch.pi / wavelengths).contiguous()
-	# wavenumbers = torch.randint(1,10,(d_model//2,), device=coords.device, dtype=torch.float32, requires_grad=True)
+	mask = (torch.rand((batch, N), device=device) > 0.8)
 	wavenumbers = torch.randn((d_model//2,), device=coords.device, dtype=torch.float32, requires_grad=True)
-	# wavenumbers = torch.tensor([2*torch.pi]*(d_model//2), device=coords.device, dtype=torch.float32, requires_grad=True)
-	# torch.linspace(1,3,d_model//2, device=coords.device, dtype=torch.float32, requires_grad=True)
 
+	# to make it easier
 	params = [coords, wavenumbers, mask]
 
-	# for autotuning
-	# wf_embedding(*params)
-
-	# wavenumbers.grad.zero_()
-
+	# synchronize device
 	torch.cuda.synchronize()  # Ensure no ongoing GPU operations
+
+	# profiling
 	start_event = torch.cuda.Event(enable_timing=True)
 	end_event = torch.cuda.Event(enable_timing=True)
-	atol, rtol = 1e-4, 0
+	atol, rtol = 1e-4, 1e-2
 
-	# wf_embedding_torch = wf_embedding
+	# if intermediate tensor size is too big for torch, just run the kernel twice
+	# mem_size = 4*(batch * N * N * d_model/2) / (1024**3)
+	# if mem_size > 16: # GB
+	# 	print("intermediate tensor size is too big for pytorch comparison, running kernel twice...\n")
+	# 	wf_embedding_torch = wf_embedding
+	# else:
+	# 	wf_embedding_torch = wf_embedding_torch
 
-	triton_out, triton_time, triton_memory = profile_func(wf_embedding, params, start_event, end_event)
-	# triton_out2 = triton_out.clone()
-	# triton_out.zero_() # avoid torch using same mem
-	# torch.cuda.synchronize()
+	# profiling section for nsight compute
+	torch.cuda.cudart().cudaProfilerStart()
 
-	# params = [i.clone() if isinstance(i, torch.Tensor) else i for i in params]
+	# run the cuda and torch implementations
+	cuda_out, cuda_time, cuda_memory = profile_func(wf_embedding, params, start_event, end_event)	
+
+	# end profiling section
+	torch.cuda.cudart().cudaProfilerStop()
 
 	torch_out, torch_time, torch_memory = profile_func(wf_embedding_torch, params, start_event, end_event)
-	print(hex(triton_out.data_ptr()))
 	
-	print(hex(torch_out.data_ptr()))
 
-	rel_error, abs_error = calculate_error(torch_out, triton_out)
-	print(f"triton implementation is correct: {torch.allclose(triton_out, torch_out, atol=atol, rtol=rtol, equal_nan=False)}")
-	print(f"triton absolute error: {abs_error:.5f}")
-	print(f"triton relative error: {rel_error:.5f}")
-	print(f"triton percent error: {rel_error*100:.5f}%")
+
+	# summarize results
+	rel_error, abs_error = calculate_error(torch_out, cuda_out)
+	print(f"cuda implementation is correct: {torch.allclose(cuda_out, torch_out, atol=atol, rtol=rtol, equal_nan=False)}")
+	print(f"cuda absolute error: {abs_error:.5f}")
+	print(f"cuda relative error: {rel_error:.5f}")
+	print(f"cuda percent error: {rel_error*100:.5f}%")
 	print(f"torch time: {torch_time:.3f} ms")
-	print(f"triton time: {triton_time:.3f} ms")
+	print(f"cuda time: {cuda_time:.3f} ms")
 	print(f"torch memory usage: {torch_memory / (1024 ** 3):.3f} GB")
-	print(f"triton kernel memory usage: {triton_memory / (1024 ** 3):.3f} GB")
+	print(f"cuda kernel memory usage: {cuda_memory / (1024 ** 3):.3f} GB\n")
 
+	# now profile bwd, no need for nsight compute as fwd precomputed everything and now it's just torch
+	cuda_time, cuda_mem = profile_bwd(cuda_out.sum(), start_event, end_event)
 
-
-	triton_time, triton_mem = profile_bwd(triton_out.sum(), start_event, end_event)
-
-	triton_dk = wavenumbers.grad.clone()
+	# keep the gradients then zero them for torch function
+	cuda_dk = wavenumbers.grad.clone()
 	wavenumbers.grad.zero_()
 
+	# run torch bwd
 	torch_time, torch_mem = profile_bwd(torch_out.sum(), start_event, end_event)
-
 	torch_dk = wavenumbers.grad.clone()
 
-	rel_error, abs_error = calculate_error(torch_dk, triton_dk)
-	print(f"triton implementation is correct: {torch.allclose(triton_dk, torch_dk, atol=atol, rtol=rtol, equal_nan=False)}")
-	print(f"triton absolute error: {abs_error:.5f}")
-	print(f"triton relative error: {rel_error:.5f}")
-	print(f"triton percent error: {rel_error*100:.5f}%")
+	# summarize bwd stats
+	rel_error, abs_error = calculate_error(torch_dk, cuda_dk)
+	print(f"cuda implementation is correct: {torch.allclose(cuda_dk, torch_dk, atol=atol, rtol=rtol, equal_nan=False)}")
+	print(f"cuda absolute error: {abs_error:.5f}")
+	print(f"cuda relative error: {rel_error:.5f}")
+	print(f"cuda percent error: {rel_error*100:.5f}%")
 	print(f"torch time: {torch_time:.3f} ms")
-	print(f"triton time: {triton_time:.3f} ms")
+	print(f"cuda time: {cuda_time:.3f} ms")
 	print(f"torch memory usage: {torch_memory / (1024 ** 3):.3f} GB")
-	print(f"triton kernel memory usage: {triton_memory / (1024 ** 3):.3f} GB")
-	# print(triton_dk, torch_dk)
-	# print(triton_out)#, torch_out)
-	# print(triton_out-torch_out)
+	print(f"cuda kernel memory usage: {cuda_memory / (1024 ** 3):.3f} GB")
+	# print(torch_out/cuda_out)
+	# print(cuda_out)
+	# print(mask)
 
 def wf_embedding_torch(coords, wavenumbers, mask=None):
 
@@ -113,21 +112,6 @@ def wf_embedding_torch(coords, wavenumbers, mask=None):
 	features = torch.stack([real_superposition, imag_superposition], dim=-1).view(batch, N, d_model) # Z x N x d_model
 
 	return features
-
-
-def get_wavelengths(min_wl=3.7, max_wl=20, d_model=512, base=20, device="cpu"):
-
-	# short range wavelengths get 128 wave functions, medium get 96, and long get 32. each wave function
-	# creates two features, one real and one imaginary, for a total of num_wl*2 = 512 features
-	# create evenly spaced tensors from 0 to 1 of shape 1,  
-	num_wl = (d_model // 2)
-	
-	log_distribution = (torch.logspace(0, 1, num_wl, base=base, device=device) - 1) / (base - 1) # Scale [1, 2) to [0, 1)
-	wavelengths = (min_wl + (log_distribution.mul_(max_wl - min_wl))).to(device) # num_wl,
-
-	return wavelengths
-
-
 
 if __name__ == "__main__":
 	main()

@@ -22,6 +22,7 @@ void wf_embedding_forward(
     torch::Tensor cos_sums, torch::Tensor sin_sums
 ) {
 
+
     // validate inputs
     TORCH_CHECK(coords.device().is_cuda(), "coords must be a CUDA tensor");
     TORCH_CHECK(wavenumbers.device().is_cuda(), "wavenumbers must be a CUDA tensor");

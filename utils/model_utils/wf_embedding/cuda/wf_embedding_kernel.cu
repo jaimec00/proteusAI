@@ -9,7 +9,6 @@ descripiton:    cuda kernel to embed 3d coordinates to target feature space usin
 */
 
 #include <cuda_runtime.h>
-// #define M_PIf 3.1415927f
 
 // define function to sum the values of threads within a warp
 // scales O(log_2(32)) = O(5), very fast
@@ -25,7 +24,7 @@ __device__ float warp_reduce_sum(float value) {
 
 // device kernel for wavefunction embedding
 __global__ void wf_embedding_kernel(
-	const float* coords_ptr, int stride_coords_Z, int stride_coords_N, int stride_coords_S,
+	const float* coords_ptr, int stride_coords_Z, int stride_coords_S, int stride_coords_N,
 	const float* wavenumbers_ptr, int stride_wavenumbers_K, 
 
 	float* out_ptr, int stride_out_Z, int stride_out_N, int stride_out_D,
@@ -69,7 +68,7 @@ __global__ void wf_embedding_kernel(
 	float coords_NI_x;
 	float coords_NI_y;
 	float coords_NI_z;
-	bool is_inf_NI;
+	bool is_masked_NI;
 	bool mask_NI;
 
 	// first load wavenumbers
@@ -105,8 +104,8 @@ __global__ void wf_embedding_kernel(
 		float coords_NJ_x = coords_base_ptr[0*stride_coords_S + offs_NJ*thread_mask];
 		float coords_NJ_y = coords_base_ptr[1*stride_coords_S + offs_NJ*thread_mask];
 		float coords_NJ_z = coords_base_ptr[2*stride_coords_S + offs_NJ*thread_mask];
-		bool is_inf_NJ = coords_NJ_x > 1e30; // masked vals are inf, save this var to prevent NaNs
-		bool mask_NJ = thread_mask && (!is_inf_NJ); 
+		bool is_masked_NJ = coords_NJ_x == 12345.6789; // masked vals are inf, save this var to prevent NaNs
+		bool mask_NJ = thread_mask && (!is_masked_NJ); 
 	
 		if (j==0) { // in the first iteration, thread0 loaded the NI token, so now distribute that information to the other threads
 			
@@ -124,8 +123,8 @@ __global__ void wf_embedding_kernel(
 			coords_NI_x = coords_NI[0]; // no bank conflicts, it is broadcast
 			coords_NI_y = coords_NI[1];
 			coords_NI_z = coords_NI[2];
-			is_inf_NI = coords_NI_x > 1e30; 
-			mask_NI = thread_mask && (!is_inf_NI); 
+			is_masked_NI = coords_NI_x == 12345.6789; 
+			mask_NI = thread_mask && (!is_masked_NI); 
 
 			// if NI is masked, stop the program. note all threads have the same NI, so the whole block will terminate
 			if (!mask_NI) return;
@@ -133,9 +132,9 @@ __global__ void wf_embedding_kernel(
 		}
 
 		// the distance computations. sets inf vals to zero (1/inf) to avoid NaNs. already checked if NI is valid, so only need to do for NJ
-		float dist_x = coords_NI_x - (coords_NJ_x*(!is_inf_NJ) + (1/coords_NJ_x)*is_inf_NJ);
-		float dist_y = coords_NI_y - (coords_NJ_y*(!is_inf_NJ) + (1/coords_NJ_y)*is_inf_NJ);
-		float dist_z = coords_NI_z - (coords_NJ_z*(!is_inf_NJ) + (1/coords_NJ_z)*is_inf_NJ);
+		float dist_x = coords_NI_x - (coords_NJ_x*mask_NJ);
+		float dist_y = coords_NI_y - (coords_NJ_y*mask_NJ);
+		float dist_z = coords_NI_z - (coords_NJ_z*mask_NJ);
 
 		// compute the distance and the masks
 		float dists_raw = dist_x*dist_x + dist_y*dist_y + dist_z*dist_z;
@@ -236,20 +235,30 @@ void wf_embedding_kernel_forward(
 		tot_Z
 	);
 
-	// configure the kernel to allow 164kb sram. to maximize blocks/SM. only works on a100
-	cudaFuncSetAttribute(wf_embedding_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, 164 * 1000);
+	// configure the kernel to allow the maximum sram to maximize blocks/SM. 
+	// a100 allows 164 kB, h100 allows 228 kB, should work on other devices too, but much slower since this kernel uses
+	// significant SRAM. default for most consumer devices is 48 kB, so the kernel will run but with significantly less blocks/SM,
+	// meaning it won't fully utilize the hardware
+	// for d_model=512, each block uses 5.2 kB SRAM (+ 1 kB for cuda driver shared mem). see shared_mem calculation in next code block
+	// a100 get 26/32 blocks per SM while h100 gets 32/32 blocks per SM. h100 also has more SMs and is generally faster
+	// shared memory per block is dependant on d_model, so if this is a limiting factor, decrease d_model
+	int device;	
+	cudaGetDevice(&device);
+	int maxSharedMemPerBlockOptin = 0;
+	cudaDeviceGetAttribute(&maxSharedMemPerBlockOptin, cudaDevAttrMaxSharedMemoryPerBlockOptin, device);
+	cudaFuncSetAttribute(wf_embedding_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, maxSharedMemPerBlockOptin);
 
 	// define shared memory per block 
 	int shared_mem = 4*(block_size.x*(3 + 2*d_model/2 + d_model) + d_model/2);   // NI (x dim) stores NIxd_model output, 
 																				// and two NIxd_model/2 (one for cos sums and another for sin) 
-																				// and requires 3 floating point numbers per NI. 
-																				// NJ (y dim) is free, as everything is in registers 
+																				// and requires 3 floating point numbers per NI (x,y,z). 
+																				// NJ is free, as everything is in registers 
 																				// and the wavenumbers requires another d_model/2 floating point numbers.
 																				// multiply by 4 bytes per fp32
 
 	// Launch the kernel
 	wf_embedding_kernel<<<grid_size, block_size, shared_mem, stream>>>(
-		coords_ptr, stride_coords_Z, stride_coords_N, stride_coords_S,
+		coords_ptr, stride_coords_Z, stride_coords_S, stride_coords_N,
 		wavenumbers_ptr, stride_wavenumbers_K,
 		out_ptr,  stride_out_Z, stride_out_N, stride_out_D,
 		cos_sums_ptr, stride_cos_sums_Z, stride_cos_sums_N, stride_cos_sums_K,

@@ -3,3 +3,7 @@ err.*
 wf_plots/
 __pycache__/
 .nfs*
+*.ncu-rep
+profiling/
+build/
+*.so
