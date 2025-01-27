@@ -68,7 +68,6 @@ __global__ void wf_embedding_kernel(
 	float coords_NI_x;
 	float coords_NI_y;
 	float coords_NI_z;
-	bool is_masked_NI;
 	bool mask_NI;
 
 	// first load wavenumbers
@@ -104,8 +103,7 @@ __global__ void wf_embedding_kernel(
 		float coords_NJ_x = coords_base_ptr[0*stride_coords_S + offs_NJ*thread_mask];
 		float coords_NJ_y = coords_base_ptr[1*stride_coords_S + offs_NJ*thread_mask];
 		float coords_NJ_z = coords_base_ptr[2*stride_coords_S + offs_NJ*thread_mask];
-		bool is_masked_NJ = coords_NJ_x == 12345.6789; // masked vals are inf, save this var to prevent NaNs
-		bool mask_NJ = thread_mask && (!is_masked_NJ); 
+		bool mask_NJ = thread_mask && (coords_NJ_x!=12345.6789); // baked the mask into coords w/ this val
 	
 		if (j==0) { // in the first iteration, thread0 loaded the NI token, so now distribute that information to the other threads
 			
@@ -123,8 +121,7 @@ __global__ void wf_embedding_kernel(
 			coords_NI_x = coords_NI[0]; // no bank conflicts, it is broadcast
 			coords_NI_y = coords_NI[1];
 			coords_NI_z = coords_NI[2];
-			is_masked_NI = coords_NI_x == 12345.6789; 
-			mask_NI = thread_mask && (!is_masked_NI); 
+			mask_NI = thread_mask && (coords_NI_x!=12345.6789); 
 
 			// if NI is masked, stop the program. note all threads have the same NI, so the whole block will terminate
 			if (!mask_NI) return;
