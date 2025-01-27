@@ -3,7 +3,7 @@ import math
 import torch
 import torch.nn.functional as F
 from utils.test_utils import calculate_error, profile_func, profile_bwd
-from utils.model_utils.geometric_attn import geometric_attn
+from utils.model_utils.geometric_attn.geometric_attn import geometric_attn
 import os
 
 def main():
@@ -24,7 +24,6 @@ def main():
 	spreads = torch.full((nheads, ), 3, device=coords.device, dtype=torch.float32, requires_grad=True)
 
 	mask = torch.rand((batch, N), device=coords.device) > 1 # batch x N
-	context_mask = torch.rand((batch, N), device=coords.device) > 1 # batch x N
 	Q = torch.normal(mean=0, std=1, size=(batch, nheads, N, d_k), device=device, dtype=torch.float32, requires_grad=True) # batch x nhead x N x d_k 
 	K = torch.normal(mean=0, std=1, size=(batch, nheads, N, d_k), device=device, dtype=torch.float32, requires_grad=True) # batch x nhead x N x d_k 
 	V = torch.normal(mean=0, std=1, size=(batch, nheads, N, d_k), device=device, dtype=torch.float32, requires_grad=True) # batch x nhead x N x d_k 
@@ -41,15 +40,15 @@ def main():
 	print("autotuning:\n")
 
 	# log autotuning
-	os.environ["TRITON_PRINT_AUTOTUNING"] = "1"
+	# os.environ["TRITON_PRINT_AUTOTUNING"] = "1"
 
-	autotune(geometric_attn, params)
+	# autotune(geometric_attn, params)
 
-	# zero grads
-	Q.grad.zero_()
-	K.grad.zero_()
-	V.grad.zero_()
-	spreads.grad.zero_()
+	# # zero grads
+	# Q.grad.zero_()
+	# K.grad.zero_()
+	# V.grad.zero_()
+	# spreads.grad.zero_()
 
 	print("forward pass:\n")
 
@@ -64,7 +63,6 @@ def main():
 		torch_func = torch_attn
 
 	torch_out, triton_out = test_fwd(torch_func, geometric_attn, params, start_event, end_event, atol, rtol)
-
 	print("\nbackward pass:\n")
 
 	test_bwd(torch_out.sum(), triton_out.sum(), Q, K, V, spreads, start_event, end_event, atol, rtol)
@@ -188,9 +186,10 @@ def torch_attn(Q, K, V, coords, spreads, mask=None):
 	dists = torch.sqrt(torch.sum((coords[:, :, None, :] - coords[:, None, :, :])**2, axis=3))[:, None, :, :]
 
 	rbfs = torch.exp(-(dists**2)/(2*(spreads[None, :, None, None]**2)))
+	dist_mask = (rbfs<=0.01)
 	rbfs = torch.where(S<0, 2-rbfs, rbfs + 1)
 
-	attn_mask = mask[:, None, :, None] | mask[:, None, None, :] 
+	attn_mask = mask[:, None, :, None] | mask[:, None, None, :] | dist_mask
 	S = torch.where(attn_mask, float("-inf"), S*rbfs)
 
 	P = torch.softmax(S, dim=-1)

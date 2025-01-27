@@ -1,17 +1,17 @@
 import torch
-# from utils.model_utils.wf_embedding.cuda import wf_embedding_kernel
+from utils.model_utils.wf_embedding.cuda import wf_embedding_kernel
 
 # for testing and development
 
-from torch.utils.cpp_extension import load
-import os
-base_dir = os.path.dirname(os.path.abspath(__file__))
-# dynamically compile and load the extension
-wf_embedding_kernel = load(
-	name="wf_embedding_kernel",
-	sources=[os.path.join(base_dir, "wf_embedding_if.cpp"), os.path.join(base_dir, "wf_embedding_kernel.cu")],
-	verbose=True  # Verbose output for debugging
-)
+# from torch.utils.cpp_extension import load
+# import os
+# base_dir = os.path.dirname(os.path.abspath(__file__))
+# # dynamically compile and load the extension
+# wf_embedding_kernel = load(
+# 	name="wf_embedding_kernel",
+# 	sources=[os.path.join(base_dir, "wf_embedding_if.cpp"), os.path.join(base_dir, "wf_embedding_kernel.cu")],
+# 	verbose=True  # Verbose output for debugging
+# )
 
 def wf_embedding(coords, wavenumbers, mask=None):
 	return _wf_embedding.apply(coords, wavenumbers, mask)
