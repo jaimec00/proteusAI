@@ -11,12 +11,13 @@ descripiton:    cuda kernel to embed 3d coordinates to target feature space usin
 #include <cuda_runtime.h>
 
 // define function to sum the values of threads within a warp
+// this is used to superpose the wavefunctions computed by individual threads in a warp
 // scales O(log_2(32)) = O(5), very fast
 __device__ float warp_reduce_sum(float value) {
-	unsigned mask = 0xFFFFFFFF; // mask for active threads in the warp
+	unsigned mask = 0xFFFFFFFF; // mask for active threads in the warp (32 1's)
 
 	for (int offset = 16; offset > 0; offset /= 2) {
-		value += __shfl_down_sync(mask, value, offset); // Perform float operations
+		value += __shfl_down_sync(mask, value, offset);
 	}
 
 	return value; 
@@ -36,8 +37,8 @@ __global__ void wf_embedding_kernel(
 	
 	// compute global thread index. only computes the starting offset of the block, as i will partition NI, NJ loads to 
 	// specific warps to read from global memory before making use of threadIdxs
-	int offs_NI = blockIdx.x * blockDim.x;  // NI index, 4 unique thread ids (not used yet)
-	int offs_Z = blockIdx.z * blockDim.z;  // batch index, 1 thread id
+	int offs_NI = blockIdx.x * blockDim.x + threadIdx.x;  // NI index, 4 unique thread ids (not used yet)
+	int offs_Z = blockIdx.z * blockDim.z + threadIdx.z;  // batch index, 1 thread id
 
 	// calculate the unique local id for each thread (will evaluate to theadIdx.y)
 	int thread_id = threadIdx.x + threadIdx.y * blockDim.x + threadIdx.z * blockDim.x * blockDim.y;
@@ -47,8 +48,21 @@ __global__ void wf_embedding_kernel(
 	// int warp_id = thread_id / warpSize; // not used
 	int lane_id = thread_id % warpSize;
 
-	// init shared mem and split into seperate arrays, warps fetch these from global memory in parallel
+	// init dynamic shared mem and split into seperate arrays
 	extern __shared__ __align__(4) float shared_mem[];
+
+	// it seems shared memory in some configurations
+	// has residual values in it, so explicitly set all values to zero before any computations
+	int shared_mem_elements = d_model + d_model/2 + d_model/2 + d_model/2 + 3;
+	int shared_mem_iters = (shared_mem_elements + num_threads - 1) / num_threads;
+	for (int mem_idx = 0; mem_idx < shared_mem_iters; ++mem_idx){
+		int thread_mem_idx = mem_idx*num_threads + thread_id;
+		bool mem_idx_valid = thread_mem_idx < shared_mem_elements;
+		shared_mem[mem_idx_valid*(mem_idx*num_threads + thread_id)] = 0.0f;
+	}
+
+	// sync threads when done initializing shared memory
+	__syncthreads();
 
 	// init wavenumbers, stay in sram throughout
 	float* wavenumbers = shared_mem;
@@ -62,9 +76,9 @@ __global__ void wf_embedding_kernel(
 	// which is loaded with the other NJ at the same time. 
 	// during first iter have first thread put it in shared so
 	// other threads can move it to their register
-	float* coords_NI = sin_sums + 3;
+	float* coords_NI = sin_sums + d_model/2;
 
-	// initialize these here to avoid compilation error, will be in registers
+	// initialize these here to avoid compilation error, will be in each thread's register
 	float coords_NI_x;
 	float coords_NI_y;
 	float coords_NI_z;
@@ -77,7 +91,7 @@ __global__ void wf_embedding_kernel(
 	int k_iters = (num_wn + num_threads - 1) / num_threads; // cdiv
 
 	// loop through wavenumbers to load to SRAM, stays there throughout
-	#pragma unroll 1
+	#pragma unroll 1 // disable loop unrolling so that threads reuse registers, implemented in every loop
 	for (int k = 0; k < k_iters; ++k){
 		int wavenumber_idx = k*num_threads + thread_id;
 		bool wavenumber_mask = wavenumber_idx < num_wn;
@@ -90,21 +104,23 @@ __global__ void wf_embedding_kernel(
 
 	// loop through blocks of NJ
 	int NJ_iters = (tot_N + blockDim.y - 1) / blockDim.y;
+	bool block_mask = (offs_Z < tot_Z) && (offs_NI < tot_N);
 	#pragma unroll 1
 	for (int j = 0; j < NJ_iters; ++j){
 
-		int offs_NJ = (offs_NI + j*num_threads + thread_id) % tot_N;	// cycles to beginning when reach the end of the sequence, 
-																		// since starting at this blocks NI to get NI and NJ in the same iteration
-		bool thread_mask = (offs_Z < tot_Z) && ((j*num_threads + thread_id) < tot_N) && (offs_NI < tot_N); 	// j*num_threads+thread_id checks how many elements have 
-																											// been processed to mask already computed values
+		int thread_offset = (j*num_threads) + thread_id;
+		int offs_NJ = (offs_NI + thread_offset) % tot_N;	// cycles to beginning when reach the end of the sequence, 
+															// since starting at this blocks NI to get NI and NJ in the same iteration
+		bool thread_mask = block_mask && (thread_offset < tot_N); 	// thread_offset checks how many elements have 
+																								// been processed to mask already computed values
 
 		// each thread has a single NJ value in its register
 		// coords was transposed by pytorch to get 3xN tensor, so all x values are contiguous, same w/ y and z 
 		float coords_NJ_x = coords_base_ptr[0*stride_coords_S + offs_NJ*thread_mask];
 		float coords_NJ_y = coords_base_ptr[1*stride_coords_S + offs_NJ*thread_mask];
 		float coords_NJ_z = coords_base_ptr[2*stride_coords_S + offs_NJ*thread_mask];
-		bool mask_NJ = thread_mask && (coords_NJ_x!=12345.6789); // baked the mask into coords w/ this val
-	
+		bool mask_NJ = thread_mask && (coords_NJ_x!=12345); // baked the mask into coords w/ this val, arbitrary, but inf makes it harder to avoid NaNs
+
 		if (j==0) { // in the first iteration, thread0 loaded the NI token, so now distribute that information to the other threads
 			
 			// have the first thread move this to shared mem
@@ -115,28 +131,29 @@ __global__ void wf_embedding_kernel(
 			}
 
 			// synchronize the threads before using the shared memory, only happens in the first iteration
+			// this also happens before wavenumbers are read, so two birds w/ one stone
 			__syncthreads();
 
 			// now all threads move it from shared mem to their register		 
 			coords_NI_x = coords_NI[0]; // no bank conflicts, it is broadcast
 			coords_NI_y = coords_NI[1];
 			coords_NI_z = coords_NI[2];
-			mask_NI = thread_mask && (coords_NI_x!=12345.6789); 
+			mask_NI = thread_mask && (coords_NI_x!=12345); 
 
 			// if NI is masked, stop the program. note all threads have the same NI, so the whole block will terminate
 			if (!mask_NI) return;
 
 		}
 
-		// the distance computations. sets inf vals to zero (1/inf) to avoid NaNs. already checked if NI is valid, so only need to do for NJ
-		float dist_x = coords_NI_x - (coords_NJ_x*mask_NJ);
-		float dist_y = coords_NI_y - (coords_NJ_y*mask_NJ);
-		float dist_z = coords_NI_z - (coords_NJ_z*mask_NJ);
+		// the distance computations. sets masked NJ dists to 0 to ensure mask operations are consistent
+		float dist_x = mask_NJ*(coords_NI_x - coords_NJ_x); 
+		float dist_y = mask_NJ*(coords_NI_y - coords_NJ_y);
+		float dist_z = mask_NJ*(coords_NI_z - coords_NJ_z);
 
 		// compute the distance and the masks
 		float dists_raw = dist_x*dist_x + dist_y*dist_y + dist_z*dist_z;
 		bool mask_IJ = mask_NI && mask_NJ && (dists_raw!=0); // prevent div by 0
-		float dists = dists_raw * rsqrtf(dists_raw + (1-mask_IJ)); // fast approximation of sqrt (1-mask avoids div by 0)
+		float dists = mask_IJ * dists_raw * rsqrtf(dists_raw + (1-mask_IJ)); // fast approximation of sqrt (1-mask avoids div by 0)
 
 		// loop over wavenumbers in shared memory
 		#pragma unroll 1
@@ -168,6 +185,7 @@ __global__ void wf_embedding_kernel(
 				// save the intermediate output in shared mem
 				// no bank conflicts, a single thread per warp writes these
 				// minimal contention, as only two threads overall are performing atomic adds
+
 				atomicAdd(&out[2*k], real_superposition);
 				atomicAdd(&out[2*k + 1], imag_superposition);
 
@@ -194,15 +212,15 @@ __global__ void wf_embedding_kernel(
 		// write to output. do two iters of out so it fits in the same loop as the trig sums. 
 		// all memory writes are coalesced, and no bank conflicts, since each thread reads adjacent 32bit floats from out
 		// in shared mem and writes to adjacent indexes in HBM
-		int out1_idx = num_threads*(2*k) + thread_id;
-		int out2_idx = num_threads*(2*k + 1) + thread_id;
+		int out1_idx = (num_threads*(2*k)) + thread_id;
+		int out2_idx = (num_threads*(2*k + 1)) + thread_id;
 
-		bool out1_mask = out1_idx < (2*num_wn);
-		bool out2_mask = out2_idx < (2*num_wn);
+		bool out1_mask = out1_idx < (d_model);
+		bool out2_mask = out2_idx < (d_model);
 
 		block_out_ptr[out1_idx*out1_mask] = out[out1_idx*out1_mask];
 		block_out_ptr[out2_idx*out2_mask] = out[out2_idx*out2_mask];
-	
+
 		// store for bwd
 		int trig_idx = num_threads*k + thread_id;
 		bool trig_mask = trig_idx < num_wn;
@@ -237,8 +255,8 @@ void wf_embedding_kernel_forward(
 	// significant SRAM. default for most consumer devices is 48 kB, so the kernel will run but with significantly less blocks/SM,
 	// meaning it won't fully utilize the hardware
 	// for d_model=512, each block uses 5.2 kB SRAM (+ 1 kB for cuda driver shared mem). see shared_mem calculation in next code block
-	// a100 get 26/32 blocks per SM while h100 gets 32/32 blocks per SM. h100 also has more SMs and is generally faster
-	// shared memory per block is dependant on d_model, so if this is a limiting factor, decrease d_model
+	// a100 get 26/32 blocks per SM while h100 gets 35/32=>32/32 blocks per SM. h100 also has more SMs and is generally faster
+	// shared memory per block is dependant on d_model, so if this is a limiting factor, you should decrease d_model
 	int device;	
 	cudaGetDevice(&device);
 	int maxSharedMemPerBlockOptin = 0;

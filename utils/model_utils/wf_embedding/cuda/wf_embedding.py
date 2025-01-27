@@ -1,8 +1,10 @@
 import torch
 # from utils.model_utils.wf_embedding.cuda import wf_embedding_kernel
+
+# for testing and development
+
 from torch.utils.cpp_extension import load
 import os
-
 base_dir = os.path.dirname(os.path.abspath(__file__))
 # dynamically compile and load the extension
 wf_embedding_kernel = load(
@@ -19,8 +21,8 @@ class _wf_embedding(torch.autograd.Function):
 	@staticmethod
 	def forward(ctx, coords, wavenumbers, mask):
 		
-		# bake the mask into coords
-		coords = torch.where(mask.unsqueeze(2), 12345.6789, coords)
+		# bake the mask into coords w/ arbitrary val. less likely to give NaNs than using inf
+		coords = torch.where(mask.unsqueeze(2), 12345, coords)
 
 		# convert dtypes and make contiguous. everything in fp32
 		coords = coords.transpose(1, 2).to(torch.float32).contiguous() # transpose to make memory access more efficient in the kernel
