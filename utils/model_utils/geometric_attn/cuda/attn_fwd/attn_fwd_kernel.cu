@@ -246,7 +246,7 @@ __global__ void attn_fwd_kernel(
 }
 
 // Host function to configure and launch the CUDA kernel
-void wf_embedding_kernel_forward(
+void attn_fwd(
 	const float* coords_ptr, int stride_coords_Z, int stride_coords_S, int stride_coords_N,
 	const float* wavenumbers_ptr, int stride_wavenumbers_K, 
 

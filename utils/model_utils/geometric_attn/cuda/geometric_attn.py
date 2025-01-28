@@ -1,78 +1,106 @@
 import torch
-from utils.model_utils.geometric_attn.cuda.attn_fwd import attn_fwd_kernel
-from utils.model_utils.geometric_attn.cuda.attn_bwd import attn_bwd_kernel
+# from utils.model_utils.geometric_attn.cuda.attn_fwd import attn_fwd_kernel
+# from utils.model_utils.geometric_attn.cuda.attn_bwd import attn_bwd_kernel
 
 # for testing and development
 
-# from torch.utils.cpp_extension import load
-# import os
-# base_dir = os.path.dirname(os.path.abspath(__file__))
-# # dynamically compile and load the extension
-# wf_embedding_kernel = load(
-# 	name="wf_embedding_kernel",
-# 	sources=[os.path.join(base_dir, "wf_embedding_if.cpp"), os.path.join(base_dir, "wf_embedding_kernel.cu")],
-# 	verbose=True  # Verbose output for debugging
-# )
+from torch.utils.cpp_extension import load
+import os
+base_dir = os.path.dirname(os.path.abspath(__file__))
+# dynamically compile and load the extension
+wf_embedding_kernel = load(
+	name="attn_fwd_kernel",
+	sources=[os.path.join(base_dir, "attn_fwd_if.cpp"), os.path.join(base_dir, "attn_fwd_kernel.cu")],
+	verbose=True  # Verbose output for debugging
+)
 
-def wf_embedding(coords, wavenumbers, mask=None):
-	return _wf_embedding.apply(coords, wavenumbers, mask)
+def geometric_attn(Q, K, V, coords, spreads, mask=None, dropout=0.0):
+	return _geometric_attn.apply(Q, K, V, coords, spreads, mask, dropout)
 
-class _wf_embedding(torch.autograd.Function):
+class _geometric_attn(torch.autograd.Function):
 
 	@staticmethod
-	def forward(ctx, coords, wavenumbers, mask):
+	def forward(ctx, Q, K, V, coords, spreads, mask, dropout):
 		
-		# bake the mask into coords w/ arbitrary val. less likely to give NaNs than using inf
-		coords = torch.where(mask.unsqueeze(2), 12345, coords)
+		# checks
+		assert (Q.shape == K.shape) and (K.shape == V.shape), f"Q, K, and V projection shapes must match, but got {Q.shape=}, {K.shape=}, {V.shape=}"
+		batch, nheads, N, d_k = Q.shape
+		d_model = nheads*d_k
+		softmax_scale = 1/((d_k**0.5)*2) # divide by 2 bc rbfs scale logits by two at most
+		assert d_model % 2 == 0, f"d_model must be divisible by 2, not {d_model=}"
+		assert coords.dim() == 3 and coords.size(2) == 3, f"coordinates must be of shape (batch, N, 3), not {coords.shape}" 
+		assert spreads.size(0) == nheads, f"number of spreads per batch must be equal to nheads, not {spreads.size(0)=} and {nheads=}"
+		assert torch.all(spreads > 0), f"spreads must be a tensor of positive, non-zero floats, not {spreads}"
 
-		# convert dtypes and make contiguous. everything in fp32
-		coords = coords.transpose(1, 2).to(torch.float32).contiguous() # transpose to make memory access more efficient in the kernel
+		# matmults done in fp16
+		Q = Q.to(torch.float16).contiguous()
+		K = K.to(torch.float16).contiguous()
+		V = V.to(torch.float16).contiguous()
+
+		# rbfs in fp32 and make sure everything is contiguous
+		coords = torch.where(mask.unsqueeze(2), 12345, coords) # bake mask into coords
+		coords = coords.transpose(1,2).to(torch.float32).contiguous()
+		spreads = spreads.to(torch.float32).contiguous() # this is now Z x H, need to update everything (forward and back)
+
+		# initialize mask, output, and logsumexp tensors
+		out = torch.zeros(batch, nheads, N, d_k, dtype=torch.float32, device=Q.device).contiguous() # batch x N x d_model
+		L = torch.zeros(batch, nheads, N, dtype=torch.float32, device=Q.device).contiguous() # batch x nheads x N
 		
-		# deal w/ wavenumbers
-		wavenumbers = wavenumbers.to(torch.float32).contiguous()
+		# generate a rng seed for each batch and head
+		rng_seed = torch.randint(0, 2**16-1, (batch,nheads), device=Q.device)
 
-		# get tensor sizes
-		batch, space, N = coords.shape
-		d_model = 2 * wavenumbers.shape[0]
+		attn_fwd_kernel(
+			Q, K, V,
+			coords, spreads,
+			L, out,
+			rng_seed, 
+			softmax_scale,
+			dropout,
+			batch, N, nheads, d_k
+		)
 
-		# instantiate the output tensor
-		out = torch.zeros(batch, N, d_model, dtype=coords.dtype, device=coords.device).contiguous()
-
-		# for bwd pass
-		cos_sums = torch.zeros(batch, N, d_model//2, dtype=coords.dtype, device=coords.device).contiguous()
-		sin_sums = torch.zeros_like(cos_sums).contiguous()
-
-
-		# call the kernel
-		wf_embedding_kernel.forward(    coords, wavenumbers, 
-										out,
-										cos_sums, sin_sums
-								)
-		
-
-		# save for the backward
-		ctx.save_for_backward(cos_sums, sin_sums)
+		# for backwards pass
+		ctx.save_for_backward(Q, K, V, out, L, coords, spreads, rng_seed)
+		ctx.softmax_scale = softmax_scale
+		ctx.dropout = dropout
 
 		return out
 
-	@staticmethod
-	def backward(ctx, dO):
+	# @staticmethod
+	# def backward(ctx, dO):
 
-		# note, masks already applied to O and cos and sin sums, masked vals are zero, 
-		# so multiplication ensures non valid positions dont contribute to the gradients
-		# i.e. don't need to save mask for bwd
+	# 	# load saved tensors (should all be float32, expect masks). also should all be contiguous from fwd
+	# 	Q, K, V, O, L, coords, spreads, mask, rng_seed = ctx.saved_tensors
 
-		# load saved tensors from bwd
-		cos_sums, sin_sums = ctx.saved_tensors
+	# 	# compute D for dSR calculation
+	# 	D = torch.sum(O*dO, dim=3).to(torch.float16) # Z x H x N x D -> Z x H x N
 
-		# seperate dO into real and imag parts (interleaved, real is first)
-		# from Z x N x d_model --> Z x N x d_model//2 
-		real_dO = dO[:, :, 0::2]
-		imag_dO = dO[:, :, 1::2]
+	# 	# cast to float16 for matmults
+	# 	dO = dO.to(torch.float16).contiguous()
 
-		# compute grad wrt wavenumbers
-		# dO_2i=l+1 * sum_j(cos(K|ri-rj|)) - dO_2l * sum(sin(K|ri-rj|))
-		# sum the Z dim and N dim, to accumulate gradients, as wavenumbers is a tensor of shape d_model//2
-		dk = ((imag_dO*cos_sums) - (real_dO*sin_sums)).sum(dim=(0,1)) # d_model//2
+	# 	# checks
+	# 	assert Q.stride() == K.stride() == V.stride() == O.stride()
+	# 	batch, nheads, N, d_k = Q.shape 
 
-		return None, dk, None 
+	# 	# initialize dQ, dK, and dV, all fp32
+	# 	dQ = torch.zeros_like(Q).to(torch.float32).contiguous()
+	# 	dK = torch.zeros_like(K).to(torch.float32).contiguous()
+	# 	dV = torch.zeros_like(V).to(torch.float32).contiguous()
+	# 	d_spreads = torch.zeros_like(spreads).to(torch.float32).contiguous()
+		
+	# 	# define the grid
+	# 	grid = lambda args: (
+	# 		triton.cdiv(args["tot_N"], args["BLOCK_J"]), # parralel along J for bwd
+	# 		args["tot_Z"]*args["nheads"],
+	# 		1
+	# 	)
+
+	# 	# kernel run
+
+	# 	dQ = dQ
+	# 	dK = dK
+	# 	dV = dV
+	# 	d_spreads = d_spreads
+		
+	# 	# return the gradients
+	# 	return dQ, dK, dV, None, d_spreads, None, None

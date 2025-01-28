@@ -5,8 +5,9 @@
 #BSUB -R "rusage[mem=128GB]"
 #BSUB -q gpu
 
-#BSUB -R "select[l40]"
-##BSUB -R "select[a100]"
+##BSUB -R "select[h100]"
+##BSUB -R "select[l40]"
+#BSUB -R "select[a100]"
 ##BSUB -R "select[l40 || a100]"
 ##BSUB -R "select[a10 || a30]"
 
