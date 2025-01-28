@@ -27,9 +27,9 @@ import os
 
 # define configurations for autotuning
 configs = [	triton.Config({"BLOCK_I": i, "BLOCK_J": j}, num_warps=w)
-			for i in [1, 16, 32, 64, 128, 256]
-			for j in [16, 32, 64, 128, 256]
-			for w in [2, 4, 8]
+			for i in [16, 32, 64, 128]
+			for j in [16, 32, 64, 128]
+			for w in [2, 4]
 		]
 
 # filter out configs that are too big
@@ -49,7 +49,7 @@ def keep_bwd(conf):
 	if autotune == "1":
 		return (BLOCK_I * BLOCK_J) <= 2048
 	else:
-		return ((BLOCK_I == 32) and (BLOCK_J == 32) and (conf.num_warps==8))
+		return ((BLOCK_I == 32) and (BLOCK_J == 16) and (conf.num_warps==8))
 
 
 # @triton.heuristics(values={
