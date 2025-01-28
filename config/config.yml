@@ -67,13 +67,15 @@ MASK_injection_cycle_length: 20  # input MASK token injection cycle length
 
 # Output
 out_path: "/share/wangyy/hjc2538/proteusAI/models/test"  # path to store output, such as plots and weights file
+# out_path: "/scratch/wangyy_lab/hjc2538/proteusAI/models/test"  # path to store output, such as plots and weights file
 loss_plot: "loss_vs_epoch.png"  # path to save plot of loss vs epochs after training
 seq_plot: "seq_sim_vs_epoch.png"  # path to save plot of sequence similarity vs epochs after training
 weights_path: "model_parameters.pth"  # path to save weights after training
 write_dot: True  # whether to save the dot file of the computational graph
 
 # Input
-data_path: "/share/wangyy/hjc2538/proteusAI/pdb_2021aug02_filtered"  # path to data
+data_path: "/share/wangyy/hjc2538/proteusAI/pdb_2021aug02_filtered"  # path to data for ncs hpc
+# data_path: "/scratch/wangyy_lab/hjc2538/proteusAI/pdb_2021aug02_filtered"  # path to data for uncw hpc
 # use_model: 
 # early_stopping: 
 # model_checkpoints:
