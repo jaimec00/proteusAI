@@ -14,7 +14,7 @@ def main():
 	torch.manual_seed(0)
 
 	# prepare inputs
-	batch, N, d_model = 1, 16384, 512
+	batch, N, d_model = 1, 2048, 512
 	min_wl, max_wl, base = 3.7, 20, 20
 	coords = max_wl * torch.randn((batch, N, 3), dtype=torch.float32, device=device)
 	mask = (torch.rand((batch, N), device=device) > 1)
@@ -35,7 +35,7 @@ def main():
 	# mem_size = 4*(batch * N * N * d_model/2) / (1024**3)
 	# if mem_size > 16: # GB
 	# 	print("intermediate tensor size is too big for pytorch comparison, running kernel twice...\n")
-	wf_embedding_torch = wf_embedding
+	# wf_embedding_torch = wf_embedding
 	# else:
 	# wf_embedding_torch = wf_embedding_torch
 
@@ -90,7 +90,7 @@ def main():
 
 	# optional debugging prints
 	# print(torch_out)
-	# print(cuda_out)
+	print(cuda_out)
 	# print(torch_out/cuda_out)
 	# print(mask)
 	# print(wavenumbers)

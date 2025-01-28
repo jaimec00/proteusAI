@@ -41,6 +41,7 @@ class _wf_embedding(torch.autograd.Function):
 		cos_sums = torch.zeros(batch, N, d_model//2, dtype=coords.dtype, device=coords.device).contiguous()
 		sin_sums = torch.zeros_like(cos_sums).contiguous()
 
+
 		# call the kernel
 		wf_embedding_kernel.forward(    coords, wavenumbers, 
 										out,
