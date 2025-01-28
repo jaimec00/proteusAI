@@ -8,9 +8,9 @@ from torch.utils.cpp_extension import load
 import os
 base_dir = os.path.dirname(os.path.abspath(__file__))
 # dynamically compile and load the extension
-wf_embedding_kernel = load(
+attn_fwd_kernel = load(
 	name="attn_fwd_kernel",
-	sources=[os.path.join(base_dir, "attn_fwd_if.cpp"), os.path.join(base_dir, "attn_fwd_kernel.cu")],
+	sources=[os.path.join(base_dir, "attn_fwd/attn_fwd_if.cpp"), os.path.join(base_dir, "attn_fwd/attn_fwd_kernel.cu")],
 	verbose=True  # Verbose output for debugging
 )
 
@@ -40,23 +40,22 @@ class _geometric_attn(torch.autograd.Function):
 		# rbfs in fp32 and make sure everything is contiguous
 		coords = torch.where(mask.unsqueeze(2), 12345, coords) # bake mask into coords
 		coords = coords.transpose(1,2).to(torch.float32).contiguous()
-		spreads = spreads.to(torch.float32).contiguous() # this is now Z x H, need to update everything (forward and back)
+		spreads = spreads.to(torch.float32).contiguous() 
 
 		# initialize mask, output, and logsumexp tensors
 		out = torch.zeros(batch, nheads, N, d_k, dtype=torch.float32, device=Q.device).contiguous() # batch x N x d_model
 		L = torch.zeros(batch, nheads, N, dtype=torch.float32, device=Q.device).contiguous() # batch x nheads x N
 		
 		# generate a rng seed for each batch and head
-		rng_seed = torch.randint(0, 2**16-1, (batch,nheads), device=Q.device)
+		rng_seed = torch.randint(0, 2**16-1, (batch,nheads), device=Q.device, dtype=torch.int32).contiguous
 
-		attn_fwd_kernel(
+		attn_fwd_kernel.fwd(
 			Q, K, V,
 			coords, spreads,
 			L, out,
 			rng_seed, 
 			softmax_scale,
 			dropout,
-			batch, N, nheads, d_k
 		)
 
 		# for backwards pass
