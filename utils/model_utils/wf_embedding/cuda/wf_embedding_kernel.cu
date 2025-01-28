@@ -13,7 +13,7 @@ descripiton:    cuda kernel to embed 3d coordinates to target feature space usin
 // define function to sum the values of threads within a warp
 // this is used to superpose the wavefunctions computed by individual threads in a warp
 // scales O(log_2(32)) = O(5), very fast
-__device__ float warp_reduce_sum(float value) {
+__device__ float warp_sum(float value) {
 	unsigned mask = 0xFFFFFFFF; // mask for active threads in the warp (32 1's)
 
 	for (int offset = 16; offset > 0; offset /= 2) {
@@ -35,9 +35,8 @@ __global__ void wf_embedding_kernel(
 	int tot_Z, int tot_N, int d_model
 ) {
 	
-	// compute global thread index. only computes the starting offset of the block, as i will partition NI, NJ loads to 
-	// specific warps to read from global memory before making use of threadIdxs
-	int offs_NI = blockIdx.x * blockDim.x + threadIdx.x;  // NI index, 4 unique thread ids (not used yet)
+	// compute global thread index
+	int offs_NI = blockIdx.x * blockDim.x + threadIdx.x;  // NI index, 1 thread id
 	int offs_Z = blockIdx.z * blockDim.z + threadIdx.z;  // batch index, 1 thread id
 
 	// calculate the unique local id for each thread (will evaluate to theadIdx.y)
@@ -55,10 +54,15 @@ __global__ void wf_embedding_kernel(
 	// has residual values in it, so explicitly set all values to zero before any computations
 	int shared_mem_elements = d_model + d_model/2 + d_model/2 + d_model/2 + 3;
 	int shared_mem_iters = (shared_mem_elements + num_threads - 1) / num_threads;
+	#pragma unroll 1 // disable loop unrolling so that threads reuse registers, implemented in every loop
 	for (int mem_idx = 0; mem_idx < shared_mem_iters; ++mem_idx){
 		int thread_mem_idx = mem_idx*num_threads + thread_id;
 		bool mem_idx_valid = thread_mem_idx < shared_mem_elements;
-		shared_mem[mem_idx_valid*(mem_idx*num_threads + thread_id)] = 0.0f;
+		if (mem_idx_valid){ // better to have invalid threads wait than do redundant global mem reads
+							// minimal thread divergence, as invalid threads do not take a different branch,
+							// they just wait for the valid threads to finish
+			shared_mem[thread_mem_idx] = 0.0f;
+		}
 	}
 
 	// sync threads when done initializing shared memory
@@ -88,14 +92,16 @@ __global__ void wf_embedding_kernel(
 	int num_wn = d_model/2;
 
 	// number of iterations needed
-	int k_iters = (num_wn + num_threads - 1) / num_threads; // cdiv
+	int k_iters = (num_wn + num_threads - 1) / num_threads;
 
 	// loop through wavenumbers to load to SRAM, stays there throughout
-	#pragma unroll 1 // disable loop unrolling so that threads reuse registers, implemented in every loop
+	#pragma unroll 1
 	for (int k = 0; k < k_iters; ++k){
 		int wavenumber_idx = k*num_threads + thread_id;
 		bool wavenumber_mask = wavenumber_idx < num_wn;
-		wavenumbers[wavenumber_idx*wavenumber_mask] = wavenumbers_ptr[wavenumber_idx*wavenumber_mask]; // threads over num wn read the first wavenumber and overwrite first element
+		if (wavenumber_mask){
+			wavenumbers[wavenumber_idx] = wavenumbers_ptr[wavenumber_idx];
+		}
 	}
 
 	// now load the first NJ block, which includes the NI for this block
@@ -104,7 +110,7 @@ __global__ void wf_embedding_kernel(
 
 	// loop through blocks of NJ
 	int NJ_iters = (tot_N + blockDim.y - 1) / blockDim.y;
-	bool block_mask = (offs_Z < tot_Z) && (offs_NI < tot_N);
+	bool block_mask = (offs_Z < tot_Z) && (offs_NI < tot_N); // since each block gets one token, this will always be true, but just for clarity
 	#pragma unroll 1
 	for (int j = 0; j < NJ_iters; ++j){
 
@@ -116,9 +122,13 @@ __global__ void wf_embedding_kernel(
 
 		// each thread has a single NJ value in its register
 		// coords was transposed by pytorch to get 3xN tensor, so all x values are contiguous, same w/ y and z 
-		float coords_NJ_x = coords_base_ptr[0*stride_coords_S + offs_NJ*thread_mask];
-		float coords_NJ_y = coords_base_ptr[1*stride_coords_S + offs_NJ*thread_mask];
-		float coords_NJ_z = coords_base_ptr[2*stride_coords_S + offs_NJ*thread_mask];
+		// invalid threads still read from global mem, as this is still one memory transaction per warp since the reads are 
+		// coalesced and we are guranteed to be in bounds since we cycle to the beginning (w/ mod tot_N)
+		// possible that one iteration will have some threads in a warp at the end of the sequence and the others at beginning,
+		// leading to uncoalesced mem access, but guranteed to happen <= 1 time per block, so no noticeable performance loss
+		float coords_NJ_x = coords_base_ptr[0*stride_coords_S + offs_NJ]; 
+		float coords_NJ_y = coords_base_ptr[1*stride_coords_S + offs_NJ];
+		float coords_NJ_z = coords_base_ptr[2*stride_coords_S + offs_NJ];
 		bool mask_NJ = thread_mask && (coords_NJ_x!=12345); // baked the mask into coords w/ this val, arbitrary, but inf makes it harder to avoid NaNs
 
 		if (j==0) { // in the first iteration, thread0 loaded the NI token, so now distribute that information to the other threads
@@ -153,7 +163,8 @@ __global__ void wf_embedding_kernel(
 		// compute the distance and the masks
 		float dists_raw = dist_x*dist_x + dist_y*dist_y + dist_z*dist_z;
 		bool mask_IJ = mask_NI && mask_NJ && (dists_raw!=0); // prevent div by 0
-		float dists = mask_IJ * dists_raw * rsqrtf(dists_raw + (1-mask_IJ)); // fast approximation of sqrt (1-mask avoids div by 0)
+		float dists = mask_IJ * dists_raw * rsqrtf(dists_raw + (!mask_IJ)); // fast approximation of sqrt ( + !mask avoids div by 0, 
+																			// mult by mask ensures invalid dists are 0 for consistent masking)
 
 		// loop over wavenumbers in shared memory
 		#pragma unroll 1
@@ -171,21 +182,20 @@ __global__ void wf_embedding_kernel(
 			// compute real and imaginary parts
 			// divide by one for invalid to avoid nans
 			// note that cos and sin are 0 for invalid threads already
-			float real = cosine / (dists + (1-mask_IJ));
-			float imag = sine / (dists + (1-mask_IJ));
+			float real = cosine / (dists + (!mask_IJ));
+			float imag = sine / (dists + (!mask_IJ));
 
 			// have each warp sum the contributions of its threads
-			float real_superposition = warp_reduce_sum(real);
-			float imag_superposition = warp_reduce_sum(imag);
-			float cos_sum = warp_reduce_sum(cosine);
-			float sin_sum = warp_reduce_sum(sine);
+			float real_superposition = warp_sum(real);
+			float imag_superposition = warp_sum(imag);
+			float cos_sum = warp_sum(cosine);
+			float sin_sum = warp_sum(sine);
 
 			if (lane_id==0){ // first thread in the warp writes to mem
 
 				// save the intermediate output in shared mem
 				// no bank conflicts, a single thread per warp writes these
 				// minimal contention, as only two threads overall are performing atomic adds
-
 				atomicAdd(&out[2*k], real_superposition);
 				atomicAdd(&out[2*k + 1], imag_superposition);
 
@@ -206,7 +216,6 @@ __global__ void wf_embedding_kernel(
 	__syncthreads();
 
 	// have threads write back to HBM in parallel and coalesced manner
-	// no masking necessary, since if NI is invalid the program would have terminated in the first iteration
 	#pragma unroll 1
 	for (int k = 0; k < k_iters; ++k){
 		// write to output. do two iters of out so it fits in the same loop as the trig sums. 
@@ -218,15 +227,21 @@ __global__ void wf_embedding_kernel(
 		bool out1_mask = out1_idx < (d_model);
 		bool out2_mask = out2_idx < (d_model);
 
-		block_out_ptr[out1_idx*out1_mask] = out[out1_idx*out1_mask];
-		block_out_ptr[out2_idx*out2_mask] = out[out2_idx*out2_mask];
+		if (out1_mask){
+			block_out_ptr[out1_idx] = out[out1_idx];
+		}
+		if (out2_mask){
+			block_out_ptr[out2_idx] = out[out2_idx];
+		}
 
 		// store for bwd
 		int trig_idx = num_threads*k + thread_id;
 		bool trig_mask = trig_idx < num_wn;
 
-		block_cos_sums_ptr[trig_idx*trig_mask] = cos_sums[trig_idx*trig_mask];
-		block_sin_sums_ptr[trig_idx*trig_mask] = sin_sums[trig_idx*trig_mask];	
+		if (trig_mask){
+			block_cos_sums_ptr[trig_idx] = cos_sums[trig_idx];
+			block_sin_sums_ptr[trig_idx] = sin_sums[trig_idx];	
+		}
 	}
 }
 
@@ -264,7 +279,7 @@ void wf_embedding_kernel_forward(
 	cudaFuncSetAttribute(wf_embedding_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, maxSharedMemPerBlockOptin);
 
 	// define shared memory per block 
-	int shared_mem = 4*(block_size.x*(3 + 2*d_model/2 + d_model) + d_model/2);   // NI (x dim) stores NIxd_model output, 
+	int shared_mem = sizeof(float)*(block_size.x*(3 + d_model/2 + d_model/2 + d_model) + d_model/2);   // NI (x dim) stores NIxd_model output, 
 																				// and two NIxd_model/2 (one for cos sums and another for sin) 
 																				// and requires 3 floating point numbers per NI (x,y,z). 
 																				// NJ is free, as everything is in registers 

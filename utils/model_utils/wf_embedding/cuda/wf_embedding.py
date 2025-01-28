@@ -71,6 +71,6 @@ class _wf_embedding(torch.autograd.Function):
 		# compute grad wrt wavenumbers
 		# dO_2i=l+1 * sum_j(cos(K|ri-rj|)) - dO_2l * sum(sin(K|ri-rj|))
 		# sum the Z dim and N dim, to accumulate gradients, as wavenumbers is a tensor of shape d_model//2
-		dk = ((imag_dO*cos_sums) - (real_dO*sin_sums)).sum(dim=1).sum(dim=0) # d_model//2
+		dk = ((imag_dO*cos_sums) - (real_dO*sin_sums)).sum(dim=(0,1)) # d_model//2
 
 		return None, dk, None 

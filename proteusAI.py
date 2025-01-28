@@ -10,8 +10,7 @@ description:	predicts the amino acid sequence of a protein, based on
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import math
-from utils.model_utils.wf_embedding.cuda import wf_embedding
+from utils.model_utils.wf_embedding.cuda.wf_embedding import wf_embedding
 
 # for testing different attention methods, specifically how RBFs interact w/ attn logits (multiplicative, additive, no spatial info)
 from utils.model_utils.geometric_attn.geometric_attn import geometric_attn
@@ -72,6 +71,7 @@ class WavefunctionEmbedding(nn.Module):
 	d_model features for each Ca 
 	serve as a generalization of positional encoding for irregularly spaced tokens in arbitrary dimensions. 
 	also includes mlp after the embedding layer
+	implemented in cuda, optimized for h100
 	'''
 	def __init__(self, d_model=512, min_wl=3.7, max_wl=20, base=20, d_hidden=1024, hidden_layers=0, dropout=0.1):
 		super(WavefunctionEmbedding, self).__init__()
@@ -149,7 +149,7 @@ class GeoAttention(nn.Module):
 		# QKV weight and bias matrices
 
 		# init xavier distribution
-		xavier_scale = math.sqrt(6/(self.d_k + d_model))
+		xavier_scale = (6/(self.d_k + d_model))**0.5
 
 		self.q_proj = nn.Parameter(-xavier_scale + torch.rand(self.nhead, self.d_model, self.d_k) * (2*xavier_scale)) # nhead x d_model x d_k
 		self.k_proj = nn.Parameter(-xavier_scale + torch.rand(self.nhead, self.d_model, self.d_k) * (2*xavier_scale)) # nhead x d_model x d_k
@@ -273,8 +273,8 @@ class proteusAI(nn.Module):
 		"""
 		Forward pass of the model with optional auto-regressive inference
 		"""
-		# coords: batch x N x 3 (or batch x N x d_model if self.as_coords is False)
-		# aa_onehot: batch x N x 20
+		# coords: batch x N x 3
+		# aas: batch x N x 21
 
 		# wave function embedding (replaces positional encoding)
 		wf = self.wf_embedding(coords, key_padding_mask) # batch x N x 3 --> batch x N x d_model
