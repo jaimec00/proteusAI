@@ -12,8 +12,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 from utils.model_utils.wf_embedding.cuda.wf_embedding import wf_embedding
 
+
+# working on geometric attention cuda kernel, but use triton kernel for now
 # for testing different attention methods, specifically how RBFs interact w/ attn logits (multiplicative, additive, no spatial info)
-from utils.model_utils.geometric_attn.geometric_attn import geometric_attn
+from utils.model_utils.geometric_attn.triton.geometric_attn import geometric_attn
 # from utils.model_utils.geometric_attn.geometric_attn_bias import geometric_attn
 # from utils.model_utils.geometric_attn.flash_attn import geometric_attn
 

@@ -66,8 +66,8 @@ MASK_injection_cycle_length: 20  # input MASK token injection cycle length
 # ------------------------------------------------------------------------------
 
 # Output
-# out_path: "/share/wangyy/hjc2538/proteusAI/models/test"  # path to store output, such as plots and weights file
-out_path: "/scratch/hjc2538/projects/proteusAI/models/test"  # path to store output, such as plots and weights file
+# out_path: "/share/wangyy/hjc2538/proteusAI/models/test"  # path to store output, such as plots and weights file. for nc state hpc
+out_path: "/scratch/hjc2538/projects/proteusAI/models/test"  # path to store output, such as plots and weights file. for uncw hpc
 loss_plot: "loss_vs_epoch.png"  # path to save plot of loss vs epochs after training
 seq_plot: "seq_sim_vs_epoch.png"  # path to save plot of sequence similarity vs epochs after training
 weights_path: "model_parameters.pth"  # path to save weights after training

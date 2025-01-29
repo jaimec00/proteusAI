@@ -49,7 +49,7 @@ def keep_bwd(conf):
 	if autotune == "1":
 		return (BLOCK_I * BLOCK_J) <= 2048
 	else:
-		return ((BLOCK_I == 32) and (BLOCK_J == 16) and (conf.num_warps==8))
+		return ((BLOCK_I == 32) and (BLOCK_J == 16) and (conf.num_warps==4))
 
 
 # @triton.heuristics(values={
