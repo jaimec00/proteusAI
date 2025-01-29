@@ -4,24 +4,32 @@
 #SBATCH --ntasks=1
 #SBATCH --nodes=1-1
 #SBATCH --cpus-per-task=1
-#SBATCH --threads-per-core=8
 #SBATCH --gres=gpu:1
 #SBATCH --mem=32G
 #SBATCH --time=00:30:00
- #SBATCH --output=protAI_train.out
-#SBATCH --error=protAI_train.err
+#SBATCH --output=train.out
+#SBATCH --error=train.err
 
 
 export PYTHONPATH="/storage/cms/wangyy_lab/hjc2538/proteusAI"
 
-source ~/.bashrc
-# source /usr/share/Modules/init/bash
+# source ~/.bashrc
 module load cuda/12.5
-source "$PYTHONPATH/protAI_env"
+module load nvhpc-hpcx-cuda12/24.11
+conda init
+conda activate protAI_env
 nvidia-smi
 
 # define triton cache dir so dont run out of space in home
 export TRITON_HOME="/scratch/hjc2538/proteusAI"
 export TRITON_CACHE_DIR="/scratch/hjc2538/proteusAI/.triton/cache"
+
+# pytorch was built w/ g++, and triton dynamically compiles cuda kernels, so ensure it uses g++
+# but only for cpp files, set gcc for c files
+export CXX=$(which g++)
+export CC=$(which gcc)
+export NVCC_WRAPPER_DEFAULT_COMPILER=$(which g++)
+export CUDAHOSTCXX=$(which g++)
+
 
 python -u learn_seqs.py --config config/config.yml

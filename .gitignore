@@ -1,8 +1,12 @@
 out.*
 err.*
+*.out
+*.err
+*.stats
 wf_plots/
 __pycache__/
 .nfs*
 *.ncu-rep
 build/
 *.so
+*env

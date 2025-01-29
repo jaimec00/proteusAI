@@ -6,16 +6,19 @@ channels:
   - defaults
   - conda-forge
 dependencies:
-  - biopython=1.84
-  - matplotlib
+  - python>=3.9
+  - pytorch=2.5.1
+  - pytorch-cuda=12.4
+  - cudatoolkit=11.8.0
+  - cuda-runtime=12.4
   - numpy
-  - pip
-  - python=3.11
-  - pytorch=2.4.1
-  - scikit-learn
-  - scipy
+  - pandas
+  - pathlib
+  - biopython=1.84
   - tqdm
-  - pytorch-cuda=12.1
+  - matplotlib
+  - pip
   - pip:
       - torchviz
+      - triton
 prefix: /usr/local/usrapps/wangyy/hjc2538/conda/envs/protAI_env
