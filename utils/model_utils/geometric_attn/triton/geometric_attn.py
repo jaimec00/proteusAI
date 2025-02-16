@@ -27,9 +27,9 @@ import os
 
 # define configurations for autotuning
 configs = [	triton.Config({"BLOCK_I": i, "BLOCK_J": j}, num_warps=w)
-			for i in [16, 32, 64, 128]
-			for j in [16, 32, 64, 128]
-			for w in [2, 4]
+			for i in [16, 32, 64]
+			for j in [16, 32, 64]
+			for w in [1, 2, 4]
 		]
 
 # filter out configs that are too big
@@ -52,11 +52,6 @@ def keep_bwd(conf):
 		return ((BLOCK_I == 32) and (BLOCK_J == 16) and (conf.num_warps==4))
 
 
-# @triton.heuristics(values={
-# 	"BLOCK_I": lambda args: get_BLOCK_I(args["tot_Z"], args["nheads"], args["tot_N"], args["d_k"]),
-# 	"BLOCK_J": lambda args: get_BLOCK_J(args["tot_Z"], args["nheads"], args["tot_N"], args["d_k"]),
-# 	"num_warps": lambda args: get_num_warps(args["tot_Z"], args["nheads"], args["tot_N"], args["d_k"])
-# })
 @triton.autotune(list(filter(keep_fwd, configs)),
 				 key=['tot_N', 'tot_Z', 'nheads', 'min_d_k'], # triton will not rerun autotune if these inputs are the same (size of input tensor)
 				 restore_value=["O_ptr", "L_ptr"]) # make sure autotuning resets the outputs of this function for each configuration
@@ -75,6 +70,7 @@ def _attn_fwd(
 	tot_N: tl.constexpr, tot_Z: tl.constexpr, nheads: tl.constexpr,
 	d_k: tl.constexpr, min_d_k: tl.constexpr, # max(16, d_k) bc tl.dot requires dim>=16
 	softmax_scale: tl.constexpr, 
+	min_rbf: tl.constexpr, max_rbf: tl.constexpr,
 	dropout_p: tl.constexpr, 
 
 	BLOCK_I: tl.constexpr, # block sizes
@@ -195,13 +191,19 @@ def _attn_fwd(
 
 	# load spreads, min and max dist, and coords for rbf computation (fp32)
 	spread = tl.load(spread_ptr)
+
+	# instead of using actual distances, we clamp distances dynamically based on head's
+	# spread. this avoid exploding or vanishing gradients when dists << spreads or vice versa
+	min_dist = tl.sqrt(tl.log(1/max_rbf)*2*spread*spread)
+	max_dist = tl.sqrt(tl.log(1/min_rbf)*2*spread*spread)
+
 	coords_I = tl.load(coords_I_ptr, boundary_check=(0,1), padding_option="zero") # N x 4
 
 	# load mask for rows
 	mask_i = tl.load(mask_i_ptr, boundary_check=(0,), padding_option="zero").to(tl.int1) # N x d_k
 
 	# loop through columns of K and V
-	for j in tl.range(0, triton.cdiv(tot_N, BLOCK_J), 1):
+	for j in tl.range(0, triton.cdiv(tot_N, BLOCK_J), 1, loop_unroll_factor=1):
 
 		# compute attn: QK^T/sqrt(d_k). # both in fp16, dot outputs fp32
 		Sij = tl.dot(Qi, tl.load(KjT_block_ptr, boundary_check=(0,1), padding_option="zero")) * softmax_scale # N x N
@@ -209,10 +211,13 @@ def _attn_fwd(
 		# load coordinates and compute distances (fp32)
 		dists_raw = (coords_I[:, None, :] - tl.load(coords_J_ptr, boundary_check=(0,1), padding_option="zero")[None, :, :]) # N x N x 4
 		dists = tl.sqrt(tl.sum(dists_raw * dists_raw, axis=2)) # N x N
+
+		# clamp distances
+		dists = tl.where(dists<min_dist, min_dist, dists)
+		dists = tl.where(dists>max_dist, max_dist, dists)
 		
 		# compute the rbfs
 		Rij = tl.exp(-(dists*dists) / (2*spread*spread)) # N x N (fp32)
-		dist_mask = Rij > 0.01
 
 		# negative logits with close distances should be less negative
 		# eps = min_rbf, so maximum rbf (1) would result in logits of min_rbf
@@ -221,7 +226,7 @@ def _attn_fwd(
 		Rij = tl.where(Sij < 0, 2-Rij, Rij + 1) # N x N (fp32)
 
 		# set masked positions to -inf, include out of range dists in mask
-		attn_mask = (dist_mask) & (mask_i[:, None]) & (tl.load(mask_j_ptr, boundary_check=(0,), padding_option="zero").to(tl.int1)[None, :]) # N x N
+		attn_mask = (mask_i[:, None]) & (tl.load(mask_j_ptr, boundary_check=(0,), padding_option="zero").to(tl.int1)[None, :]) # N x N
 
 		# scale attention logits by Rij and mask invalid pairs
 		SRij = tl.where(attn_mask, Sij*Rij, -inf) # N x N (fp32)
@@ -315,6 +320,7 @@ def _attn_bwd(
 	
 	tot_Z: tl.constexpr, tot_N: tl.constexpr, nheads: tl.constexpr, 
 	d_k: tl.constexpr, min_d_k: tl.constexpr, softmax_scale: tl.constexpr,
+	min_rbf: tl.constexpr, max_rbf: tl.constexpr,
 	dropout_p: tl.constexpr, 
 
 	BLOCK_I: tl.constexpr, BLOCK_J: tl.constexpr
@@ -441,6 +447,8 @@ def _attn_bwd(
 
 	# load the spread and dists assigned to this block (based on the head it was assigned), and j coordinates
 	spread = tl.load(spread_ptr)
+	min_dist = tl.sqrt(tl.log(1/max_rbf)*2*spread*spread)
+	max_dist = tl.sqrt(tl.log(1/min_rbf)*2*spread*spread)
 	coords_j = tl.load(coords_j_ptr, boundary_check=(0,1), padding_option="zero")
 
 	# load mask
@@ -456,7 +464,7 @@ def _attn_bwd(
 	Vj = tl.load(Vj_ptr, boundary_check=(0, 1), padding_option="zero")
 
 	inf = float("inf") # convenience
-	for i in tl.range(0, triton.cdiv(tot_N, BLOCK_I), 1):
+	for i in tl.range(0, triton.cdiv(tot_N, BLOCK_I), 1, loop_unroll_factor=1): # no loop unrolling
 
 		# fp16, N x d_k
 		Qi = tl.load(Qi_block_ptr, boundary_check=(0, 1), padding_option="zero")
@@ -468,9 +476,12 @@ def _attn_bwd(
 		dists_raw = (tl.load(coords_i_ptr, boundary_check=(0,1), padding_option="zero"))[:, None, :] - coords_j[None, :, :] # N x N x 4 
 		dists = tl.sqrt(tl.sum(dists_raw * dists_raw, axis=2)) # N x N 
 
+		# clamp dists
+		dists = tl.where(dists<min_dist, min_dist, dists)
+		dists = tl.where(dists>max_dist, max_dist, dists)
+		
 		# compute rbfs (fp32)
 		Rij = tl.exp(-(dists*dists) / (2.0*spread*spread)) # N x N (fp32)
-		dist_mask = Rij > 0.01
 
 		# for positive logits, scale by 1 + rbf, so that SR = S + S*R. for smoother gradients
 		# for negative logits, small dists should be scaled to be less negative than for far distances, s.t. SR = 2S - S*R
@@ -480,7 +491,7 @@ def _attn_bwd(
 
 		# mask out attention that is not relevant to this head
 		mask_i = tl.load(mask_i_ptr, boundary_check=(0, ), padding_option="zero").to(tl.int1)
-		attn_mask = (dist_mask) & (mask_i[:, None]) & (mask_j[None, :])  # N x N
+		attn_mask = (mask_i[:, None]) & (mask_j[None, :])  # N x N
 
 		# scale attention logits by RBFs
 		SRij = tl.where(attn_mask, Sij*Rij, -inf) # N x N (fp32)
@@ -577,7 +588,7 @@ def _attn_bwd(
 	d_spread_ptr = d_spreads_ptr + (offs_H*stride_d_spreads_H)
 	tl.atomic_add(d_spread_ptr, d_spread)
 
-def geometric_attn(Q, K, V, coords, spreads, mask=None, dropout=0.0):
+def geometric_attn(Q, K, V, coords, spreads, min_rbf=0.01, max_rbf=0.99, mask=None, dropout=0.0):
 	'''wrapper for attn so can call it with kwargs'''
 
 	return _geometric_attn.apply(Q, K, V, coords, spreads, mask, dropout)
@@ -585,7 +596,7 @@ def geometric_attn(Q, K, V, coords, spreads, mask=None, dropout=0.0):
 class _geometric_attn(torch.autograd.Function):
 
 	@staticmethod
-	def forward(ctx, Q, K, V, coords, spreads, mask=None, dropout=0.0):
+	def forward(ctx, Q, K, V, coords, spreads, min_rbf=0.01, max_rbf=0.99, mask=None, dropout=0.0):
 		
 		# checks
 		assert (Q.shape == K.shape) and (K.shape == V.shape), f"Q, K, and V projection shapes must match, but got {Q.shape=}, {K.shape=}, {V.shape=}"
@@ -641,13 +652,15 @@ class _geometric_attn(torch.autograd.Function):
 							mask, mask.stride(0), mask.stride(1), # batch x N
 							rng_seed, rng_seed.stride(0), rng_seed.stride(1),
 							N, batch, nheads, d_k, max(d_k, 16), softmax_scale,
-							dropout
+							min_rbf, max_rbf, dropout
 						)
 
 		# for backwards pass
 		ctx.save_for_backward(Q, K, V, out, L, coords, spreads, mask, rng_seed)
 		ctx.softmax_scale = softmax_scale
 		ctx.dropout = dropout
+		ctx.min_rbf = min_rbf
+		ctx.max_rbf = max_rbf
 
 		return out#.to(ctx.Q_dtype)
 
@@ -696,13 +709,13 @@ class _geometric_attn(torch.autograd.Function):
 							mask, mask.stride(0), mask.stride(1),
 							rng_seed, rng_seed.stride(0), rng_seed.stride(1),
 							batch, N, nheads, d_k, max(d_k, 16), ctx.softmax_scale, 
-							ctx.dropout
+							ctx.min_rbf, ctx.max_rbf, ctx.dropout
 						 )
 
-		dQ = dQ#.to(ctx.Q_dtype)
-		dK = dK#.to(ctx.K_dtype)
-		dV = dV#.to(ctx.V_dtype)
-		d_spreads = d_spreads#.to(ctx.spreads_dtype)
+		dQ = dQ
+		dK = dK
+		dV = dV
+		d_spreads = d_spreads
 
 		# return the gradients
 		return dQ, dK, dV, None, d_spreads, None, None

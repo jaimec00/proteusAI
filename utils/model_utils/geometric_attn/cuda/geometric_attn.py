@@ -1,4 +1,5 @@
 import torch
+from random import randint
 # from utils.model_utils.geometric_attn.cuda.attn_fwd import attn_fwd_kernel
 # from utils.model_utils.geometric_attn.cuda.attn_bwd import attn_bwd_kernel
 
@@ -47,15 +48,15 @@ class _geometric_attn(torch.autograd.Function):
 		L = torch.zeros(batch, nheads, N, dtype=torch.float32, device=Q.device).contiguous() # batch x nheads x N
 		
 		# generate a rng seed for each batch and head
-		rng_seed = torch.randint(0, 2**16-1, (batch,nheads), device=Q.device, dtype=torch.int32).contiguous
+		rng_seed = np.random.randint(0, 0xFFFFFFFF, dtype=np.uint32)
 
 		attn_fwd_kernel.fwd(
 			Q, K, V,
 			coords, spreads,
 			L, out,
-			rng_seed, 
 			softmax_scale,
 			dropout,
+			rng_seed
 		)
 
 		# for backwards pass
