@@ -117,7 +117,7 @@ class GeoAttention(nn.Module):
 	see the imported function (supports fwd and bwd) triton implementation
 	'''
 
-	def __init__(self, d_model=512, nhead=8, min_spread=1, max_spread=6, base=20, dropout=0.1):
+	def __init__(self, d_model=512, nhead=8, min_spread=1, max_spread=6, base=20, num_spread=8, min_rbf=0.01, max_rbf=0.99, dropout=0.1):
 		super(GeoAttention, self).__init__()
 
 		self.nhead = nhead
@@ -129,8 +129,7 @@ class GeoAttention(nn.Module):
 		self.dropout = dropout
 
 		# define spreads and spread weights matrix so each head's spread is a weighted sum of the allowed spreads
-		num_spreads = nhead*4
-		self.register_buffer("spreads", min_spread + (max_spread - min_spread) * (torch.logspace(0,1,num_spreads, base) - 1) / (base - 1))
+		self.register_buffer("spreads", min_spread + (max_spread - min_spread) * (torch.logspace(0,1,num_spread, base) - 1) / (base - 1))
 
 		# compute the values to initialize the weights, so that post softmax, the diagonals have the most weight
 		# and the farther a column index is from the diagonal, the less weight it receives
@@ -186,7 +185,7 @@ class GeoAttention(nn.Module):
 		spreads = torch.matmul(spread_weights, self.spreads.unsqueeze(1)).squeeze(1) # nhead x nspread @ nspread x 1 -> nhead
 
 		# perform attention
-		out = geometric_attn(Q, K, V, coords, spreads, mask=key_padding_mask, dropout=dropout)  # batch x nhead x N x d_k
+		out = geometric_attn(Q, K, V, coords, spreads, mask=key_padding_mask, min_rbf=self.min_rbf, max_rbf=self.max_rbf, dropout=dropout)  # batch x nhead x N x d_k
 
 		out = out.permute(0,2,3,1) # batch x N x d_k x nhead
 		out = out.reshape(batch, N, self.d_model) # batch x N x d_k x nhead --> batch x N x d_model
@@ -202,11 +201,11 @@ class Encoder(nn.Module):
 	bidirectional encoder
 	'''
 
-	def __init__(self, d_model=512, d_hidden=1024, hidden_layers=0, nhead=8, min_spread=1, max_spread=6, base=20, dropout=0.0):
+	def __init__(self, d_model=512, d_hidden=1024, hidden_layers=0, nhead=8, min_spread=1, max_spread=6, base=20, num_spread=8, min_rbf=0.01, max_rbf=0.99, dropout=0.0):
 		super(Encoder, self).__init__()
 
 		# Self-attention layers
-		self.attn = GeoAttention(d_model, nhead, min_spread=min_spread, max_spread=max_spread, base=base, dropout=dropout)
+		self.attn = GeoAttention(d_model, nhead, min_spread=min_spread, max_spread=max_spread, base=base, num_spread=num_spread, min_rbf=min_rbf, max_rbf=max_rbf, dropout=dropout)
 		self.attn_norm = nn.LayerNorm(d_model)
 		self.attn_dropout = nn.Dropout(dropout)
 
@@ -250,7 +249,8 @@ class proteusAI(nn.Module):
 						# geometric attn + ffn
 						encoder_layers=4,
 						n_head=4,
-						min_spread=3.7, max_spread=7, base_spreads=20, 
+						min_spread=3.7, max_spread=7, base_spreads=20, num_spread=4,
+						min_rbf=0.01, max_rbf=0.99,
 						d_hidden_attn=1024, hidden_layers_attn=0,
 						
 						# dropout
@@ -266,7 +266,7 @@ class proteusAI(nn.Module):
 		self.aa_embedding = AminoAcidEmbedding(21, d_model, d_hidden_aa, hidden_layers_aa, dropout)
 
 		# encoders
-		self.encoders = nn.ModuleList([Encoder(d_model, d_hidden_attn, hidden_layers_attn, n_head, min_spread, max_spread, base_spreads, dropout) for _ in range(encoder_layers)])
+		self.encoders = nn.ModuleList([Encoder(d_model, d_hidden_attn, hidden_layers_attn, n_head, min_spread, max_spread, base_spreads, num_spread, min_rbf, max_rbf, dropout) for _ in range(encoder_layers)])
 
 		# map to aa probs
 		self.out_proj = nn.Linear(d_model, 20)

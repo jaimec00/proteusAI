@@ -65,13 +65,12 @@ def _attn_fwd(
 	spreads_ptr, stride_spreads_H,
 	L_ptr, stride_L_Z, stride_L_H, stride_L_N,
 	mask_ptr, stride_mask_Z, stride_mask_N,
-	rng_seed_ptr, stride_rng_seed_Z, stride_rng_seed_H,
 
 	tot_N: tl.constexpr, tot_Z: tl.constexpr, nheads: tl.constexpr,
 	d_k: tl.constexpr, min_d_k: tl.constexpr, # max(16, d_k) bc tl.dot requires dim>=16
 	softmax_scale: tl.constexpr, 
 	min_rbf: tl.constexpr, max_rbf: tl.constexpr,
-	dropout_p: tl.constexpr, 
+	dropout_p: tl.constexpr, rng_seed: tl.constexpr,
 
 	BLOCK_I: tl.constexpr, # block sizes
 	BLOCK_J: tl.constexpr,
@@ -158,22 +157,22 @@ def _attn_fwd(
 		order=(0, )
 	)
 
-	# create a dropout block for rand num generation. each Z, H combo has its own rng seed
-	# so need to compute random numbers for I, J indexes for the dropout mask to be reproducable in the bwd pass
-	# in the worst case (for my setup),  I,J = 10,000
-	# I and J each require 14 bits, meaning would need a minimum of 14 + 14 = 28 bits, 
-	# to represent all possible combinations uniquely, so 32 bit int is required for true uniqueness
-	# 16 LSB of i index is 16 MSB of the 32 bit int, 16 LSB of j index is 16 LSB of the 32 bit int
-	# can do a hash instead, but this is fine if the sequence is never past 2^16 tokens long
+	# create a dropout block for rand num generation. 
+	# takes 16 MSB of Z, H, I, and J idxs
+	# creates 2 32 bit ints and xors them, like, (I|Z) ^ (H|J), then does more
+	# bitwise ops to get better hash
+	# this decouples I and J bits (I on 16LSB of hash, J on 16MSB), avoiding symmetry issues, so that hash(Z,H,I,J)!=hash(Z,H,J,I)
 
-	# load rng seed for this batch head combo
-	rng_seed = tl.load(rng_seed_ptr + (offs_Z*stride_rng_seed_Z) + (offs_H*stride_rng_seed_H))
-
-	# compute the i indexes used in this tile and extract the 16 LSB
+	# compute ZI bytes for the hash
 	I_bytes = offs_I + tl.arange(0, BLOCK_I)[:, None]
 	I_bytes = (I_bytes & 0xFFFF).to(tl.uint32) << 16
+	Z_bytes = tl.full([BLOCK_I, 1], offs_Z, dtype=tl.uint32) & 0xFFFF
+	IZ_bytes = I_bytes | Z_bytes # first 16 are I, next 16 are Z
 
-	# init J_idxs, which will be incremented in the loop to compute the hashes for each i j pair
+	# prepare H bytes for the hash
+	H_bytes = (tl.full([1, BLOCK_J], offs_H, dtype=tl.uint32) & 0xFFFF) << 16
+
+	# init J_idxs, which will be incremented in the loop to compute the J bytes and used for hash
 	J_idxs = tl.arange(0, BLOCK_J)[None, :].to(tl.uint32)
 	J_inc = tl.full([1,BLOCK_J], BLOCK_J, dtype=tl.uint32)
 
@@ -203,7 +202,7 @@ def _attn_fwd(
 	mask_i = tl.load(mask_i_ptr, boundary_check=(0,), padding_option="zero").to(tl.int1) # N x d_k
 
 	# loop through columns of K and V
-	for j in tl.range(0, triton.cdiv(tot_N, BLOCK_J), 1, loop_unroll_factor=1):
+	for j in tl.range(0, triton.cdiv(tot_N, BLOCK_J), 1, loop_unroll_factor=1): # no loop unrolling
 
 		# compute attn: QK^T/sqrt(d_k). # both in fp16, dot outputs fp32
 		Sij = tl.dot(Qi, tl.load(KjT_block_ptr, boundary_check=(0,1), padding_option="zero")) * softmax_scale # N x N
@@ -244,8 +243,10 @@ def _attn_fwd(
 		li = alpha*li + tl.sum(Pij, axis=1) # N, (fp32)
 
 		# apply dropout mask
-		J_bytes = J_idxs & 0xFFFF
-		hash_vals = I_bytes | J_bytes # combine to get unique int
+		HJ_bytes = (J_idxs & 0xFFFF) | H_bytes 
+		hash_vals = IZ_bytes ^ HJ_bytes # combine to get unique int
+		hash_vals = hash_vals ^ (hash_vals << 4)
+		hash_vals = hash_vals ^ (hash_vals >> 4)
 		dropout_mask = (tl.rand(rng_seed, hash_vals) >= dropout_p).to(tl.int1) # N x N
 		
 		# apply dropout
@@ -316,12 +317,11 @@ def _attn_bwd(
 	spreads_ptr, stride_spreads_H,
 	d_spreads_ptr, stride_d_spreads_H,
 	mask_ptr, stride_mask_Z, stride_mask_N,
-	rng_seed_ptr, stride_rng_seed_Z, stride_rng_seed_H,
 	
 	tot_Z: tl.constexpr, tot_N: tl.constexpr, nheads: tl.constexpr, 
 	d_k: tl.constexpr, min_d_k: tl.constexpr, softmax_scale: tl.constexpr,
 	min_rbf: tl.constexpr, max_rbf: tl.constexpr,
-	dropout_p: tl.constexpr, 
+	dropout_p: tl.constexpr, rng_seed: tl.constexpr,
 
 	BLOCK_I: tl.constexpr, BLOCK_J: tl.constexpr
 ):
@@ -436,12 +436,12 @@ def _attn_bwd(
 		order=(0, )
 	)
 
-	# load rng seed for this batch head combo
-	rng_seed = tl.load(rng_seed_ptr + (offs_Z*stride_rng_seed_Z) + (offs_H*stride_rng_seed_H))
-
 	# prepare bytes for dropout
+	H_bytes = (tl.full([1, BLOCK_J], offs_H, dtype=tl.uint32) & 0xFFFF) << 16
 	J_bytes = offs_J + tl.arange(0, BLOCK_J)[None, :]
-	J_bytes = (J_bytes & 0xFFFF).to(tl.uint32) 
+	HJ_bytes = (J_bytes & 0xFFFF).to(tl.uint32) | H_bytes
+
+	Z_bytes = tl.full([BLOCK_I, 1], offs_Z, dtype=tl.uint32) & 0xFFFF
 	I_idxs = tl.arange(0, BLOCK_I)[:, None].to(tl.uint32)
 	I_inc = tl.full([BLOCK_I, 1], BLOCK_I, dtype=tl.uint32)
 
@@ -505,8 +505,10 @@ def _attn_bwd(
 		Pij = tl.exp(tl.where(attn_mask, SRij - Li[:, None], -inf)) # N x N (fp32)
 
 		# apply dropout mask
-		I_bytes = (I_idxs & 0xFFFF) << 16
-		hash_vals = I_bytes | J_bytes 
+		IZ_bytes = ((I_idxs & 0xFFFF) << 16) | Z_bytes 
+		hash_vals = IZ_bytes ^ HJ_bytes
+		hash_vals = hash_vals ^ (hash_vals << 4)
+		hash_vals = hash_vals ^ (hash_vals >> 4)
 		dropout_mask = tl.rand(rng_seed, hash_vals) >= dropout_p # N x N
 		Pij = tl.where(dropout_mask, Pij / (1-dropout_p), 0.0)
 
@@ -591,12 +593,12 @@ def _attn_bwd(
 def geometric_attn(Q, K, V, coords, spreads, min_rbf=0.01, max_rbf=0.99, mask=None, dropout=0.0):
 	'''wrapper for attn so can call it with kwargs'''
 
-	return _geometric_attn.apply(Q, K, V, coords, spreads, mask, dropout)
+	return _geometric_attn.apply(Q, K, V, coords, spreads, mask, min_rbf, max_rbf, dropout)
 
 class _geometric_attn(torch.autograd.Function):
 
 	@staticmethod
-	def forward(ctx, Q, K, V, coords, spreads, min_rbf=0.01, max_rbf=0.99, mask=None, dropout=0.0):
+	def forward(ctx, Q, K, V, coords, spreads, mask=None, min_rbf=0.01, max_rbf=0.99, dropout=0.0):
 		
 		# checks
 		assert (Q.shape == K.shape) and (K.shape == V.shape), f"Q, K, and V projection shapes must match, but got {Q.shape=}, {K.shape=}, {V.shape=}"
@@ -608,11 +610,6 @@ class _geometric_attn(torch.autograd.Function):
 
 		assert spreads.size(0) == nheads, f"number of spreads per batch must be equal to nheads, not {spreads.size(0)=} and {nheads=}"
 		assert torch.all(spreads > 0), f"spreads must be a tensor of positive, non-zero floats, not {spreads}"
-
-		# ctx.Q_dtype = Q.dtype
-		# ctx.K_dtype = K.dtype
-		# ctx.V_dtype = V.dtype
-		# ctx.spreads_dtype = spreads.dtype
 
 		# matmults done in fp16
 		Q = Q.to(torch.float16).contiguous()
@@ -637,9 +634,8 @@ class _geometric_attn(torch.autograd.Function):
 							)
 
 		# generate a rng seed for each batch and head
-		rng_seed = torch.randint(0, 2**16-1, (batch,nheads), device=Q.device)
-		# rng_seed = torch.ones(batch,nheads, device=Q.device) # hard code for debugging
-
+		rng_seed = random.randint(0, 2**16-1)
+		# rng_seed = 0 # hard code for debugging
 		
 		# run the kernel
 		_attn_fwd[grid](  	out, out.stride(0), out.stride(1), out.stride(2), out.stride(3), # batch x nheads x N x d_k
@@ -650,17 +646,17 @@ class _geometric_attn(torch.autograd.Function):
 							spreads, spreads.stride(0), # nhead, 
 							L, L.stride(0), L.stride(1), L.stride(2), # batch x nhead x N
 							mask, mask.stride(0), mask.stride(1), # batch x N
-							rng_seed, rng_seed.stride(0), rng_seed.stride(1),
 							N, batch, nheads, d_k, max(d_k, 16), softmax_scale,
-							min_rbf, max_rbf, dropout
+							min_rbf, max_rbf, dropout, rng_seed
 						)
 
 		# for backwards pass
-		ctx.save_for_backward(Q, K, V, out, L, coords, spreads, mask, rng_seed)
+		ctx.save_for_backward(Q, K, V, out, L, coords, spreads, mask)
 		ctx.softmax_scale = softmax_scale
 		ctx.dropout = dropout
 		ctx.min_rbf = min_rbf
 		ctx.max_rbf = max_rbf
+		ctx.rng_seed = rng_seed
 
 		return out#.to(ctx.Q_dtype)
 
@@ -707,9 +703,8 @@ class _geometric_attn(torch.autograd.Function):
 							spreads, spreads.stride(0), 
 							d_spreads, d_spreads.stride(0), 
 							mask, mask.stride(0), mask.stride(1),
-							rng_seed, rng_seed.stride(0), rng_seed.stride(1),
 							batch, N, nheads, d_k, max(d_k, 16), ctx.softmax_scale, 
-							ctx.min_rbf, ctx.max_rbf, ctx.dropout
+							ctx.min_rbf, ctx.max_rbf, ctx.dropout, ctx.rng_seed
 						 )
 
 		dQ = dQ

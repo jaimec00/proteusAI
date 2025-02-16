@@ -13,13 +13,13 @@ from utils.model_utils.wf_embedding.cuda import wf_embedding_kernel
 # 	verbose=True  # Verbose output for debugging
 # )
 
-def wf_embedding(coords, wavenumbers, mask=None):
-	return _wf_embedding.apply(coords, wavenumbers, mask)
+def wf_embedding(coords, wavenumbers, alpha=1.0, mask=None):
+	return _wf_embedding.apply(coords, wavenumbers, alpha, mask)
 
 class _wf_embedding(torch.autograd.Function):
 
 	@staticmethod
-	def forward(ctx, coords, wavenumbers, mask):
+	def forward(ctx, coords, wavenumbers, alpha, mask):
 		
 		# bake the mask into coords w/ arbitrary val. less likely to give NaNs than using inf
 		coords = torch.where(mask.unsqueeze(2), 12345, coords)
@@ -48,6 +48,10 @@ class _wf_embedding(torch.autograd.Function):
 										cos_sums, sin_sums
 								)
 		
+		# scaling factor (A in green's func)
+		out *= alpha
+		cos_sums *= alpha
+		sin_sums *= alpha
 
 		# save for the backward
 		ctx.save_for_backward(cos_sums, sin_sums)

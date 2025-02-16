@@ -14,13 +14,10 @@ from utils.train_utils import TrainingRun
 
 # ----------------------------------------------------------------------------------------------------------------------
 
-def main():
+def main(args):
 	'''
 	main script that instantiates TrainingRun object to train and test the model.
 	'''
-
-	# initialize CL args
-	args = init_args()
 
 	# initialize the training run
 	training_run = TrainingRun(args)
@@ -34,16 +31,9 @@ def main():
 	# test the model
 	training_run.test()
 
-def init_args():
-	'''
-	initializes the command-line arguments, with option to initialize from yaml file. 
+# ----------------------------------------------------------------------------------------------------------------------
 
-	Args:
-		None
-
-	Returns:
-		args (NameSpace): arguments parsed by argparse 
-	'''
+if __name__ == "__main__":
 
 	parser = argparse.ArgumentParser()
 
@@ -69,6 +59,9 @@ def init_args():
 	parser.add_argument("--min_spread", default=3.0, type=float, help="minimum spread to use for geometric attention")
 	parser.add_argument("--max_spread", default=8.0, type=float, help="maximum spread to use for geometric attention")
 	parser.add_argument("--base_spread", default=20.0, type=float, help="base to use for spread sampling in geometric attention")
+	parser.add_argument("--num_spread", default=32.0, type=float, help="number of spreads to use in geometric attention")
+	parser.add_argument("--min_rbf", default=0.01, type=float, help="minimum rbf value to use for geometric attention, distances are clamp to corresponding dist")
+	parser.add_argument("--max_rbf", default=0.99, type=float, help="maximum rbf value to use for geometric attention, distances are clamp to corresponding dist")
 	parser.add_argument("--d_hidden_attn", default=1024, type=int, help="hidden dimensions in geometric attention FFN")
 	parser.add_argument("--hidden_layers_attn", default=0, type=int, help="number of hidden layers in geometric attention FFN")
 
@@ -147,11 +140,6 @@ def init_args():
 
 	args = parser.parse_args()
 
-	return args
-
-# ----------------------------------------------------------------------------------------------------------------------
-
-if __name__ == "__main__":
-	main()
+	main(args)
 
 # ----------------------------------------------------------------------------------------------------------------------
