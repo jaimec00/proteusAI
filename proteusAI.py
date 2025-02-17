@@ -50,7 +50,7 @@ class AminoAcidEmbedding(nn.Module):
 	'''
 	simple mlp w/ layernorm
 	'''
-	def __init__(self, num_aas=21, d_model=512, esm2_weights_path="esm2_t12_35M_UR50D", d_hidden_aa=1024, hidden_layers_aa=0, dropout=0.0):
+	def __init__(self, num_aas=21, d_model=512, esm2_weights_path="utils/model_utils/esm2/esm2_t33_650M_UR50D.pt", d_hidden_aa=1024, hidden_layers_aa=0, dropout=0.0):
 		super(AminoAcidEmbedding, self).__init__()
 		
 		if not esm2_weights_path: # choose a esm2 model based on d_model and download
@@ -63,13 +63,16 @@ class AminoAcidEmbedding(nn.Module):
 			except FileNotFoundError as e:
 				raise e(f"could not find ESM2 weights at {esm2_weights_path}")
 
-		# initialize esm2 weights, make them learnable (might change this)
+		# initialize esm2 weights, disable autograd for these, only make the mapping learnable
 		self.esm2_linear_nobias = nn.Linear(in_features=num_aas, out_features=esm2_weights["esm2_linear_nobias.weight"].size(1), bias=False)
-		self.esm2_linear_nobias.weights.data = esm2_weights["esm2_linear_nobias.weight"]
+		self.esm2_linear_nobias.weight.data = esm2_weights["esm2_linear_nobias.weight"]
+		self.esm2_linear_nobias.weight.requires_grad = False
 
 		self.esm2_layernorm = nn.LayerNorm(normalized_shape=self.esm2_linear_nobias.size(1))
 		self.esm2_layernorm.weight.data = esm2_weights["esm2_layernorm.weight"]
 		self.esm2_layernorm.bias.data = esm2_weights["esm2_layernorm.bias"]
+		self.esm2_layernorm.weight.requires_grad = False
+		self.esm2_layernorm.bias.requires_grad = False
 
 		self.linear = nn.Linear(self.esm2_linear_nobias.size(1), d_model, bias=False)
 		self.ffn = MLP(d_model, d_model, d_hidden_aa, hidden_layers_aa, dropout)

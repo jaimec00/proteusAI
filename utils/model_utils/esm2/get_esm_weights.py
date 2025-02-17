@@ -141,7 +141,6 @@ def map_esm_to_protAI(state_dict):
 	new_linear_nobias = torch.zeros(len(protAI_toks), state_dict["esm2_linear_nobias.weight"].size(1))
 	for idx, aa in enumerate(protAI_toks):
 		new_linear_nobias[idx, :] = state_dict["esm2_linear_nobias.weight"][all_toks.index(aa), :]
-		print(aa, idx, all_toks.index(aa))
 
 	# modify the state dict with the update
 	state_dict["esm2_linear_nobias.weight"] = new_linear_nobias
@@ -155,7 +154,9 @@ def main(args):
 	
 	protAI_state_dict = map_esm_to_protAI(state_dict)
 
-	torch.save(protAI_state_dict, args.weights_path)
+	weights_path = Path(__file__).absolute().parent / Path(f"{args.model}.pt")
+
+	torch.save(protAI_state_dict, weights_path)
 
 if __name__ == "__main__":
 
@@ -165,7 +166,6 @@ if __name__ == "__main__":
 								"esm2_t33_650M_UR50D", "esm2_t30_150M_UR50D", 
 								"esm2_t12_35M_UR50D", "esm2_t6_8M_UR50D"]
 						)
-	parser.add_argument("--weights_path", type=Path, default="esm2_weights.pt")
 	args = parser.parse_args()
 
 	main(args)

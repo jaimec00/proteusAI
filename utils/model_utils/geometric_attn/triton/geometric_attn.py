@@ -625,8 +625,6 @@ class _geometric_attn(torch.autograd.Function):
 		out = torch.zeros(batch, nheads, N, d_k, dtype=torch.float32, device=Q.device).contiguous() # batch x N x d_model
 		L = torch.zeros(batch, nheads, N, dtype=torch.float32, device=Q.device).contiguous() # batch x nheads x N
 		
-		# define min dists (clamped to 0.0) and max dists (clamped to inf)
-
 		# define the grid
 		grid = lambda args: (   triton.cdiv(args["tot_N"], args["BLOCK_I"]), 
 								args["tot_Z"]*args["nheads"],	
