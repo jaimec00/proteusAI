@@ -326,7 +326,7 @@ def _attn_bwd(
 	tot_Z: tl.constexpr, tot_N: tl.constexpr, nheads: tl.constexpr, 
 	d_k: tl.constexpr, min_d_k: tl.constexpr, softmax_scale: tl.constexpr,
 	min_rbf: tl.constexpr, max_rbf: tl.constexpr,
-	dropout_p: tl.constexpr, rng_seed: tl.constexpr,
+	dropout_p: tl.constexpr, 
 
 	BLOCK_I: tl.constexpr, BLOCK_J: tl.constexpr
 ):
