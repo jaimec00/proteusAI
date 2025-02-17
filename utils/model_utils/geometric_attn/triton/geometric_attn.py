@@ -217,7 +217,7 @@ def _attn_fwd(
 
 		# clamp distances
 		dists = tl.where(dists<min_dist, min_dist, dists)
-		dists = tl.where(dists>max_dist, max_dist, dists)
+		# dists = tl.where(dists>max_dist, max_dist, dists)
 		
 		# compute the rbfs
 		Rij = tl.exp(-(dists*dists) / (2*spread*spread)) # N x N (fp32)
@@ -229,7 +229,7 @@ def _attn_fwd(
 		Rij = tl.where(Sij < 0, 2-Rij, Rij + 1) # N x N (fp32)
 
 		# set masked positions to -inf, include out of range dists in mask
-		attn_mask = (mask_i[:, None]) & (tl.load(mask_j_ptr, boundary_check=(0,), padding_option="zero").to(tl.int1)[None, :]) # N x N
+		attn_mask = (mask_i[:, None]) & (tl.load(mask_j_ptr, boundary_check=(0,), padding_option="zero").to(tl.int1)[None, :]) & (dists < max_dist) # N x N
 
 		# scale attention logits by Rij and mask invalid pairs
 		SRij = tl.where(attn_mask, Sij*Rij, -inf) # N x N (fp32)
@@ -485,7 +485,7 @@ def _attn_bwd(
 
 		# clamp dists
 		dists = tl.where(dists<min_dist, min_dist, dists)
-		dists = tl.where(dists>max_dist, max_dist, dists)
+		# dists = tl.where(dists>max_dist, max_dist, dists)
 		
 		# compute rbfs (fp32)
 		Rij = tl.exp(-(dists*dists) / (2.0*spread*spread)) # N x N (fp32)
@@ -498,7 +498,7 @@ def _attn_bwd(
 
 		# mask out attention that is not relevant to this head
 		mask_i = tl.load(mask_i_ptr, boundary_check=(0, ), padding_option="zero").to(tl.int1)
-		attn_mask = (mask_i[:, None]) & (mask_j[None, :])  # N x N
+		attn_mask = (mask_i[:, None]) & (mask_j[None, :]) & (dists < max_dist) # N x N
 
 		# scale attention logits by RBFs
 		SRij = tl.where(attn_mask, Sij*Rij, -inf) # N x N (fp32)
@@ -640,7 +640,7 @@ class _geometric_attn(torch.autograd.Function):
 
 		# generate a rng seed for each batch and head
 		rng_seed = torch.randint(0, 2**16-1, (1,), device=Q.device)
-		# rng_seed = 0 # hard code for debugging
+		# rng_seed = torch.tensor([0], device=Q.device) # hard code for debugging
 		
 		# run the kernel
 		_attn_fwd[grid](  	out, out.stride(0), out.stride(1), out.stride(2), out.stride(3), # batch x nheads x N x d_k

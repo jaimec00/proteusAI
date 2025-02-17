@@ -6,18 +6,16 @@
 #SBATCH --cpus-per-task=1
 #SBATCH --gres=gpu:1
 #SBATCH --mem=32G
-#SBATCH --time=00:30:00
+#SBATCH --time=01:30:00
 #SBATCH --output=train.out
 #SBATCH --error=train.err
 
 
 export PYTHONPATH="/storage/cms/wangyy_lab/hjc2538/proteusAI"
 
-# source ~/.bashrc
+source ~/.bashrc
 module load cuda/12.5
 module load nvhpc-hpcx-cuda12/24.11
-module load conda
-conda init
 conda activate protAI_env
 nvidia-smi
 

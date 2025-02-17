@@ -1,5 +1,5 @@
 # Configuration for training the model
-d_model: 512  # dimensionality of input embeddings
+d_model: 512 # dimensionality of input embeddings
 min_wl: 3.7  # minimum wl to use in wavelength sampling
 max_wl: 20.0  # maximum wl to use in wavelength sampling
 base_wl: 20.0  # minimum base to use in wavelength sampling
@@ -12,8 +12,8 @@ esm2_weights_path: "utils/model_utils/esm2/esm2_t33_650M_UR50D.pt"  # can be a p
                                                                     # if the latter, fetched from facebook website
                                                                     # if not provided, fetches the best match from facebook based on d_model
 
-encoder_layers: 8 # number of dualcoder layers
-num_heads: 16  # number of attention heads to perform the training with
+encoder_layers: 4 # number of dualcoder layers
+num_heads: 8  # number of attention heads to perform the training with
 min_spread: 3.0
 max_spread: 6.0
 base_spread: 10.0
@@ -26,28 +26,28 @@ hidden_layers_attn: 0
 temperature: 0.1  # temperature for autoregressive inference (for testing)
 
 # Training configuration
-num_train: 1024  # number of training samples to use; -1 means all available
-num_val: 128  # number of validation samples to use; -1 means all available
-num_test: 128  # number of test samples to use; -1 means all available
+num_train: -1  # number of training samples to use; -1 means all available
+num_val: -1  # number of validation samples to use; -1 means all available
+num_test: -1  # number of test samples to use; -1 means all available
 epochs: 100  # number of epochs
 
 # want as few combinations as possible to speed up triton autotuning
 max_batch_size: 256  # possible samples per batch
 min_seq_size: 64 # possible sequence lengths
-max_seq_size: 16384 # possible sequence lengths
-batch_tokens: 16384 # number of valid tokens per batch 
+max_seq_size: 8192 # possible sequence lengths
+batch_tokens: 8192 # number of valid tokens per batch 
 min_resolution: 3.5
 
 accumulation_steps: 1  # grad accumulation; how many batches to process before learning step
 beta1: 0.9  # learning rate
 beta2: 0.98  # learning rate
 epsilon: 10e-9  # learning rate
-dropout: 0.0  # percentage of dropout
-label_smoothing: 0.0  # percentage of label smoothing to use on the output labels for loss calculation
+dropout: 0.1  # percentage of dropout
+label_smoothing: 0.1  # percentage of label smoothing to use on the output labels for loss calculation
 loss_type: "mean"  # whether to use the 'sum' or the 'mean' for CEL
 loss_scale: 2000
 lr_type: plateau
-lr_step: 5e-5  # learning rate
+lr_step: 5e-6  # learning rate
 lr_initial_min: 5e-5
 lr_initial_max: 1e-4
 lr_final_min: 1e-5
