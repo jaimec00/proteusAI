@@ -41,15 +41,15 @@ def main():
 	print("autotuning:\n")
 
 	# log autotuning
-	# os.environ["TRITON_PRINT_AUTOTUNING"] = "1"
+	os.environ["TRITON_PRINT_AUTOTUNING"] = "1"
 
-	# autotune(geometric_attn, params)
+	autotune(geometric_attn, params)
 
-	# # zero grads
-	# Q.grad.zero_()
-	# K.grad.zero_()
-	# V.grad.zero_()
-	# spreads.grad.zero_()
+	# zero grads
+	Q.grad.zero_()
+	K.grad.zero_()
+	V.grad.zero_()
+	spreads.grad.zero_()
 
 	print("forward pass:\n")
 
@@ -99,8 +99,6 @@ def test_fwd(torch_attn, attn, params, start_event, end_event, atol, rtol):
 	triton_out, triton_time, triton_memory = profile_func(attn, params, start_event, end_event)
 	torch_out, torch_time, torch_memory = profile_func(torch_attn, params, start_event, end_event)
 	rel_error, abs_error = calculate_error(torch_out, triton_out)
-
-	# print(f"{torch_out}\n{triton_out}")
 
 	print(f"triton implementation is correct: {torch.allclose(triton_out, torch_out, atol=atol, rtol=rtol, equal_nan=False)}")
 	print(f"triton absolute error: {abs_error:.5f}")
@@ -204,7 +202,6 @@ def torch_attn(Q, K, V, coords, spreads, min_rbf=0.99, max_rbf=0.99, mask=None):
 	out = torch.matmul(P, V) # batch x nheads x N x d_k
 	
 	return out
-
 
 if __name__ == '__main__':
 	main()
