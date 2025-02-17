@@ -13,6 +13,7 @@ dependencies:
   - cuda-runtime=12.4
   - numpy
   - pandas
+  - requests
   - pathlib
   - biopython=1.84
   - tqdm

@@ -37,19 +37,19 @@ def main():
 	end_event = torch.cuda.Event(enable_timing=True)
 	atol, rtol = 1e-2, 0
 
-	# autotune triton configs before profiling, allows optimal configs and triton to use cache rather than recompiling
-	print("autotuning:\n")
+	# # autotune triton configs before profiling, allows optimal configs and triton to use cache rather than recompiling
+	# print("autotuning:\n")
 
-	# log autotuning
-	os.environ["TRITON_PRINT_AUTOTUNING"] = "1"
+	# # log autotuning
+	# os.environ["TRITON_PRINT_AUTOTUNING"] = "1"
 
-	autotune(geometric_attn, params)
+	# autotune(geometric_attn, params)
 
-	# zero grads
-	Q.grad.zero_()
-	K.grad.zero_()
-	V.grad.zero_()
-	spreads.grad.zero_()
+	# # zero grads
+	# Q.grad.zero_()
+	# K.grad.zero_()
+	# V.grad.zero_()
+	# spreads.grad.zero_()
 
 	print("forward pass:\n")
 
@@ -68,23 +68,23 @@ def main():
 
 	test_bwd(torch_out.sum(), triton_out.sum(), Q, K, V, spreads, start_event, end_event, atol, rtol)
 
-	# Q.grad.zero_()
-	# K.grad.zero_()
-	# V.grad.zero_()
-	# spreads.grad.zero_()
+	Q.grad.zero_()
+	K.grad.zero_()
+	V.grad.zero_()
+	spreads.grad.zero_()
 
-	# print("\ntesting with dropout: \n")
+	print("\ntesting with dropout: \n")
 
-	# # need seperate test for dropout, simply to ensure the mask is reproducible. not the best test but just run the kernel
-	# # twice and see if get the same results
-	# dropout = 0.1 # note that for practice rng seed is dynamically generated, make sure you hard code it in the fwd pass to test this
-	# dropout_params = params + [dropout]
+	# need seperate test for dropout, simply to ensure the mask is reproducible. not the best test but just run the kernel
+	# twice and see if get the same results
+	dropout = 0.1 # note that for practice rng seed is dynamically generated, make sure you hard code it in the fwd pass to test this
+	dropout_params = params + [dropout]
 	
-	# print("dropout forward: \n")
-	# run1_fwd, run2_fwd = test_fwd(geometric_attn, geometric_attn, dropout_params, start_event, end_event, atol, rtol)
-	# print("\ndropout bwd: \n")
+	print("dropout forward: \n")
+	run1_fwd, run2_fwd = test_fwd(geometric_attn, geometric_attn, dropout_params, start_event, end_event, atol, rtol)
+	print("\ndropout bwd: \n")
 
-	# test_bwd(run1_fwd.sum(), run2_fwd.sum(), Q, K, V, spreads, start_event, end_event, atol, rtol)
+	test_bwd(run1_fwd.sum(), run2_fwd.sum(), Q, K, V, spreads, start_event, end_event, atol, rtol)
 
 def autotune(func, params):
 

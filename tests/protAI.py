@@ -21,12 +21,14 @@ def main():
 						d_hidden_wl=1024, hidden_layers_wl=0, 
 
 						# aa mlp
-						d_hidden_aa=1024, hidden_layers_aa=0,
+						d_hidden_aa=1024, hidden_layers_aa=0, esm2_weights_path="utils/model_utils/esm2/esm2_t33_650M_UR50D.pt",
 
 						# geometric attn + ffn
 						encoder_layers=1,
 						n_head=16,
-						min_spread=3.7, max_spread=7, base_spreads=20, 
+						min_spread=3.7, max_spread=7, base_spreads=20, num_spread=64,
+						min_rbf=0.01, max_rbf=0.99,
+
 						d_hidden_attn=1024, hidden_layers_attn=0,
 						
 						# dropout

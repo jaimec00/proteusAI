@@ -30,7 +30,7 @@ import random
 configs = [	triton.Config({"BLOCK_I": i, "BLOCK_J": j}, num_warps=w)
 			for i in [16, 32, 64]
 			for j in [16, 32, 64]
-			for w in [1, 2, 4]
+			for w in [1, 2, 4, 8, 16]
 		]
 
 # filter out configs that are too big
@@ -50,7 +50,7 @@ def keep_bwd(conf):
 	if autotune == "1":
 		return (BLOCK_I * BLOCK_J) <= 2048
 	else:
-		return ((BLOCK_I == 16) and (BLOCK_J == 64) and (conf.num_warps==2))
+		return ((BLOCK_I == 16) and (BLOCK_J == 32) and (conf.num_warps==2))
 
 
 @triton.autotune(list(filter(keep_fwd, configs)),
