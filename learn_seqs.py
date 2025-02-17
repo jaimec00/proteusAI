@@ -52,6 +52,7 @@ if __name__ == "__main__":
 	# aa embedding (just an MLP)
 	parser.add_argument("--d_hidden_aa", default=1024, type=int, help="hidden dimensions in AA embedding MLP")
 	parser.add_argument("--hidden_layers_aa", default=0, type=int, help="number hidden layers in AA embedding MLP")
+	parser.add_argument("--esm2_weights_path", default="", type=str, help="path to pretrained esm2 weights. can also be just the name of the model to use. if nothing is provided, the weights corresponding best to d_model are downloaded from facebook website")
 	
 	# dualcoder
 	parser.add_argument("--encoder_layers", default=4, type=int, help="number of encoder layers")

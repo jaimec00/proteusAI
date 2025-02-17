@@ -8,6 +8,9 @@ hidden_layers_we: 0
 
 d_hidden_aa: 1024
 hidden_layers_aa: 0
+esm2_weights_path: "utils/model_utils/esm2/esm2_weights.pt" # can be a path or the name of the esm2 model.
+                                                            # if the latter, fetched from facebook website
+                                                            # if not provided, fetches the best match from facebook based on d_model
 
 encoder_layers: 8 # number of dualcoder layers
 num_heads: 16  # number of attention heads to perform the training with

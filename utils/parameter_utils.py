@@ -150,7 +150,7 @@ class HyperParameters():
 	def __init__(self, 	d_model,
 						min_wl, max_wl, base_wl, 
 						d_hidden_we, hidden_layers_we, 
-						d_hidden_aa, hidden_layers_aa,
+						d_hidden_aa, hidden_layers_aa, esm2_weights_path,
 						encoder_layers, num_heads,
 						min_spread, max_spread, base_spread, num_spread,
 						min_rbf, max_rbf,
@@ -164,6 +164,7 @@ class HyperParameters():
 		self.hidden_layers_we = hidden_layers_we 
 		self.d_hidden_aa = d_hidden_aa
 		self.hidden_layers_aa = hidden_layers_aa
+		self.esm2_weights_path = esm2_weights_path
 		self.encoder_layers = encoder_layers
 		self.num_heads = num_heads
 		self.min_spread = min_spread

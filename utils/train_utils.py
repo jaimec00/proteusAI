@@ -48,7 +48,7 @@ class TrainingRun():
 		self.hyper_parameters = HyperParameters(args.d_model,
 												args.min_wl, args.max_wl, args.base_wl, 
 												args.d_hidden_we, args.hidden_layers_we, 
-												args.d_hidden_aa, args.hidden_layers_aa,
+												args.d_hidden_aa, args.hidden_layers_aa, args.esm2_weights_path,
 												args.encoder_layers, args.num_heads,
 												args.min_spread, args.max_spread, args.base_spread, args.num_spread,
 												args.min_rbf, args.max_rbf,
@@ -132,6 +132,7 @@ class TrainingRun():
 
 								self.hyper_parameters.d_hidden_aa,
 								self.hyper_parameters.hidden_layers_aa,
+								self.hyper_parameters.esm2_weights_path,
 
 								self.hyper_parameters.encoder_layers,
 								self.hyper_parameters.num_heads, 

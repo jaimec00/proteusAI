@@ -3,13 +3,15 @@
 author: 		jaime cardenas
 title:  		proteusAI.py
 description:	predicts the amino acid sequence of a protein, based on 
-				alpha carbon coordinates. uses wave function embedding and geometric attention
+				alpha carbon coordinates. uses wave function embedding and geometric attention, 
+				and ESM2 pretrained weights for amino acid embedding
 '''
 # ----------------------------------------------------------------------------------------------------------------------
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from utils.model_utils.esm2.get_esm_weights import get_esm_weights
 from utils.model_utils.wf_embedding.cuda.wf_embedding import wf_embedding
 
 
@@ -48,18 +50,41 @@ class AminoAcidEmbedding(nn.Module):
 	'''
 	simple mlp w/ layernorm
 	'''
-	def __init__(self, num_aas=21, d_model=512, d_hidden_aa=1024, hidden_layers_aa=0, dropout=0.0):
+	def __init__(self, num_aas=21, d_model=512, esm2_weights_path="esm2_t12_35M_UR50D", d_hidden_aa=1024, hidden_layers_aa=0, dropout=0.0):
 		super(AminoAcidEmbedding, self).__init__()
 		
-		self.linear = nn.Linear(num_aas, d_model)
+		if not esm2_weights_path: # choose a esm2 model based on d_model and download
+			esm2_weights = get_esm_weights(d_model, round_down=True)
+		elif not esm2_weights_path.endswith(".pt"): # download the chosen model
+			esm2_weights = get_esm_weights(esm2_weights_path)
+		else: # load from precomputed file, note that this should be created w/ main func of utils/model_utils/esm2/get_esm_weights.py for proper mapping to proteusAI alphabet
+			try:
+				esm2_weights = torch.load(esm2_weights_path, weights_only=True)
+			except FileNotFoundError as e:
+				raise e(f"could not find ESM2 weights at {esm2_weights_path}")
+
+		# initialize esm2 weights, make them learnable (might change this)
+		self.esm2_linear_nobias = nn.Linear(in_features=num_aas, out_features=esm2_weights["esm2_linear_nobias.weight"].size(1), bias=False)
+		self.esm2_linear_nobias.weights.data = esm2_weights["esm2_linear_nobias.weight"]
+
+		self.esm2_layernorm = nn.LayerNorm(normalized_shape=self.esm2_linear_nobias.size(1))
+		self.esm2_layernorm.weight.data = esm2_weights["esm2_layernorm.weight"]
+		self.esm2_layernorm.bias.data = esm2_weights["esm2_layernorm.bias"]
+
+		self.linear = nn.Linear(self.esm2_linear_nobias.size(1), d_model, bias=False)
 		self.ffn = MLP(d_model, d_model, d_hidden_aa, hidden_layers_aa, dropout)
 		self.dropout = nn.Dropout(dropout)
 		self.norm1 = nn.LayerNorm(d_model)
 		self.norm2 = nn.LayerNorm(d_model)
 
+	def forward(self, aas, wf):
+		
+		# use esm
+		aas = self.esm2_linear_nobias(aas)
+		aas = self.esm2_layernorm(aas)
 
-	def forward(self, aa, wf):
-		aas = self.norm1(self.linear(aa) + wf)
+		# convert to target d_model, add wf encoding, norm, mlp w/ dropout and residual, and norm
+		aas = self.norm1(self.linear(aas) + wf)
 		aas = self.norm2(aas + self.dropout(self.ffn(aas)))
 
 		return aas
@@ -160,7 +185,7 @@ class GeoAttention(nn.Module):
 		self.k_bias = nn.Parameter(torch.zeros(self.nhead, self.d_k)) # nhead x d_k
 		self.v_bias = nn.Parameter(torch.zeros(self.nhead, self.d_k)) # nhead x d_k
 
-		self.out_proj = nn.Linear(d_model, d_model)
+		self.out_proj = nn.Linear(d_model, d_model, bias=False)
 
 	def forward(self, q, k, v, coords, key_padding_mask=None):
 		'''
@@ -244,7 +269,7 @@ class proteusAI(nn.Module):
 						d_hidden_wl=1024, hidden_layers_wl=0, 
 
 						# aa mlp
-						d_hidden_aa=1024, hidden_layers_aa=0,
+						d_hidden_aa=1024, hidden_layers_aa=0, esm2_weights_path="esm2_t12_35M_UR50D",
 
 						# geometric attn + ffn
 						encoder_layers=4,
@@ -263,7 +288,7 @@ class proteusAI(nn.Module):
 		self.wf_embedding = WavefunctionEmbedding(d_model, min_wl, max_wl, base_wl, d_hidden_wl, hidden_layers_wl, dropout)
 
 		# amino acids
-		self.aa_embedding = AminoAcidEmbedding(21, d_model, d_hidden_aa, hidden_layers_aa, dropout)
+		self.aa_embedding = AminoAcidEmbedding(21, d_model, esm2_weights_path, d_hidden_aa, hidden_layers_aa, dropout)
 
 		# encoders
 		self.encoders = nn.ModuleList([Encoder(d_model, d_hidden_attn, hidden_layers_attn, n_head, min_spread, max_spread, base_spreads, num_spread, min_rbf, max_rbf, dropout) for _ in range(encoder_layers)])
