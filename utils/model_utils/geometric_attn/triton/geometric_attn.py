@@ -66,12 +66,13 @@ def _attn_fwd(
 	spreads_ptr, stride_spreads_H,
 	L_ptr, stride_L_Z, stride_L_H, stride_L_N,
 	mask_ptr, stride_mask_Z, stride_mask_N,
+	rng_seed_ptr,
 
 	tot_N: tl.constexpr, tot_Z: tl.constexpr, nheads: tl.constexpr,
 	d_k: tl.constexpr, min_d_k: tl.constexpr, # max(16, d_k) bc tl.dot requires dim>=16
 	softmax_scale: tl.constexpr, 
 	min_rbf: tl.constexpr, max_rbf: tl.constexpr,
-	dropout_p: tl.constexpr, rng_seed: tl.constexpr,
+	dropout_p: tl.constexpr,
 
 	BLOCK_I: tl.constexpr, # block sizes
 	BLOCK_J: tl.constexpr,
@@ -163,6 +164,8 @@ def _attn_fwd(
 	# creates 2 32 bit ints and xors them, like, (I|Z) ^ (H|J), then does more
 	# bitwise ops to get better hash
 	# this decouples I and J bits (I on 16LSB of hash, J on 16MSB), avoiding symmetry issues, so that hash(Z,H,I,J)!=hash(Z,H,J,I)
+
+	rng_seed = tl.load(rng_seed_ptr)
 
 	# compute ZI bytes for the hash
 	I_bytes = offs_I + tl.arange(0, BLOCK_I)[:, None]
@@ -318,6 +321,7 @@ def _attn_bwd(
 	spreads_ptr, stride_spreads_H,
 	d_spreads_ptr, stride_d_spreads_H,
 	mask_ptr, stride_mask_Z, stride_mask_N,
+	rng_seed_ptr,
 	
 	tot_Z: tl.constexpr, tot_N: tl.constexpr, nheads: tl.constexpr, 
 	d_k: tl.constexpr, min_d_k: tl.constexpr, softmax_scale: tl.constexpr,
@@ -436,6 +440,8 @@ def _attn_bwd(
 		block_shape=(BLOCK_I, ),
 		order=(0, )
 	)
+
+	rng_seed = tl.load(rng_seed_ptr)
 
 	# prepare bytes for dropout
 	H_bytes = (tl.full([1, BLOCK_J], offs_H, dtype=tl.uint32) & 0xFFFF) << 16
@@ -633,7 +639,7 @@ class _geometric_attn(torch.autograd.Function):
 							)
 
 		# generate a rng seed for each batch and head
-		rng_seed = random.randint(0, 2**16-1)
+		rng_seed = torch.randint(0, 2**16-1, (1,), device=Q.device)
 		# rng_seed = 0 # hard code for debugging
 		
 		# run the kernel
@@ -645,25 +651,25 @@ class _geometric_attn(torch.autograd.Function):
 							spreads, spreads.stride(0), # nhead, 
 							L, L.stride(0), L.stride(1), L.stride(2), # batch x nhead x N
 							mask, mask.stride(0), mask.stride(1), # batch x N
+							rng_seed,
 							N, batch, nheads, d_k, max(d_k, 16), softmax_scale,
-							min_rbf, max_rbf, dropout, rng_seed
+							min_rbf, max_rbf, dropout
 						)
 
 		# for backwards pass
-		ctx.save_for_backward(Q, K, V, out, L, coords, spreads, mask)
+		ctx.save_for_backward(Q, K, V, out, L, coords, spreads, mask, rng_seed)
 		ctx.softmax_scale = softmax_scale
 		ctx.dropout = dropout
 		ctx.min_rbf = min_rbf
 		ctx.max_rbf = max_rbf
-		ctx.rng_seed = rng_seed
 
-		return out#.to(ctx.Q_dtype)
+		return out
 
 	@staticmethod
 	def backward(ctx, dO):
 
 		# load saved tensors (should all be float32, expect masks). also should all be contiguous from fwd
-		Q, K, V, O, L, coords, spreads, mask = ctx.saved_tensors
+		Q, K, V, O, L, coords, spreads, mask, rng_seed = ctx.saved_tensors
 
 		# compute D for dSR calculation
 		D = torch.sum(O*dO, dim=3).to(torch.float16) # Z x H x N x D -> Z x H x N
@@ -702,8 +708,9 @@ class _geometric_attn(torch.autograd.Function):
 							spreads, spreads.stride(0),
 							d_spreads, d_spreads.stride(0),
 							mask, mask.stride(0), mask.stride(1),
+							rng_seed,
 							batch, N, nheads, d_k, max(d_k, 16), ctx.softmax_scale,
-							ctx.min_rbf, ctx.max_rbf, ctx.dropout, ctx.rng_seed
+							ctx.min_rbf, ctx.max_rbf, ctx.dropout
 						 )
 
 		dQ = dQ
