@@ -3,7 +3,7 @@ import math
 import torch
 import torch.nn.functional as F
 from utils.test_utils import calculate_error, profile_func, profile_bwd
-from utils.model_utils.geometric_attn.geometric_attn import geometric_attn
+from utils.model_utils.geometric_attn.triton.geometric_attn import geometric_attn
 import os
 
 def main():

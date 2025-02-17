@@ -52,7 +52,7 @@ class AminoAcidEmbedding(nn.Module):
 	'''
 	def __init__(self, num_aas=21, d_model=512, esm2_weights_path="utils/model_utils/esm2/esm2_t33_650M_UR50D.pt", d_hidden_aa=1024, hidden_layers_aa=0, dropout=0.0):
 		super(AminoAcidEmbedding, self).__init__()
-		
+
 		if not esm2_weights_path: # choose a esm2 model based on d_model and download
 			esm2_weights = get_esm_weights(d_model, round_down=True)
 		elif not esm2_weights_path.endswith(".pt"): # download the chosen model
@@ -64,24 +64,25 @@ class AminoAcidEmbedding(nn.Module):
 				raise e(f"could not find ESM2 weights at {esm2_weights_path}")
 
 		# initialize esm2 weights, disable autograd for these, only make the mapping learnable
-		self.esm2_linear_nobias = nn.Linear(in_features=num_aas, out_features=esm2_weights["esm2_linear_nobias.weight"].size(1), bias=False)
-		self.esm2_linear_nobias.weight.data = esm2_weights["esm2_linear_nobias.weight"]
+		esm2_d_model = esm2_weights["esm2_linear_nobias.weight"].size(1)
+		self.esm2_linear_nobias = nn.Linear(in_features=num_aas, out_features=esm2_d_model, bias=False)
+		self.esm2_linear_nobias.weight.data = esm2_weights["esm2_linear_nobias.weight"].T
 		self.esm2_linear_nobias.weight.requires_grad = False
 
-		self.esm2_layernorm = nn.LayerNorm(normalized_shape=self.esm2_linear_nobias.size(1))
+		self.esm2_layernorm = nn.LayerNorm(normalized_shape=esm2_d_model)
 		self.esm2_layernorm.weight.data = esm2_weights["esm2_layernorm.weight"]
 		self.esm2_layernorm.bias.data = esm2_weights["esm2_layernorm.bias"]
 		self.esm2_layernorm.weight.requires_grad = False
 		self.esm2_layernorm.bias.requires_grad = False
 
-		self.linear = nn.Linear(self.esm2_linear_nobias.size(1), d_model, bias=False)
+		self.linear = nn.Linear(esm2_d_model, d_model, bias=False)
 		self.ffn = MLP(d_model, d_model, d_hidden_aa, hidden_layers_aa, dropout)
 		self.dropout = nn.Dropout(dropout)
 		self.norm1 = nn.LayerNorm(d_model)
 		self.norm2 = nn.LayerNorm(d_model)
 
 	def forward(self, aas, wf):
-		
+
 		# use esm
 		aas = self.esm2_linear_nobias(aas)
 		aas = self.esm2_layernorm(aas)
@@ -133,7 +134,8 @@ class WavefunctionEmbedding(nn.Module):
 		wavenumbers = 2 * torch.pi / wavelengths
 
 		# convert to wf features if not already precomputed
-		wf = wf_embedding(coords, wavenumbers, key_padding_mask) # batch x N x 3 --> batch x N x d_model
+		alpha = 1
+		wf = wf_embedding(coords, wavenumbers, alpha, key_padding_mask) # batch x N x 3 --> batch x N x d_model
 
 		return wf
 
@@ -172,8 +174,11 @@ class GeoAttention(nn.Module):
 		# this is for when there are more spreads than heads, i.e. the learnable weights is not a square matrix. 
 		# most weight goes to num_spreads//nhead first spreads 
 		# (i.e. first 4 idxs if num_spreads is 4 times bigger), etc.
-		init_spread_weights = log_inv.unsqueeze(2).expand(-1, -1, num_spreads//nhead).reshape(nhead, num_spreads)
+		init_spread_weights = log_inv.unsqueeze(2).expand(-1, -1, num_spread//nhead).reshape(nhead, num_spread)
 		self.spread_weights = nn.Parameter(init_spread_weights)# initialize the learnable weight matrix
+
+		self.min_rbf = min_rbf
+		self.max_rbf = max_rbf
 
 		# QKV weight and bias matrices
 
@@ -207,9 +212,9 @@ class GeoAttention(nn.Module):
 
 		# define dropout for geo attention
 		dropout = self.dropout if self.training else 0.0
-		
+
 		# get spread for each head, which is a learnable weighted sum of the allowed spreads
-		spread_weights = torch.softmax(self.spread_weights, dim=1) 
+		spread_weights = torch.softmax(self.spread_weights, dim=1)
 		spreads = torch.matmul(spread_weights, self.spreads.unsqueeze(1)).squeeze(1) # nhead x nspread @ nspread x 1 -> nhead
 
 		# perform attention

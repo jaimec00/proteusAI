@@ -20,13 +20,13 @@ class _wf_embedding(torch.autograd.Function):
 
 	@staticmethod
 	def forward(ctx, coords, wavenumbers, alpha, mask):
-		
+
 		# bake the mask into coords w/ arbitrary val. less likely to give NaNs than using inf
 		coords = torch.where(mask.unsqueeze(2), 12345, coords)
 
 		# convert dtypes and make contiguous. everything in fp32
 		coords = coords.transpose(1, 2).to(torch.float32).contiguous() # transpose to make memory access more efficient in the kernel
-		
+
 		# deal w/ wavenumbers
 		wavenumbers = wavenumbers.to(torch.float32).contiguous()
 
@@ -47,7 +47,7 @@ class _wf_embedding(torch.autograd.Function):
 										out,
 										cos_sums, sin_sums
 								)
-		
+
 		# scaling factor (A in green's func)
 		out *= alpha
 		cos_sums *= alpha
@@ -78,4 +78,4 @@ class _wf_embedding(torch.autograd.Function):
 		# sum the Z dim and N dim, to accumulate gradients, as wavenumbers is a tensor of shape d_model//2
 		dk = ((imag_dO*cos_sums) - (real_dO*sin_sums)).sum(dim=(0,1)) # d_model//2
 
-		return None, dk, None 
+		return None, dk, None, None

@@ -21,6 +21,7 @@ nvidia-smi
 # define triton cache dir so dont run out of space in home
 export TRITON_HOME="/scratch/hjc2538/projects/proteusAI"
 export TRITON_CACHE_DIR="/scratch/hjc2538/projects/proteusAI/.triton/cache"
+export ATTN_AUTOTUNE="0"
 
 # pytorch was built w/ g++, and triton dynamically compiles cuda kernels, so ensure it uses g++
 # but only for cpp files, set gcc for c files

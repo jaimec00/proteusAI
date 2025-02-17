@@ -8,7 +8,7 @@ description:	multi-scale geometric flash attention kernel written in triton.
 					Triton Implementation: https://github.com/triton-lang/triton/blob/main/python/tutorials/06-fused-attention.py
 				Also credits to Umar Jamil (@umarjamilai) for giving a fantastic exlanation and demo:
 					YouTube Demo: https://www.youtube.com/watch?v=zy8ChVd_oTM
-				
+
 				Performs Flash attention, as described in the paper, but includes scaling of attention logits using RBF
 				functions based on euclidean distances of alpha carbon pairs. each head uses a distinct spread to compute
 				the RBFs, The spreads are learnable, and they interact multiplicitavely with the attention weights, allowing
@@ -24,6 +24,7 @@ import torch
 import triton
 import triton.language as tl
 import os
+import random
 
 # define configurations for autotuning
 configs = [	triton.Config({"BLOCK_I": i, "BLOCK_J": j}, num_warps=w)
@@ -40,7 +41,7 @@ def keep_fwd(conf):
 	if autotune == "1":
 		return (BLOCK_I * BLOCK_J) <= 2048
 	else:
-		return ((BLOCK_I == 16) and (BLOCK_J == 32) and (conf.num_warps==4))
+		return ((BLOCK_I == 32) and (BLOCK_J == 16) and (conf.num_warps==2))
 
 def keep_bwd(conf):
 	autotune = os.environ.get("ATTN_AUTOTUNE")
@@ -49,7 +50,7 @@ def keep_bwd(conf):
 	if autotune == "1":
 		return (BLOCK_I * BLOCK_J) <= 2048
 	else:
-		return ((BLOCK_I == 32) and (BLOCK_J == 16) and (conf.num_warps==4))
+		return ((BLOCK_I == 16) and (BLOCK_J == 64) and (conf.num_warps==2))
 
 
 @triton.autotune(list(filter(keep_fwd, configs)),
@@ -662,7 +663,7 @@ class _geometric_attn(torch.autograd.Function):
 	def backward(ctx, dO):
 
 		# load saved tensors (should all be float32, expect masks). also should all be contiguous from fwd
-		Q, K, V, O, L, coords, spreads, mask, rng_seed = ctx.saved_tensors
+		Q, K, V, O, L, coords, spreads, mask = ctx.saved_tensors
 
 		# compute D for dSR calculation
 		D = torch.sum(O*dO, dim=3).to(torch.float16) # Z x H x N x D -> Z x H x N
@@ -672,14 +673,14 @@ class _geometric_attn(torch.autograd.Function):
 
 		# checks
 		assert Q.stride() == K.stride() == V.stride() == O.stride()
-		batch, nheads, N, d_k = Q.shape 
+		batch, nheads, N, d_k = Q.shape
 
 		# initialize dQ, dK, and dV, all fp32
 		dQ = torch.zeros_like(Q).to(torch.float32).contiguous()
 		dK = torch.zeros_like(K).to(torch.float32).contiguous()
 		dV = torch.zeros_like(V).to(torch.float32).contiguous()
 		d_spreads = torch.zeros_like(spreads).to(torch.float32).contiguous()
-		
+
 		# define the grid
 		grid = lambda args: (
 			triton.cdiv(args["tot_N"], args["BLOCK_J"]), # parralel along J for bwd
@@ -688,20 +689,20 @@ class _geometric_attn(torch.autograd.Function):
 		)
 
 		# run the bwd kernel
-		_attn_bwd[grid](	Q, Q.stride(0), Q.stride(1), Q.stride(2), Q.stride(3), 
-							K, K.stride(0), K.stride(1), K.stride(2), K.stride(3), 
-							V, V.stride(0), V.stride(1), V.stride(2), V.stride(3), 
-							dO, dO.stride(0), dO.stride(1), dO.stride(2), dO.stride(3), 
+		_attn_bwd[grid](	Q, Q.stride(0), Q.stride(1), Q.stride(2), Q.stride(3),
+							K, K.stride(0), K.stride(1), K.stride(2), K.stride(3),
+							V, V.stride(0), V.stride(1), V.stride(2), V.stride(3),
+							dO, dO.stride(0), dO.stride(1), dO.stride(2), dO.stride(3),
 							dQ, dQ.stride(0), dQ.stride(1), dQ.stride(2), dQ.stride(3),
 							dK, dK.stride(0), dK.stride(1), dK.stride(2), dK.stride(3),
 							dV, dV.stride(0), dV.stride(1), dV.stride(2), dV.stride(3),
 							D, D.stride(0), D.stride(1), D.stride(2),
 							L, L.stride(0), L.stride(1), L.stride(2),
 							coords, coords.stride(0), coords.stride(1), coords.stride(2),
-							spreads, spreads.stride(0), 
-							d_spreads, d_spreads.stride(0), 
+							spreads, spreads.stride(0),
+							d_spreads, d_spreads.stride(0),
 							mask, mask.stride(0), mask.stride(1),
-							batch, N, nheads, d_k, max(d_k, 16), ctx.softmax_scale, 
+							batch, N, nheads, d_k, max(d_k, 16), ctx.softmax_scale,
 							ctx.min_rbf, ctx.max_rbf, ctx.dropout, ctx.rng_seed
 						 )
 
@@ -711,4 +712,4 @@ class _geometric_attn(torch.autograd.Function):
 		d_spreads = d_spreads
 
 		# return the gradients
-		return dQ, dK, dV, None, d_spreads, None, None
+		return dQ, dK, dV, None, d_spreads, None, None, None, None
