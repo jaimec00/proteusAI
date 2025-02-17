@@ -53,29 +53,34 @@ class AminoAcidEmbedding(nn.Module):
 	def __init__(self, num_aas=21, d_model=512, esm2_weights_path="utils/model_utils/esm2/esm2_t33_650M_UR50D.pt", d_hidden_aa=1024, hidden_layers_aa=0, dropout=0.0):
 		super(AminoAcidEmbedding, self).__init__()
 
-		if not esm2_weights_path: # choose a esm2 model based on d_model and download
-			esm2_weights = get_esm_weights(d_model, round_down=True)
-		elif not esm2_weights_path.endswith(".pt"): # download the chosen model
-			esm2_weights = get_esm_weights(esm2_weights_path)
-		else: # load from precomputed file, note that this should be created w/ main func of utils/model_utils/esm2/get_esm_weights.py for proper mapping to proteusAI alphabet
-			try:
-				esm2_weights = torch.load(esm2_weights_path, weights_only=True)
-			except FileNotFoundError as e:
-				raise e(f"could not find ESM2 weights at {esm2_weights_path}")
+		self.use_esm = esm2_weights_path != ""
 
-		# initialize esm2 weights, disable autograd for these, only make the mapping learnable
-		esm2_d_model = esm2_weights["esm2_linear_nobias.weight"].size(1)
-		self.esm2_linear_nobias = nn.Linear(in_features=num_aas, out_features=esm2_d_model, bias=False)
-		self.esm2_linear_nobias.weight.data = esm2_weights["esm2_linear_nobias.weight"].T
-		self.esm2_linear_nobias.weight.requires_grad = False
+		if self.use_esm: # choose a esm2 model based on d_model and download
+			if not esm2_weights_path.endswith(".pt"): # download the chosen model
+				esm2_weights = get_esm_weights(esm2_weights_path)
+			else: # load from precomputed file, note that this should be created w/ main func of utils/model_utils/esm2/get_esm_weights.py for proper mapping to proteusAI alphabet
+				try:
+					esm2_weights = torch.load(esm2_weights_path, weights_only=True)
+				except FileNotFoundError as e:
+					raise e(f"could not find ESM2 weights at {esm2_weights_path}")
 
-		self.esm2_layernorm = nn.LayerNorm(normalized_shape=esm2_d_model)
-		self.esm2_layernorm.weight.data = esm2_weights["esm2_layernorm.weight"]
-		self.esm2_layernorm.bias.data = esm2_weights["esm2_layernorm.bias"]
-		self.esm2_layernorm.weight.requires_grad = False
-		self.esm2_layernorm.bias.requires_grad = False
+			# initialize esm2 weights, disable autograd for these, only make the mapping learnable
+			esm2_d_model = esm2_weights["esm2_linear_nobias.weight"].size(1)
+			self.esm2_linear_nobias = nn.Linear(in_features=num_aas, out_features=esm2_d_model, bias=False)
+			self.esm2_linear_nobias.weight.data = esm2_weights["esm2_linear_nobias.weight"].T
+			self.esm2_linear_nobias.weight.requires_grad = False
 
-		self.linear = nn.Linear(esm2_d_model, d_model, bias=False)
+			self.esm2_layernorm = nn.LayerNorm(normalized_shape=esm2_d_model)
+			self.esm2_layernorm.weight.data = esm2_weights["esm2_layernorm.weight"]
+			self.esm2_layernorm.bias.data = esm2_weights["esm2_layernorm.bias"]
+			self.esm2_layernorm.weight.requires_grad = False
+			self.esm2_layernorm.bias.requires_grad = False
+
+			self.linear = nn.Linear(esm2_d_model, d_model, bias=False)
+
+		else:
+			self.linear = nn.Linear(num_aas, d_model, bias=False)
+
 		self.ffn = MLP(d_model, d_model, d_hidden_aa, hidden_layers_aa, dropout)
 		self.dropout = nn.Dropout(dropout)
 		self.norm1 = nn.LayerNorm(d_model)
@@ -83,9 +88,10 @@ class AminoAcidEmbedding(nn.Module):
 
 	def forward(self, aas, wf):
 
-		# use esm
-		aas = self.esm2_linear_nobias(aas)
-		aas = self.esm2_layernorm(aas)
+		if self.use_esm:
+			# use esm
+			aas = self.esm2_linear_nobias(aas)
+			aas = self.esm2_layernorm(aas)
 
 		# convert to target d_model, add wf encoding, norm, mlp w/ dropout and residual, and norm
 		aas = self.norm1(self.linear(aas) + wf)
