@@ -217,8 +217,8 @@ def _attn_fwd(
 
 		# clamp distances
 		dists = tl.where(dists<min_dist, min_dist, dists)
-		# dists = tl.where(dists>max_dist, max_dist, dists)
-		
+		#dists = tl.where(dists>max_dist, max_dist, dists)
+
 		# compute the rbfs
 		Rij = tl.exp(-(dists*dists) / (2*spread*spread)) # N x N (fp32)
 
@@ -242,7 +242,7 @@ def _attn_fwd(
 
 		# compute alpha
 		alpha = tl.exp(tl.where((mi==-inf) | (mij==-inf), tl.where((mi==-inf) & (mij==-inf), 0, -inf), mi - mij)) # (fp32)
-		
+
 		# update li
 		li = alpha*li + tl.sum(Pij, axis=1) # N, (fp32)
 
@@ -252,7 +252,7 @@ def _attn_fwd(
 		hash_vals = hash_vals ^ (hash_vals << 4)
 		hash_vals = hash_vals ^ (hash_vals >> 4)
 		dropout_mask = (tl.rand(rng_seed, hash_vals) >= dropout_p).to(tl.int1) # N x N
-		
+
 		# apply dropout
 		Pij = tl.where(dropout_mask, Pij / (1-dropout_p), 0.0)
 
@@ -267,9 +267,9 @@ def _attn_fwd(
 		Vj_block_ptr = tl.advance(Vj_block_ptr, (BLOCK_J, 0))
 		coords_J_ptr = tl.advance(coords_J_ptr, (BLOCK_J, 0))
 		mask_j_ptr = tl.advance(mask_j_ptr, (BLOCK_J, ))
-		
+
 		# increment J_idxs for the hash compuation of the next iteration
-		J_idxs += J_inc 
+		J_idxs += J_inc
 
 	# epilogue
 
@@ -485,8 +485,8 @@ def _attn_bwd(
 
 		# clamp dists
 		dists = tl.where(dists<min_dist, min_dist, dists)
-		# dists = tl.where(dists>max_dist, max_dist, dists)
-		
+		#dists = tl.where(dists>max_dist, max_dist, dists)
+
 		# compute rbfs (fp32)
 		Rij = tl.exp(-(dists*dists) / (2.0*spread*spread)) # N x N (fp32)
 

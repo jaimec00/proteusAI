@@ -611,7 +611,7 @@ class _geometric_attn(torch.autograd.Function):
 		assert (Q.shape == K.shape) and (K.shape == V.shape), f"Q, K, and V projection shapes must match, but got {Q.shape=}, {K.shape=}, {V.shape=}"
 		batch, nheads, N, d_k = Q.shape
 		d_model = nheads*d_k
-		softmax_scale = 1/((d_k**0.5)*2) # divide by 2 bc rbfs scale logits by two at most
+		softmax_scale = 1/((d_k**0.5)) # divide by 2 bc rbfs scale logits by two at most
 		assert d_model % 2 == 0, f"d_model must be divisible by 2, not {d_model=}"
 		assert coords.dim() == 3 and coords.size(2) == 3, f"coordinates must be of shape (batch, N, 3), not {coords.shape}" 
 

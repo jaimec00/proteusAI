@@ -17,9 +17,9 @@ from utils.model_utils.wf_embedding.cuda.wf_embedding import wf_embedding
 
 # working on geometric attention cuda kernel, but use triton kernel for now
 # for testing different attention methods, specifically how RBFs interact w/ attn logits (multiplicative, additive, no spatial info)
-# from utils.model_utils.geometric_attn.triton.geometric_attn import geometric_attn
-from utils.model_utils.geometric_attn.triton.geometric_attn_bias import geometric_attn
-# from utils.model_utils.geometric_attn.flash_attn import geometric_attn
+from utils.model_utils.geometric_attn.triton.geometric_attn import geometric_attn
+# from utils.model_utils.geometric_attn.triton.geometric_attn_bias import geometric_attn
+# from utils.model_utils.geometric_attn.triton.flash_attn import geometric_attn
 
 # ----------------------------------------------------------------------------------------------------------------------
 
@@ -68,34 +68,35 @@ class AminoAcidEmbedding(nn.Module):
 			esm2_d_model = esm2_weights["esm2_linear_nobias.weight"].size(1)
 			self.esm2_linear_nobias = nn.Linear(in_features=num_aas, out_features=esm2_d_model, bias=False)
 			self.esm2_linear_nobias.weight.data = esm2_weights["esm2_linear_nobias.weight"].T
-			self.esm2_linear_nobias.weight.requires_grad = False
+			#self.esm2_linear_nobias.weight.requires_grad = False
 
 			self.esm2_layernorm = nn.LayerNorm(normalized_shape=esm2_d_model)
 			self.esm2_layernorm.weight.data = esm2_weights["esm2_layernorm.weight"]
 			self.esm2_layernorm.bias.data = esm2_weights["esm2_layernorm.bias"]
-			self.esm2_layernorm.weight.requires_grad = False
-			self.esm2_layernorm.bias.requires_grad = False
+			#self.esm2_layernorm.weight.requires_grad = False
+			#self.esm2_layernorm.bias.requires_grad = False
 
-			self.linear = nn.Linear(esm2_d_model, d_model, bias=False)
+			#self.linear = nn.Linear(esm2_d_model, d_model, bias=False)
 
 		else:
-			self.linear = nn.Linear(num_aas, d_model, bias=False)
+			#self.linear = nn.Linear(num_aas, d_model, bias=False)
+			esm2_d_model = num_aas
 
-		self.ffn = MLP(d_model, d_model, d_hidden_aa, hidden_layers_aa, dropout)
+		self.ffn = MLP(esm2_d_model, d_model, d_hidden_aa, hidden_layers_aa, dropout)
 		self.dropout = nn.Dropout(dropout)
 		self.norm1 = nn.LayerNorm(d_model)
-		self.norm2 = nn.LayerNorm(d_model)
+		#self.norm2 = nn.LayerNorm(d_model)
 
 	def forward(self, aas, wf):
 
 		if self.use_esm:
-			# use esm
 			aas = self.esm2_linear_nobias(aas)
 			aas = self.esm2_layernorm(aas)
 
+		aas = self.norm1(self.dropout(self.ffn(aas)))
+
 		# convert to target d_model, add wf encoding, norm, mlp w/ dropout and residual, and norm
-		aas = self.norm1(self.linear(aas) + wf)
-		aas = self.norm2(aas + self.dropout(self.ffn(aas)))
+		#aas = self.norm1(self.linear(aas))
 
 		return aas
 
@@ -130,6 +131,10 @@ class WavefunctionEmbedding(nn.Module):
 		# of wavelengths, to ensure the wavelengths are always within min wavelength and max wavelength		
 
 
+		self.ffn = MLP(d_model, d_model, d_hidden, hidden_layers, dropout)
+		self.norm = nn.LayerNorm(d_model)
+		self.dropout = nn.Dropout(dropout)
+
 	def forward(self, coords, key_padding_mask):
 
 		# each feature index will be a weighted sum of the allowed wavelengths, it is initialized to be almost
@@ -142,6 +147,8 @@ class WavefunctionEmbedding(nn.Module):
 		# convert to wf features if not already precomputed
 		alpha = 1
 		wf = wf_embedding(coords, wavenumbers, alpha, key_padding_mask) # batch x N x 3 --> batch x N x d_model
+
+		wf = self.norm(wf + self.dropout(self.ffn(wf)))
 
 		return wf
 
@@ -266,7 +273,7 @@ class Encoder(nn.Module):
 		aas2 = self.ffn(aas)
 		aas = aas + self.ffn_dropout(aas2)
 		aas = self.ffn_norm(aas)
-		
+
 		return aas
 
 class proteusAI(nn.Module):
@@ -325,10 +332,10 @@ class proteusAI(nn.Module):
 			return self.auto_regressive(wf, coords, aas, key_padding_mask, temp)
 
 		# aa embedding + wf_encoding + ffn
-		aas = self.aa_embedding(aas, wf)
+		# aas = self.aa_embedding(aas, wf)
 
 		# bidirectional encoder
-		seq_probs = self.encode(aas, coords, key_padding_mask) # batch x N x d_model (returns aa probability logits)
+		seq_probs = self.encode(wf, coords, key_padding_mask) # batch x N x d_model (returns aa probability logits)
 
 		return seq_probs
 
@@ -351,13 +358,13 @@ class proteusAI(nn.Module):
 
 			# update original aa tensor to include previously predicted positions
 			aas = torch.where((aa_onehot==0).all(dim=2, keepdim=True), aas, torch.cat([aa_onehot, torch.zeros(aa_onehot.shape[:2] + (1,), device=aa_onehot.device)], dim=2))
-			
+
 			# embed to feature space
 			aa_embedded = self.aa_embedding(aas, wf)
 
 			# decode the wavefunction
 			seq_probs = self.encode(aa_embedded, coords, key_padding_mask) # batch x N x 512 --> batch x N X 20 
-			
+
 			# convert to probability distribution
 			seq_probs = F.softmax(seq_probs, dim=2) # batch x N x 20
 
