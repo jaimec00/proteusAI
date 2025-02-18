@@ -189,13 +189,12 @@ def torch_attn(Q, K, V, coords, spreads, min_rbf=0.99, max_rbf=0.99, mask=None):
 	
 	# clamping 
 	dists = torch.where(dists<min_dist, min_dist, dists)
-	dists = torch.where(dists>max_dist, max_dist, dists)
+	# dists = torch.where(dists>max_dist, max_dist, dists)
 
 	rbfs = torch.exp(-(dists**2)/(2*(spreads[None, :, None, None]**2)))
-	rbfs = torch.where(S<0, 2-rbfs, rbfs + 1)
 
-	attn_mask = mask[:, None, :, None] | mask[:, None, None, :]
-	S = torch.where(attn_mask, float("-inf"), S*rbfs)
+	attn_mask = mask[:, None, :, None] | mask[:, None, None, :] | (dists>max_dist)
+	S = torch.where(attn_mask, float("-inf"), S*(1 + rbfs*torch.tanh(S)))
 
 	P = torch.softmax(S, dim=-1)
 

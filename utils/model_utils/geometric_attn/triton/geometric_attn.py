@@ -216,23 +216,25 @@ def _attn_fwd(
 		dists = tl.sqrt(tl.sum(dists_raw * dists_raw, axis=2)) # N x N
 
 		# clamp distances
-		dists = tl.where(dists<min_dist, min_dist, dists)
-		#dists = tl.where(dists>max_dist, max_dist, dists)
+		dists = tl.where(dists<min_dist, min_dist, dists) # for stable gradients
+		#dists = tl.where(dists>max_dist, max_dist, dists) # finding it is better to mask large distances
 
 		# compute the rbfs
 		Rij = tl.exp(-(dists*dists) / (2*spread*spread)) # N x N (fp32)
 
-		# negative logits with close distances should be less negative
-		# eps = min_rbf, so maximum rbf (1) would result in logits of min_rbf
-		# minimum rbf (0.1) would result in logits of 1 (no scaling)
-		# this achieves the goal of inverting the rbf for negative logits
-		Rij = tl.where(Sij < 0, 2-Rij, Rij + 1) # N x N (fp32)
-
 		# set masked positions to -inf, include out of range dists in mask
 		attn_mask = (mask_i[:, None]) & (tl.load(mask_j_ptr, boundary_check=(0,), padding_option="zero").to(tl.int1)[None, :]) & (dists < max_dist) # N x N
 
+		# apply tanh to attn logits so RBFs scale them properly
+		beta = 5 # large beta for sharper tanh (closer to sign() func)
+		pos_exp = tl.exp2(beta*Sij*1.4426950408889634) # express in base e (2^(x*log2(e)))
+		neg_exp = tl.exp2(beta*-Sij*1.4426950408889634)
+
+		# essentially a sign() function, if Sij is negative, RBF sign flips 
+		tanhSij = (pos_exp - neg_exp) / (pos_exp + neg_exp)
+
 		# scale attention logits by Rij and mask invalid pairs
-		SRij = tl.where(attn_mask, Sij*Rij, -inf) # N x N (fp32)
+		SRij = tl.where(attn_mask, Sij*(1 + Rij*tanhSij), -inf) # N x N (fp32)
 
 		# max of each row
 		mij = tl.maximum(mi, tl.max(SRij, axis=1)) # N,  (fp32)
@@ -485,23 +487,25 @@ def _attn_bwd(
 
 		# clamp dists
 		dists = tl.where(dists<min_dist, min_dist, dists)
-		#dists = tl.where(dists>max_dist, max_dist, dists)
+		#dists = tl.where(dists>max_dist, max_dist, dists) 
 
 		# compute rbfs (fp32)
 		Rij = tl.exp(-(dists*dists) / (2.0*spread*spread)) # N x N (fp32)
 
-		# for positive logits, scale by 1 + rbf, so that SR = S + S*R. for smoother gradients
-		# for negative logits, small dists should be scaled to be less negative than for far distances, s.t. SR = 2S - S*R
-		# the rbfs are "inverted", where large distances are more negative and small distances are not scaled
-		# maximum attention value is 2S for both, just that the RBFs play different roles depending on sign(S)
-		Rij = tl.where(Sij < 0, 2-Rij, 1 + Rij)
+		# apply tanh to attn logits so RBFs scale them properly
+		beta = 5
+		pos_exp = tl.exp2(beta*Sij*1.4426950408889634)
+		neg_exp = tl.exp2(beta*-Sij*1.4426950408889634)
+
+		# essentially a sign() function, if Sij is negative, RBF sign flips 
+		tanhSij = (pos_exp - neg_exp) / (pos_exp + neg_exp)
 
 		# mask out attention that is not relevant to this head
 		mask_i = tl.load(mask_i_ptr, boundary_check=(0, ), padding_option="zero").to(tl.int1)
 		attn_mask = (mask_i[:, None]) & (mask_j[None, :]) & (dists < max_dist) # N x N
 
 		# scale attention logits by RBFs
-		SRij = tl.where(attn_mask, Sij*Rij, -inf) # N x N (fp32)
+		SRij = tl.where(attn_mask, Sij*(1 + Rij*tanhSij), -inf) # N x N (fp32)
 		
 		# load log sum exp statistics
 		Li = tl.load(Li_block_ptr, boundary_check=(0, ), padding_option="zero") # (fp32)
@@ -532,10 +536,10 @@ def _attn_bwd(
 		dSRij = Pij * (dPij -  tl.load(Di_block_ptr, boundary_check=(0, ), padding_option="zero")[:, None]) # N x N
 
 		# compute dSij, ie grad wrt Sij. note the direct communication between dSij and Rij
-		dSij = dSRij * Rij # N x N
+		dSij = dSRij * ((1 + Rij*tanhSij) + Sij*Rij*(1 - tanhSij*tanhSij)) # N x N
 
 		# compute gradient wrt rbfs. also direct communication between dRij and Sij
-		dRij = dSRij * Sij
+		dRij = dSRij * Sij * tanhSij
 
 		# compute the gradient wrt the spread of this head 
 		# 		d_rbfs/dspreads  = d/dspreads exp(-(d^2)/(2*sigma^2)) 
@@ -543,12 +547,9 @@ def _attn_bwd(
 		# 		= [d/dspreads -(d^2)/(2*sigma^2)] * rbfs
 		# 		= [(d^2)/(sigma^3)] * rbfs
 		d_spread_factor = (dists*dists)/(spread*spread*spread)
-		d_spread_exp = tl.where(Sij < 0, Rij - 2, Rij-1) 	# get rid of the artifacts from adding 1 and/or inverting, 
-																# since addition of constants is not relevant to gradient
-																# note that if have negative logits, Rij is negative
-		
+
 		# accumulate the gradients for this head's spread
-		d_spread += tl.sum(tl.where(attn_mask, dRij * d_spread_exp * d_spread_factor , 0.0))
+		d_spread += tl.sum(tl.where(attn_mask, dRij * Rij * d_spread_factor , 0.0))
 
 		# compute gradient wrt Qij and perform atomic add to communicate between thread blocks (Kj already in fp16)
 		dQi = tl.dot(dSij.to(tl.float16), tl.permute(KjT, (1,0))) * softmax_scale # N x d_k		
