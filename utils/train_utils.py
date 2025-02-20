@@ -220,7 +220,8 @@ class TrainingRun():
 		'''
 
 		self.output.log.info("loading loss function...") 
-		self.loss_function = CEL(ignore_index=-1, reduction=self.training_parameters.loss_type, label_smoothing=self.training_parameters.label_smoothing)
+		# reduction=self.training_parameters.loss_type
+		self.loss_function = CEL(ignore_index=-1, reduction=None, label_smoothing=self.training_parameters.label_smoothing)
 
 	def train(self):
 		'''
@@ -628,6 +629,9 @@ class ModelOutputs():
 	def compute_cel_and_seq_sim(self, prediction, loss_function=None, scale=1/2000):
 
 		cel = loss_function(prediction.view(-1, prediction.size(2)).to(torch.float32), self.labels.view(-1).long())
+		if (cel.mean(dim=1)>3.5).any():
+			print(cel.mean(dim=1))
+		cel = cel.mean()
 		if cel.isnan().any() or cel.isinf().any():
 			print("num_valid: ", (self.labels!=-1).sum())
 
