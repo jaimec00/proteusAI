@@ -17,7 +17,7 @@ from utils.model_utils.wf_embedding.cuda.wf_embedding import wf_embedding
 
 # working on geometric attention cuda kernel, but use triton kernel for now
 # for testing different attention methods, specifically how RBFs interact w/ attn logits (multiplicative, additive, no spatial info)
-from utils.model_utils.geometric_attn.triton.geometric_attn import geometric_attn
+from utils.model_utils.geometric_attn.triton.geometric_attn_bias import geometric_attn
 # from utils.model_utils.geometric_attn.triton.geometric_attn_bias import geometric_attn
 # from utils.model_utils.geometric_attn.triton.flash_attn import geometric_attn
 
@@ -126,7 +126,7 @@ class WavefunctionEmbedding(nn.Module):
 		dist_pct = dist / (d_model//2) # as a percentage
 		inv_dist_pct = 1 - (dist_pct**(1/d_model)) # invert by subtracting pct from 1, also take the d_model root to emphasize the diagonals more
 		log_inv = torch.log(inv_dist_pct) # take the log to prepare it for softmax
-		self.wavelength_weights = nn.Parameter(log_inv)# initialize the learnable weight matrix
+		self.wavelength_weights = nn.Parameter(log_inv, requires_grad=False)# initialize the learnable weight matrix
 		# note that will be doing a weighted sum of wavelengths, not wavenumbers, compute the wavenumbers after computing weighted sum 
 		# of wavelengths, to ensure the wavelengths are always within min wavelength and max wavelength		
 
@@ -140,15 +140,15 @@ class WavefunctionEmbedding(nn.Module):
 		# each feature index will be a weighted sum of the allowed wavelengths, it is initialized to be almost
 		# an identity after softmax so that at the start, each index is basically just taking into account the
 		# wavelength of its corresponding index
-		wavelength_weights = torch.softmax(self.wavelength_weights, dim=1)
-		wavelengths = torch.matmul(wavelength_weights, self.wavelengths.unsqueeze(1)).squeeze(1) # d_model//2 x d_model//2 @ d_model//2 x 1 -> d_model//2
-		wavenumbers = 2 * torch.pi / wavelengths
+		#wavelength_weights = torch.softmax(self.wavelength_weights, dim=1)
+		#wavelengths = torch.matmul(wavelength_weights, self.wavelengths.unsqueeze(1)).squeeze(1) # d_model//2 x d_model//2 @ d_model//2 x 1 -> d_model//2
+		wavenumbers = 2 * torch.pi / self.wavelengths
 
 		# convert to wf features if not already precomputed
 		alpha = 1
 		wf = wf_embedding(coords, wavenumbers, alpha, key_padding_mask) # batch x N x 3 --> batch x N x d_model
 
-		wf = self.norm(wf + self.dropout(self.ffn(wf)))
+		#wf = self.norm(wf + self.dropout(self.ffn(wf)))
 
 		return wf
 
@@ -188,7 +188,7 @@ class GeoAttention(nn.Module):
 		# most weight goes to num_spreads//nhead first spreads 
 		# (i.e. first 4 idxs if num_spreads is 4 times bigger), etc.
 		init_spread_weights = log_inv.unsqueeze(2).expand(-1, -1, num_spread//nhead).reshape(nhead, num_spread)
-		self.spread_weights = nn.Parameter(init_spread_weights)# initialize the learnable weight matrix
+		self.spread_weights = nn.Parameter(init_spread_weights, requires_grad=False)# initialize the learnable weight matrix
 
 		self.min_rbf = min_rbf
 		self.max_rbf = max_rbf
@@ -230,14 +230,42 @@ class GeoAttention(nn.Module):
 		spread_weights = torch.softmax(self.spread_weights, dim=1)
 		spreads = torch.matmul(spread_weights, self.spreads.unsqueeze(1)).squeeze(1) # nhead x nspread @ nspread x 1 -> nhead
 
+		if spreads.isnan().any().item():
+			print(f"spreads is nan: {spreads.isnan().any().item()}")
+			print(f"spread_weights is nan: {spread_weights.isnan().any().item()}")
+			print(f"q is nan: {q.isnan().any().item()}")
+			print(f"k is nan: {k.isnan().any().item()}")
+			print(f"v is nan: {v.isnan().any().item()}")
+			print(f"Q is nan: {Q.isnan().any().item()}")
+			print(f"K is nan: {K.isnan().any().item()}")
+			print(f"V is nan: {V.isnan().any().item()}")
+			print(f"coords is nan {coords.isnan().any().item()}")
+			print(f"coords is nan {coords.isnan().any(dim=(1,2))}")
+			raise ValueError
+
+
 		# perform attention
-		out = geometric_attn(Q, K, V, coords, spreads, mask=key_padding_mask, min_rbf=self.min_rbf, max_rbf=self.max_rbf, dropout=dropout)  # batch x nhead x N x d_k
+		out = geometric_attn(Q, K, V, coords, self.spreads, mask=key_padding_mask, min_rbf=self.min_rbf, max_rbf=self.max_rbf, dropout=dropout)  # batch x nhead x N x d_k
 
 		out = out.permute(0,2,3,1) # batch x N x d_k x nhead
 		out = out.reshape(batch, N, self.d_model) # batch x N x d_k x nhead --> batch x N x d_model
 
 		# project through final linear layer
 		out = self.out_proj(out) # batch x N x d_model --> batch x N x d_model
+
+
+		if out.isnan().any().item():
+			print(f"out is nan: {out.isnan().any().item()}")
+			print(f"spreads is nan: {spreads.isnan().any().item()}")
+			print(f"spread_weights is nan: {spread_weights.isnan().any().item()}")
+			print(f"q is nan: {q.isnan().any().item()}")
+			print(f"k is nan: {k.isnan().any().item()}")
+			print(f"v is nan: {v.isnan().any().item()}")
+			print(f"Q is nan: {Q.isnan().any().item()}")
+			print(f"K is nan: {K.isnan().any().item()}")
+			print(f"V is nan: {V.isnan().any().item()}")
+			print(f"coords is nan {coords.isnan().any().item()}")
+			raise ValueError
 
 		# return
 		return out # batch x N x d_model

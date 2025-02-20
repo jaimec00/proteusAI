@@ -4,7 +4,7 @@ min_wl: 3.7  # minimum wl to use in wavelength sampling
 max_wl: 20.0  # maximum wl to use in wavelength sampling
 base_wl: 20.0  # minimum base to use in wavelength sampling
 d_hidden_we: 1024
-hidden_layers_we: 8
+hidden_layers_we: 3
 
 d_hidden_aa: 1024
 hidden_layers_aa: 3
@@ -14,10 +14,10 @@ esm2_weights_path: "utils/model_utils/esm2/esm2_t33_650M_UR50D.pt"  # can be a p
 
 encoder_layers: 4 # number of dualcoder layers
 num_heads: 8  # number of attention heads to perform the training with
-min_spread: 3.0
-max_spread: 6.0
+min_spread: 3.7
+max_spread: 20.0
 base_spread: 10.0
-num_spread: 64
+num_spread: 8
 min_rbf: 0.01
 max_rbf: 0.99
 d_hidden_attn: 1024  # intermediate dimensions of decoder feed forward layer
@@ -26,7 +26,7 @@ hidden_layers_attn: 0
 temperature: 0.1  # temperature for autoregressive inference (for testing)
 
 # Training configuration
-num_train: -1  # number of training samples to use; -1 means all available
+num_train: 8192  # number of training samples to use; -1 means all available
 num_val: -1  # number of validation samples to use; -1 means all available
 num_test: -1  # number of test samples to use; -1 means all available
 epochs: 100  # number of epochs
@@ -47,7 +47,7 @@ label_smoothing: 0.1  # percentage of label smoothing to use on the output label
 loss_type: "mean"  # whether to use the 'sum' or the 'mean' for CEL
 loss_scale: 2000
 lr_type: plateau
-lr_step: 5e-6  # learning rate
+lr_step: 5e-5  # learning rate
 lr_initial_min: 5e-5
 lr_initial_max: 1e-4
 lr_final_min: 1e-5
@@ -62,10 +62,10 @@ use_amp: True  # whether to use automatic mixed precision
 # ------------------------------------------------------------------------------
 
 # Input MASK injection
-initial_min_MASK_injection_mean: 0.15  # initial minimum mean percentage of MASK injection injection in training
-final_min_MASK_injection_mean: 0.15  # final minimum mean percentage of MASK injection injection in training
-initial_max_MASK_injection_mean: 0.15  # initial maximum mean percentage of MASK injection injection in training
-final_max_MASK_injection_mean: 0.15  # final maximum mean percentage of MASK injection injection in training
+initial_min_MASK_injection_mean: 1.00  # initial minimum mean percentage of MASK injection injection in training
+final_min_MASK_injection_mean: 1.00  # final minimum mean percentage of MASK injection injection in training
+initial_max_MASK_injection_mean: 1.00  # initial maximum mean percentage of MASK injection injection in training
+final_max_MASK_injection_mean: 1.00  # final maximum mean percentage of MASK injection injection in training
 MASK_injection_stdev: 0.00  # stdev percentage of MASK injection injection in training
 MASK_injection_cycle_length: 20  # input MASK token injection cycle length
 

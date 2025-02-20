@@ -476,6 +476,8 @@ class Batch():
 		# backward pass
 		self.batch_backward()
 
+
+
 	def batch_forward(self, model, loss_function, device):
 		'''
 		performs the forward pass, gets the outputs and computes the losses of a batch. 
@@ -514,9 +516,14 @@ class Batch():
 
 		learn_step = (self.b_idx + 1) % accumulation_steps == 0
 		loss = self.outputs.output_losses.losses[-1] / accumulation_steps
-		
+
 		if scaler is not None:
 			scaler.scale(loss).backward()
+			for name, param in self.epoch_parent.training_run_parent.model.named_parameters():
+			    if param.grad is not None:
+			        print(f"{name}: mean={param.grad.mean().item():.6f}, std={param.grad.std().item():.6f}, max={param.grad.max().item():.6f}, min={param.grad.min().item():.6f}")
+
+
 			if learn_step:
 				scaler.step(optim)
 				scaler.update()

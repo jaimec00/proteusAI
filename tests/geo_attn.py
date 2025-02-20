@@ -9,11 +9,11 @@ import os
 def main():
 
 	# setup
-	torch.manual_seed(37)
+	#torch.manual_seed(37)
 	device = torch.device("cuda")
 
 	# prepare inputs
-	batch, nheads, N, d_model = 1, 16, 16384, 512
+	batch, nheads, N, d_model = 2, 4, 8192, 512
 	assert d_model%2==0 and d_model%nheads==0
 	d_k = d_model // nheads
 	min_wl, max_wl, base = 3.7, 20, 20
@@ -67,6 +67,7 @@ def main():
 	print("\nbackward pass:\n")
 
 	test_bwd(torch_out.sum(), triton_out.sum(), Q, K, V, spreads, start_event, end_event, atol, rtol)
+	print(spreads.grad)
 
 	Q.grad.zero_()
 	K.grad.zero_()
@@ -85,6 +86,7 @@ def main():
 	print("\ndropout bwd: \n")
 
 	test_bwd(run1_fwd.sum(), run2_fwd.sum(), Q, K, V, spreads, start_event, end_event, atol, rtol)
+
 
 def autotune(func, params):
 
@@ -116,6 +118,8 @@ def test_bwd(torch_loss, triton_loss, Q, K, V, spreads_p, start_event, end_event
 	# torch
 	torch_time, torch_memory = profile_bwd(torch_loss, start_event, end_event)
 	torch_dQ, torch_dK, torch_dV, torch_d_spreads = [i.grad.clone() for i in [Q, K, V, spreads_p]]
+
+	print(torch_d_spreads)
 
 	# # zero grads
 	Q.grad.zero_()
@@ -183,23 +187,30 @@ def torch_attn(Q, K, V, coords, spreads, min_rbf=0.99, max_rbf=0.99, mask=None):
 	S = torch.matmul(Q, K.transpose(2,3)) / (2*(d_k**0.5)) # batch x nheads x N x N
 
 	dists = torch.sqrt(torch.sum((coords[:, :, None, :] - coords[:, None, :, :])**2, axis=3))[:, None, :, :]
-	
-	min_dist = torch.sqrt(torch.log(1/max_rbf)*2*spreads**2)[None, :, None, None]
-	max_dist = torch.sqrt(torch.log(1/min_rbf)*2*spreads**2)[None, :, None, None]
-	
-	# clamping 
-	dists = torch.where(dists<min_dist, min_dist, dists)
-	# dists = torch.where(dists>max_dist, max_dist, dists)
+
+	min_dist = torch.sqrt(math.log(1/max_rbf)*2*(spreads**2))[None, :, None, None]
+	max_dist = torch.sqrt(math.log(1/min_rbf)*2*(spreads**2))[None, :, None, None]
+
+	# clamping
+	#dists = torch.where(dists<min_dist, min_dist, dists)
+	#dists = torch.where(dists>max_dist, max_dist, dists)
 
 	rbfs = torch.exp(-(dists**2)/(2*(spreads[None, :, None, None]**2)))
 
-	attn_mask = mask[:, None, :, None] | mask[:, None, None, :] | (dists>max_dist)
-	S = torch.where(attn_mask, float("-inf"), S*(1 + rbfs*torch.tanh(S)))
+	attn_mask = mask[:, None, :, None] | mask[:, None, None, :] | (dists>=max_dist)
+
+	#beta = 10
+	#pos_exp = torch.exp(beta*S)
+	#neg_exp = torch.exp(beta*-S)
+
+	#tanhS = (pos_exp - neg_exp) / (pos_exp + neg_exp)
+
+	S = torch.where(attn_mask, float("-inf"), S + rbfs*torch.abs(S)) #rbfs*tanhS))
 
 	P = torch.softmax(S, dim=-1)
 
 	out = torch.matmul(P, V) # batch x nheads x N x d_k
-	
+
 	return out
 
 if __name__ == '__main__':
