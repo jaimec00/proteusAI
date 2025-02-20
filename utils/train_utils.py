@@ -13,6 +13,7 @@ from torch.nn.functional import one_hot as onehot
 from torch.nn import CrossEntropyLoss as CEL
 
 from tqdm import tqdm
+import math
 
 from proteusAI import proteusAI
 from utils.parameter_utils import HyperParameters, TrainingParameters, MASK_injection
@@ -519,18 +520,31 @@ class Batch():
 
 		if scaler is not None:
 			scaler.scale(loss).backward()
-			for name, param in self.epoch_parent.training_run_parent.model.named_parameters():
-			    if param.grad is not None:
-			        print(f"{name}: mean={param.grad.mean().item():.6f}, std={param.grad.std().item():.6f}, max={param.grad.max().item():.6f}, min={param.grad.min().item():.6f}")
+			#    if param.grad is not None:
+			#        print(f"{name}: mean={param.grad.mean().item():.6f}, std={param.grad.std().item():.6f}, max={param.grad.max().item():.6f}, min={param.grad.min().item():.6f}")
 
 
 			if learn_step:
+				total_norm = math.sqrt(sum(p.grad.norm(2).item() ** 2 for p in self.epoch_parent.training_run_parent.model.parameters() if p.grad is not None))
+				print("total_norm_before:", total_norm)
+				for name, param in self.epoch_parent.training_run_parent.model.named_parameters():
+				    print(f"{name}: mean={param.data.mean().item()}, std={param.data.std().item()}")
+
+
+				# Apply gradient clipping using the scaler
+				scaler.unscale_(optim)  # Unscale gradients before clipping
+				torch.nn.utils.clip_grad_norm_(self.epoch_parent.training_run_parent.model.parameters(), max_norm=5.0)
+
+				total_norm = math.sqrt(sum(p.grad.norm(2).item() ** 2 for p in self.epoch_parent.training_run_parent.model.parameters() if p.grad is not None))
+				print("total_norm_after:", total_norm)
+
 				scaler.step(optim)
 				scaler.update()
 				optim.zero_grad()
 		else:
 			loss.backward()
 			if learn_step:
+				torch.nn.utils.clip_grad_norm_(self.epoch_parent.training_run_parent.model.parameters(), max_norm=5.0)
 				optim.step()
 				optim.zero_grad()
 

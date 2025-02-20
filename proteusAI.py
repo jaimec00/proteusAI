@@ -148,6 +148,8 @@ class WavefunctionEmbedding(nn.Module):
 		alpha = 1
 		wf = wf_embedding(coords, wavenumbers, alpha, key_padding_mask) # batch x N x 3 --> batch x N x d_model
 
+		wf = self.norm(wf)
+
 		#wf = self.norm(wf + self.dropout(self.ffn(wf)))
 
 		return wf
