@@ -37,12 +37,16 @@ if __name__ == "__main__":
 
 	parser = argparse.ArgumentParser()
 
+	# debugging
+	parser.add_argument("--debug_grad", default=False, type=bool, help="prints grad of each layer at each step")
+
 	# hyper parameters
 	
 	# model 
 	parser.add_argument("--d_model", default=512, type=int, help="dimensionality of input embeddings")
 	
 	# wavefunction embedding
+	parser.add_argument("--learnable_wavelengths", default=False, type=bool, help="whether to make wavelengths learnable")
 	parser.add_argument("--min_wl", default=3.7, type=float, help="minimum wavelength to use in wavelength sampling")
 	parser.add_argument("--max_wl", default=20.0, type=float, help="maximum wavelength to use in wavelength sampling")
 	parser.add_argument("--base_wl", default=20.0, type=float, help="base to use in wavelength sampling")
@@ -53,10 +57,12 @@ if __name__ == "__main__":
 	parser.add_argument("--d_hidden_aa", default=1024, type=int, help="hidden dimensions in AA embedding MLP")
 	parser.add_argument("--hidden_layers_aa", default=0, type=int, help="number hidden layers in AA embedding MLP")
 	parser.add_argument("--esm2_weights_path", default="", type=str, help="path to pretrained esm2 weights. can also be just the name of the model to use. if nothing is provided, the weights corresponding best to d_model are downloaded from facebook website")
+	parser.add_argument("--learnable_esm", default=False, type=bool, help="whether to make esm weights learnable")
 	
 	# dualcoder
 	parser.add_argument("--encoder_layers", default=4, type=int, help="number of encoder layers")
 	parser.add_argument("--num_heads", default=8, type=int, help="number of attention heads")
+	parser.add_argument("--learnable_spreads", default=False, type=bool, help="whether to make spreads learnable")
 	parser.add_argument("--min_spread", default=3.0, type=float, help="minimum spread to use for geometric attention")
 	parser.add_argument("--max_spread", default=8.0, type=float, help="maximum spread to use for geometric attention")
 	parser.add_argument("--base_spread", default=20.0, type=float, help="base to use for spread sampling in geometric attention")
@@ -87,9 +93,10 @@ if __name__ == "__main__":
 	parser.add_argument("--epsilon", default=10e-9, type=float, help="epsilon parameter for Adam optimizer")
 
 	parser.add_argument("--dropout", default=0.1, type=float, help="percentage of dropout")
+	parser.add_argument("--attn_dropout", default=0.01, type=float, help="percentage of dropout for attention, should be smaller since it is already heavily masked")
 	parser.add_argument("--label_smoothing", default=0.1, type=float, help="percentage of label smoothing to use on the output labels for loss calculation")
 	parser.add_argument("--loss_type", default="mean", type=str, choices=['sum', 'mean'], help="whether to use the 'sum' or the 'mean' for CEL")
-	parser.add_argument("--loss_scale", default=1, type=int, help="normalization factor for sum loss")
+	parser.add_argument("--grad_clip_norm", default=5.0, type=float, help="max gradient L2 norm for gradient clipping. if 0.0, no gradient clipping is applied")
 
 	parser.add_argument("--lr_step", default=0.00005, type=float, help="learning rate")
 	parser.add_argument("--lr_type", default="custom", type=str, choices=["plateu, custom"], help="LR type")
@@ -106,6 +113,9 @@ if __name__ == "__main__":
 
 	# other
 	parser.add_argument("--temperature", default=0.01, type=float, help="temperature for autoregressive inference (for testing)")
+	
+	# data augmentation
+	parser.add_argument("--noise_coords_std", default=0.02, type=float, help="standard deviation of gaussian noise injection into input coordinates for data augmentation")
 
 	# input one-hot injection
 	parser.add_argument("--initial_min_MASK_injection_mean", default=0.05, type=float, help="initial minimum mean percentage of one-hot label injection in training")

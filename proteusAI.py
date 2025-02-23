@@ -10,18 +10,31 @@ description:	predicts the amino acid sequence of a protein, based on
 
 import torch
 import torch.nn as nn
+import torch.nn.init as init
 import torch.nn.functional as F
+
 from utils.model_utils.esm2.get_esm_weights import get_esm_weights
 from utils.model_utils.wf_embedding.cuda.wf_embedding import wf_embedding
-
-
-# working on geometric attention cuda kernel, but use triton kernel for now
-# for testing different attention methods, specifically how RBFs interact w/ attn logits (multiplicative, additive, no spatial info)
-from utils.model_utils.geometric_attn.triton.geometric_attn_bias import geometric_attn
-# from utils.model_utils.geometric_attn.triton.geometric_attn_bias import geometric_attn
-# from utils.model_utils.geometric_attn.triton.flash_attn import geometric_attn
+from utils.model_utils.geometric_attn.triton.geometric_attn import geometric_attn
 
 # ----------------------------------------------------------------------------------------------------------------------
+
+# initializations for linear layers
+def init_orthogonal(m):
+	if isinstance(m, nn.Linear):
+		init.orthogonal_(m.weight)
+		if m.bias is not None:
+			init.zeros_(m.bias)
+def init_kaiming(m):
+	if isinstance(m, nn.Linear):
+		init.kaiming_uniform_(m.weight, nonlinearity='relu')
+		if m.bias is not None:
+			init.zeros_(m.bias)
+def init_xavier(m):
+	if isinstance(m, nn.Linear):
+		init.xavier_uniform_(m.weight)
+		if m.bias is not None:
+			init.zeros_(m.bias)
 
 class MLP(nn.Module):
 	'''
@@ -38,6 +51,17 @@ class MLP(nn.Module):
 		self.in_dropout = nn.Dropout(dropout)
 		self.hidden_dropout = nn.ModuleList([nn.Dropout(dropout) for layer in range(hidden_layers)])
 
+		self.init_linears()
+
+	def init_linears(self):
+
+		init_xavier(self.in_proj)  # Xavier for the first layer
+
+		for layer in self.hidden_proj:
+			init_kaiming(layer)  # Kaiming for hidden layers
+
+		init_xavier(self.out_proj)  # Xavier for output layer
+
 	def forward(self, x):
 		x = self.in_dropout(F.gelu(self.in_proj(x)))
 		for hidden, dropout in zip(self.hidden_proj, self.hidden_dropout):
@@ -50,7 +74,7 @@ class AminoAcidEmbedding(nn.Module):
 	'''
 	simple mlp w/ layernorm
 	'''
-	def __init__(self, num_aas=21, d_model=512, esm2_weights_path="utils/model_utils/esm2/esm2_t33_650M_UR50D.pt", d_hidden_aa=1024, hidden_layers_aa=0, dropout=0.0):
+	def __init__(self, num_aas=21, d_model=512, esm2_weights_path="utils/model_utils/esm2/esm2_t33_650M_UR50D.pt", d_hidden_aa=1024, hidden_layers_aa=0, learnable_esm=False, dropout=0.0):
 		super(AminoAcidEmbedding, self).__init__()
 
 		self.use_esm = esm2_weights_path != ""
@@ -64,28 +88,28 @@ class AminoAcidEmbedding(nn.Module):
 				except FileNotFoundError as e:
 					raise e(f"could not find ESM2 weights at {esm2_weights_path}")
 
-			# initialize esm2 weights, disable autograd for these, only make the mapping learnable
+			# initialize esm2 weights
 			esm2_d_model = esm2_weights["esm2_linear_nobias.weight"].size(1)
 			self.esm2_linear_nobias = nn.Linear(in_features=num_aas, out_features=esm2_d_model, bias=False)
 			self.esm2_linear_nobias.weight.data = esm2_weights["esm2_linear_nobias.weight"].T
-			#self.esm2_linear_nobias.weight.requires_grad = False
 
 			self.esm2_layernorm = nn.LayerNorm(normalized_shape=esm2_d_model)
 			self.esm2_layernorm.weight.data = esm2_weights["esm2_layernorm.weight"]
 			self.esm2_layernorm.bias.data = esm2_weights["esm2_layernorm.bias"]
-			#self.esm2_layernorm.weight.requires_grad = False
-			#self.esm2_layernorm.bias.requires_grad = False
 
-			#self.linear = nn.Linear(esm2_d_model, d_model, bias=False)
-
+			if learnable_esm:
+				self.esm2_linear_nobias.weight.requires_grad = False
+				self.esm2_layernorm.weight.requires_grad = False
+				self.esm2_layernorm.bias.requires_grad = False
+				
 		else:
-			#self.linear = nn.Linear(num_aas, d_model, bias=False)
 			esm2_d_model = num_aas
 
-		self.ffn = MLP(esm2_d_model, d_model, d_hidden_aa, hidden_layers_aa, dropout)
+		self.linear = nn.Linear(esm2_d_model, d_model) # to map to d_model
+		self.ffn = MLP(d_model, d_model, d_hidden_aa, hidden_layers_aa, dropout)
 		self.dropout = nn.Dropout(dropout)
 		self.norm1 = nn.LayerNorm(d_model)
-		#self.norm2 = nn.LayerNorm(d_model)
+		self.norm2 = nn.LayerNorm(d_model)
 
 	def forward(self, aas, wf):
 
@@ -93,10 +117,7 @@ class AminoAcidEmbedding(nn.Module):
 			aas = self.esm2_linear_nobias(aas)
 			aas = self.esm2_layernorm(aas)
 
-		aas = self.norm1(self.dropout(self.ffn(aas)))
-
-		# convert to target d_model, add wf encoding, norm, mlp w/ dropout and residual, and norm
-		#aas = self.norm1(self.linear(aas))
+		aas = self.norm2(self.dropout(self.ffn(self.norm1(self.linear(aas) + wf))))
 
 		return aas
 
@@ -109,48 +130,53 @@ class WavefunctionEmbedding(nn.Module):
 	d_model features for each Ca 
 	serve as a generalization of positional encoding for irregularly spaced tokens in arbitrary dimensions. 
 	also includes mlp after the embedding layer
-	implemented in cuda, optimized for h100
+	actual function implemented in cuda, optimized for h100 (not really, only takes advantage of large shared mem, need a rewrite to use TMA, possibly WGMMA)
 	'''
-	def __init__(self, d_model=512, min_wl=3.7, max_wl=20, base=20, d_hidden=1024, hidden_layers=0, dropout=0.1):
+	def __init__(self, d_model=512, min_wl=3.7, max_wl=20, base=20, d_hidden=1024, hidden_layers=0, learnable_wavelengths=False, dropout=0.1):
 		super(WavefunctionEmbedding, self).__init__()
 
 		# compute wavenumbers from wavelengths
 		self.register_buffer("wavelengths", min_wl + (max_wl - min_wl) * (torch.logspace(0,1,d_model//2, base) - 1) / (base - 1))
 
-		# compute the values to initialize the weights, so that post softmax, the diagonals have the most weight (close to 0.67 for d_model=512)
-		# and the farther a column index is from the diagonal, the less weight it receives (farthest is about 5e-6, for d_model=512)
-		idxs = torch.arange(0, d_model//2) # just the index of each wavenumber
-		diag_idx = idxs.unsqueeze(1).expand(-1, d_model//2) # the index of the corresponding diagonal for each row (same for all columns)
-		col_idx = idxs.unsqueeze(0).expand(d_model//2, -1)# the index of each column, same for each row
-		dist = (diag_idx - col_idx).abs() # how far an index is from the diagonal of its corresponding row
-		dist_pct = dist / (d_model//2) # as a percentage
-		inv_dist_pct = 1 - (dist_pct**(1/d_model)) # invert by subtracting pct from 1, also take the d_model root to emphasize the diagonals more
-		log_inv = torch.log(inv_dist_pct) # take the log to prepare it for softmax
-		self.wavelength_weights = nn.Parameter(log_inv, requires_grad=False)# initialize the learnable weight matrix
-		# note that will be doing a weighted sum of wavelengths, not wavenumbers, compute the wavenumbers after computing weighted sum 
-		# of wavelengths, to ensure the wavelengths are always within min wavelength and max wavelength		
-
-
+		self.learnable_wavelengths = learnable_wavelengths
+		if self.learnable_wavelengths:
+			# compute the values to initialize the weights, so that post softmax, the diagonals have the most weight (close to 0.67 for d_model=512)
+			# and the farther a column index is from the diagonal, the less weight it receives (farthest is about 5e-6, for d_model=512)
+			# note that will be doing a weighted sum of wavelengths, not wavenumbers, compute the wavenumbers after computing weighted sum 
+			# of wavelengths, to ensure the wavelengths are always within min wavelength and max wavelength		
+			idxs = torch.arange(0, d_model//2) # just the index of each wavenumber
+			diag_idx = idxs.unsqueeze(1).expand(-1, d_model//2) # the index of the corresponding diagonal for each row (same for all columns)
+			col_idx = idxs.unsqueeze(0).expand(d_model//2, -1)# the index of each column, same for each row
+			dist = (diag_idx - col_idx).abs() # how far an index is from the diagonal of its corresponding row
+			dist_pct = dist / (d_model//2) # as a percentage
+			inv_dist_pct = 1 - (dist_pct**(1/d_model)) # invert by subtracting pct from 1, also take the d_model root to emphasize the diagonals more
+			log_inv = torch.log(inv_dist_pct) # take the log to prepare it for softmax
+			self.wavelength_weights = nn.Parameter(log_inv)# initialize the learnable weight matrix
+			
 		self.ffn = MLP(d_model, d_model, d_hidden, hidden_layers, dropout)
-		self.norm = nn.LayerNorm(d_model)
+		self.norm1 = nn.LayerNorm(d_model)
+		self.norm2 = nn.LayerNorm(d_model)
 		self.dropout = nn.Dropout(dropout)
+
+	def get_wavelengths(self):
+		
+		if self.learnable_wavelengths:
+			wavelength_weights = torch.softmax(self.wavelength_weights, dim=1)
+			wavelengths = torch.matmul(wavelength_weights, self.wavelengths.unsqueeze(1)).squeeze(1) # d_model//2 x d_model//2 @ d_model//2 x 1 -> d_model//2
+		else:
+			wavelengths = self.wavelengths
+
+		return wavelengths		
 
 	def forward(self, coords, key_padding_mask):
 
-		# each feature index will be a weighted sum of the allowed wavelengths, it is initialized to be almost
-		# an identity after softmax so that at the start, each index is basically just taking into account the
-		# wavelength of its corresponding index
-		#wavelength_weights = torch.softmax(self.wavelength_weights, dim=1)
-		#wavelengths = torch.matmul(wavelength_weights, self.wavelengths.unsqueeze(1)).squeeze(1) # d_model//2 x d_model//2 @ d_model//2 x 1 -> d_model//2
-		wavenumbers = 2 * torch.pi / self.wavelengths
-
-		# convert to wf features if not already precomputed
+		wavenumbers = 2 * torch.pi / self.get_wavelengths()
 		alpha = 1
+
 		wf = wf_embedding(coords, wavenumbers, alpha, key_padding_mask) # batch x N x 3 --> batch x N x d_model
 
-		wf = self.norm(wf)
-
-		#wf = self.norm(wf + self.dropout(self.ffn(wf)))
+		wf = self.norm1(wf)
+		wf = self.norm2(wf + self.dropout(self.ffn(wf)))
 
 		return wf
 
@@ -162,7 +188,7 @@ class GeoAttention(nn.Module):
 	see the imported function (supports fwd and bwd) triton implementation
 	'''
 
-	def __init__(self, d_model=512, nhead=8, min_spread=1, max_spread=6, base=20, num_spread=8, min_rbf=0.01, max_rbf=0.99, dropout=0.1):
+	def __init__(self, d_model=512, nhead=8, min_spread=1, max_spread=6, base=20, num_spread=8, min_rbf=0.01, max_rbf=0.99, learnable_spreads=False, dropout=0.1):
 		super(GeoAttention, self).__init__()
 
 		self.nhead = nhead
@@ -173,29 +199,33 @@ class GeoAttention(nn.Module):
 
 		self.dropout = dropout
 
+		self.learnable_spreads = learnable_spreads
+		if self.learnable_spreads:
+			# see the comments in wavefunction embedding, same method
+			idxs = torch.arange(0, nhead) 
+			diag_idx = idxs.unsqueeze(1).expand(-1, nhead) 
+			col_idx = idxs.unsqueeze(0).expand(nhead, -1)
+			dist = (diag_idx - col_idx).abs() 
+			dist_pct = dist / nhead
+			inv_dist_pct = 1 - (dist_pct**(1/(2*nhead))) 
+			log_inv = torch.log(inv_dist_pct) 
+
+			# this is for when there are more spreads than heads, i.e. the learnable weights is not a square matrix. 
+			# most weight goes to num_spreads//nhead first spreads 
+			# (i.e. first 4 idxs if num_spreads is 4 times bigger), etc.
+			init_spread_weights = log_inv.unsqueeze(2).expand(-1, -1, num_spread//nhead).reshape(nhead, num_spread)
+			self.spread_weights = nn.Parameter(init_spread_weights) # initialize the learnable weight matrix
+		else:
+			# make sure dont have more spreads than heads if it is not learnable
+			num_spread = self.nhead
+
 		# define spreads and spread weights matrix so each head's spread is a weighted sum of the allowed spreads
 		self.register_buffer("spreads", min_spread + (max_spread - min_spread) * (torch.logspace(0,1,num_spread, base) - 1) / (base - 1))
-
-		# compute the values to initialize the weights, so that post softmax, the diagonals have the most weight
-		# and the farther a column index is from the diagonal, the less weight it receives
-		idxs = torch.arange(0, nhead) # just the index of each spread
-		diag_idx = idxs.unsqueeze(1).expand(-1, nhead) # the index of the corresponding diagonal for each row (same for all columns)
-		col_idx = idxs.unsqueeze(0).expand(nhead, -1)# the index of each column, same for each row
-		dist = (diag_idx - col_idx).abs() # how far an index is from the diagonal of its corresponding row
-		dist_pct = dist / (nhead) # as a percentage
-		inv_dist_pct = 1 - (dist_pct**(1/(2*nhead))) # invert by subtracting pct from 1, also take the 2*nhead root to emphasize the diagonals more
-		log_inv = torch.log(inv_dist_pct) # take the log to prepare it for softmax
-
-		# this is for when there are more spreads than heads, i.e. the learnable weights is not a square matrix. 
-		# most weight goes to num_spreads//nhead first spreads 
-		# (i.e. first 4 idxs if num_spreads is 4 times bigger), etc.
-		init_spread_weights = log_inv.unsqueeze(2).expand(-1, -1, num_spread//nhead).reshape(nhead, num_spread)
-		self.spread_weights = nn.Parameter(init_spread_weights, requires_grad=False)# initialize the learnable weight matrix
 
 		self.min_rbf = min_rbf
 		self.max_rbf = max_rbf
 
-		# QKV weight and bias matrices
+		# QKV projection weight and bias matrices
 
 		# init xavier distribution
 		xavier_scale = (6/(self.d_k + d_model))**0.5
@@ -209,6 +239,16 @@ class GeoAttention(nn.Module):
 		self.v_bias = nn.Parameter(torch.zeros(self.nhead, self.d_k)) # nhead x d_k
 
 		self.out_proj = nn.Linear(d_model, d_model, bias=False)
+
+	def get_spreads(self):
+		if self.learnable_spreads:
+			# get spread for each head, which is a learnable weighted sum of the allowed spreads
+			spread_weights = torch.softmax(self.spread_weights, dim=1)
+			spreads = torch.matmul(spread_weights, self.spreads.unsqueeze(1)).squeeze(1) # nhead x nspread @ nspread x 1 -> nhead
+		else:
+			spreads = self.spreads
+
+		return spreads
 
 	def forward(self, q, k, v, coords, key_padding_mask=None):
 		'''
@@ -225,49 +265,16 @@ class GeoAttention(nn.Module):
 		K = torch.matmul(k.unsqueeze(1), self.k_proj.unsqueeze(0)) + self.k_bias.unsqueeze(0).unsqueeze(2) # batch x nhead x N x d_k
 		V = torch.matmul(v.unsqueeze(1), self.v_proj.unsqueeze(0)) + self.v_bias.unsqueeze(0).unsqueeze(2) # batch x nhead x N x d_k
 
-		# define dropout for geo attention
 		dropout = self.dropout if self.training else 0.0
 
-		# get spread for each head, which is a learnable weighted sum of the allowed spreads
-		spread_weights = torch.softmax(self.spread_weights, dim=1)
-		spreads = torch.matmul(spread_weights, self.spreads.unsqueeze(1)).squeeze(1) # nhead x nspread @ nspread x 1 -> nhead
-
-		if spreads.isnan().any().item():
-			print(f"spreads is nan: {spreads.isnan().any().item()}")
-			print(f"spread_weights is nan: {spread_weights.isnan().any().item()}")
-			print(f"q is nan: {q.isnan().any().item()}")
-			print(f"k is nan: {k.isnan().any().item()}")
-			print(f"v is nan: {v.isnan().any().item()}")
-			print(f"Q is nan: {Q.isnan().any().item()}")
-			print(f"K is nan: {K.isnan().any().item()}")
-			print(f"V is nan: {V.isnan().any().item()}")
-			print(f"coords is nan {coords.isnan().any().item()}")
-			print(f"coords is nan {coords.isnan().any(dim=(1,2))}")
-			raise ValueError
-
-
 		# perform attention
-		out = geometric_attn(Q, K, V, coords, self.spreads, mask=key_padding_mask, min_rbf=self.min_rbf, max_rbf=self.max_rbf, dropout=dropout)  # batch x nhead x N x d_k
+		out = geometric_attn(Q, K, V, coords, self.get_spreads(), mask=key_padding_mask, min_rbf=self.min_rbf, max_rbf=self.max_rbf, dropout=dropout)  # batch x nhead x N x d_k
 
 		out = out.permute(0,2,3,1) # batch x N x d_k x nhead
 		out = out.reshape(batch, N, self.d_model) # batch x N x d_k x nhead --> batch x N x d_model
 
 		# project through final linear layer
 		out = self.out_proj(out) # batch x N x d_model --> batch x N x d_model
-
-
-		if out.isnan().any().item():
-			print(f"out is nan: {out.isnan().any().item()}")
-			print(f"spreads is nan: {spreads.isnan().any().item()}")
-			print(f"spread_weights is nan: {spread_weights.isnan().any().item()}")
-			print(f"q is nan: {q.isnan().any().item()}")
-			print(f"k is nan: {k.isnan().any().item()}")
-			print(f"v is nan: {v.isnan().any().item()}")
-			print(f"Q is nan: {Q.isnan().any().item()}")
-			print(f"K is nan: {K.isnan().any().item()}")
-			print(f"V is nan: {V.isnan().any().item()}")
-			print(f"coords is nan {coords.isnan().any().item()}")
-			raise ValueError
 
 		# return
 		return out # batch x N x d_model
@@ -277,11 +284,11 @@ class Encoder(nn.Module):
 	bidirectional encoder
 	'''
 
-	def __init__(self, d_model=512, d_hidden=1024, hidden_layers=0, nhead=8, min_spread=1, max_spread=6, base=20, num_spread=8, min_rbf=0.01, max_rbf=0.99, dropout=0.0):
+	def __init__(self, d_model=512, d_hidden=1024, hidden_layers=0, nhead=8, min_spread=1, max_spread=6, base=20, num_spread=8, min_rbf=0.01, max_rbf=0.99, learnable_spreads=False, dropout=0.0, attn_dropout=0.0):
 		super(Encoder, self).__init__()
 
 		# Self-attention layers
-		self.attn = GeoAttention(d_model, nhead, min_spread=min_spread, max_spread=max_spread, base=base, num_spread=num_spread, min_rbf=min_rbf, max_rbf=max_rbf, dropout=dropout)
+		self.attn = GeoAttention(d_model, nhead, min_spread=min_spread, max_spread=max_spread, base=base, num_spread=num_spread, min_rbf=min_rbf, max_rbf=max_rbf, learnable_spreads=False, dropout=attn_dropout)
 		self.attn_norm = nn.LayerNorm(d_model)
 		self.attn_dropout = nn.Dropout(dropout)
 
@@ -316,43 +323,52 @@ class proteusAI(nn.Module):
 	def __init__(self, 	d_model=512, # model dimension
 
 						# wf embedding + wf mlp
+						learnable_wavelengths=False,
 						min_wl=3.7, max_wl=20, base_wl=20, 
 						d_hidden_wl=1024, hidden_layers_wl=0, 
 
 						# aa mlp
-						d_hidden_aa=1024, hidden_layers_aa=0, esm2_weights_path="esm2_t12_35M_UR50D",
+						d_hidden_aa=1024, hidden_layers_aa=0, 
+						esm2_weights_path="esm2_t12_35M_UR50D", learnable_esm=False,
 
 						# geometric attn + ffn
 						encoder_layers=4,
 						n_head=4,
+						learnable_spreads=False,
 						min_spread=3.7, max_spread=7, base_spreads=20, num_spread=4,
 						min_rbf=0.01, max_rbf=0.99,
 						d_hidden_attn=1024, hidden_layers_attn=0,
 						
 						# dropout
 						dropout=0.00,
+						attn_dropout=0.00,
 					):
 
 		super(proteusAI, self).__init__()
 
 		# wavefunc
-		self.wf_embedding = WavefunctionEmbedding(d_model, min_wl, max_wl, base_wl, d_hidden_wl, hidden_layers_wl, dropout)
+		self.wf_embedding = WavefunctionEmbedding(d_model, min_wl, max_wl, base_wl, d_hidden_wl, hidden_layers_wl, learnable_wavelengths, dropout)
 
 		# amino acids
-		self.aa_embedding = AminoAcidEmbedding(21, d_model, esm2_weights_path, d_hidden_aa, hidden_layers_aa, dropout)
+		# self.aa_embedding = AminoAcidEmbedding(21, d_model, esm2_weights_path, d_hidden_aa, hidden_layers_aa, learnable_esm, dropout)
 
 		# encoders
-		self.encoders = nn.ModuleList([Encoder(d_model, d_hidden_attn, hidden_layers_attn, n_head, min_spread, max_spread, base_spreads, num_spread, min_rbf, max_rbf, dropout) for _ in range(encoder_layers)])
+		self.encoders = nn.ModuleList([Encoder(d_model, d_hidden_attn, hidden_layers_attn, n_head, min_spread, max_spread, base_spreads, num_spread, min_rbf, max_rbf, learnable_spreads, dropout, attn_dropout) for _ in range(encoder_layers)])
 
 		# map to aa probs
 		self.out_proj = nn.Linear(d_model, 20)
+		init_xavier(self.out_proj)
+
 
 	def forward(self, coords, aas, key_padding_mask=None, auto_regressive=False, temp=0.1):
 		"""
 		Forward pass of the model with optional auto-regressive inference
 		"""
-		# coords: batch x N x 3
+		# coords: batch x N x 3 or batch x N x 3 x 3 for backbone atoms (N, C, and Ca)
 		# aas: batch x N x 21
+
+		# still need to implement properly
+		# coords_alpha, coords_beta = get_coords(coords, key_padding_mask, chain_mask)
 
 		# wave function embedding (replaces positional encoding)
 		wf = self.wf_embedding(coords, key_padding_mask) # batch x N x 3 --> batch x N x d_model
@@ -377,6 +393,56 @@ class proteusAI(nn.Module):
 		seq_probs = self.out_proj(aas)
 
 		return seq_probs
+
+	# will prob move this outside the model, and just have the input be ca and cb coords directly
+	# will import AA sizes so can update the cb magnitudes auto regressively (possibly include pKa based phase shifts too)
+	def get_coords(self, coords, key_padding_mask, chain_idxs): # chain dict
+		if coords.dim() == 3: # Ca ony model
+			coords_beta = get_Cb_from_Ca(coords, key_padding_mask, chain_idxs)
+			coords_alpha = coords
+		if coords.dim() == 4: # backbone model
+			coords_alpha, coords_beta = get_Cb_from_BB(coords, key_padding_mask, chain_idxs)
+
+	def get_Cb_from_Ca(self, coords, key_padding_mask, chain_idxs):
+		'''
+		note, that need to include chain mask and key_padding_mask to do this properly, in progress, same goes for get_Cb_from_BB
+
+		compute beta carbon coords (not absolute, just relative to Ca). not used yet, need to adapt wf_embedding to use this info
+		approximates N and C as being on the line connecting adjacent Ca, with ideal bond distances
+		uses the same experimentally determined constants as PMPNN to compute linear combination of b1, b2, and b3
+		terminal Ca do not have Cb (can't approximate N and C, since no adjacent Ca), so Cb coords are (0,0,0) for these
+		'''
+
+		logical_n = coords[:, 0:-2, :]
+		logical_ca = coords[:, 1:-1, :]
+		logical_c = coords[:, 2:, :]
+
+		b1 = ( logical_ca - logical_n)
+		b1 = 1.458 * b1 / torch.linalg.norm(b1, dim=2, keepdims=True)
+		b2 = (logical_c - logical_ca)
+		b2 = 1.525 * b2 / torch.linalg.norm(b2, dim=2, keepdims=True)
+		b3 = torch.linalg.cross(b1, b2)
+
+		cb = -0.58273431*b2 + 0.56802827*b1 - 0.54067466*b3
+
+		# the first and last ca are used as inplace cb, so make cb=ca for these
+		cb = torch.cat([coords[0][None, :], cb, coords[-1][None, :]], dim=0) 
+
+		return cb
+
+	def get_Cb_from_BB(self, coords):
+
+		n = coords[:, :, 0, :]
+		ca = coords[:, :, 1, :]
+		c = coords[:, :, 2, :]
+		
+		b1 = ca - n
+		b2 = c - ca
+		b3 = torch.linalg.cross(b1, b2)
+
+		cb = -0.58273431*b2 + 0.56802827*b1 - 0.54067466*b3
+
+		return ca, cb
 
 	def auto_regressive(self, wf, coords, aas, key_padding_mask=None, temp=0.1):
 

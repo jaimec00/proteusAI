@@ -67,7 +67,6 @@ def main():
 	print("\nbackward pass:\n")
 
 	test_bwd(torch_out.sum(), triton_out.sum(), Q, K, V, spreads, start_event, end_event, atol, rtol)
-	print(spreads.grad)
 
 	Q.grad.zero_()
 	K.grad.zero_()
@@ -118,8 +117,6 @@ def test_bwd(torch_loss, triton_loss, Q, K, V, spreads_p, start_event, end_event
 	# torch
 	torch_time, torch_memory = profile_bwd(torch_loss, start_event, end_event)
 	torch_dQ, torch_dK, torch_dV, torch_d_spreads = [i.grad.clone() for i in [Q, K, V, spreads_p]]
-
-	print(torch_d_spreads)
 
 	# # zero grads
 	Q.grad.zero_()
@@ -183,8 +180,9 @@ def torch_attn(Q, K, V, coords, spreads, min_rbf=0.99, max_rbf=0.99, mask=None):
 	coords = coords.contiguous()
 	spreads = spreads.contiguous()
 	mask = mask.contiguous()
+	b = 2
 
-	S = torch.matmul(Q, K.transpose(2,3)) / (2*(d_k**0.5)) # batch x nheads x N x N
+	S = torch.matmul(Q, K.transpose(2,3)) / (b*(d_k**0.5)) # batch x nheads x N x N
 
 	dists = torch.sqrt(torch.sum((coords[:, :, None, :] - coords[:, None, :, :])**2, axis=3))[:, None, :, :]
 
@@ -197,15 +195,9 @@ def torch_attn(Q, K, V, coords, spreads, min_rbf=0.99, max_rbf=0.99, mask=None):
 
 	rbfs = torch.exp(-(dists**2)/(2*(spreads[None, :, None, None]**2)))
 
-	attn_mask = mask[:, None, :, None] | mask[:, None, None, :] | (dists>=max_dist)
+	attn_mask = mask[:, None, :, None] | mask[:, None, None, :] # | (dists>=max_dist)
 
-	#beta = 10
-	#pos_exp = torch.exp(beta*S)
-	#neg_exp = torch.exp(beta*-S)
-
-	#tanhS = (pos_exp - neg_exp) / (pos_exp + neg_exp)
-
-	S = torch.where(attn_mask, float("-inf"), S + rbfs*torch.abs(S)) #rbfs*tanhS))
+	S = torch.where(attn_mask, float("-inf"), S + b*rbfs*torch.abs(S)) #rbfs*tanhS))
 
 	P = torch.softmax(S, dim=-1)
 

@@ -66,6 +66,7 @@ class Output():
 		model hyper-parameters:
 			model parameters: {training_parameters.num_params}
 			d_model: {hyper_parameters.d_model}
+			learnable_wavelengths: {hyper_parameters.learnable_wavelengths}
 			min_wl: {hyper_parameters.min_wl} 
 			max_wl: {hyper_parameters.max_wl} 
 			base_wl: {hyper_parameters.base_wl}
@@ -74,9 +75,12 @@ class Output():
 
 			d_hidden_aa: {hyper_parameters.d_hidden_aa}
 			hidden_layers_aa: {hyper_parameters.hidden_layers_aa}
+			ESM2 weights: {hyper_parameters.esm2_weights_path}
+			learnable_ESM2_weights: {hyper_parameters.learnable_esm}
 
 			number of encoders: {hyper_parameters.encoder_layers}
 			number of attention heads: {hyper_parameters.num_heads}
+			learnable_spreads: {hyper_parameters.learnable_spreads}
 			min_spread: {hyper_parameters.min_spread} 
 			max_spread: {hyper_parameters.max_spread} 
 			base_spread: {hyper_parameters.base_spread}
@@ -99,7 +103,9 @@ class Output():
 			learning rate plateau scaling factor: {training_parameters.lr_scale}
 			learning rate plateau patience: {training_parameters.lr_patience}
 			dropout: {training_parameters.dropout}
+			dropout_attention: {training_parameters.attn_dropout}
 			label-smoothing: {training_parameters.label_smoothing}
+			coordinate_noise_stdev: {training_parameters.noise_coords_std} A
 			
 			{MASK_info}
 

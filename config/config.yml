@@ -1,65 +1,80 @@
-# Configuration for training the model
+# prints each layers gradients after each step so can check for exploding/vanishing gradients
+debug_grad: False 
+
 d_model: 512 # dimensionality of input embeddings
+learnable_wavelengths: False # whether to make wavelengths learnable
 min_wl: 3.7  # minimum wl to use in wavelength sampling
 max_wl: 20.0  # maximum wl to use in wavelength sampling
 base_wl: 20.0  # minimum base to use in wavelength sampling
 d_hidden_we: 1024
 hidden_layers_we: 3
 
+# aa context not used, first optimizing wf embedding by itself
 d_hidden_aa: 1024
 hidden_layers_aa: 3
+learnable_esm: False
 esm2_weights_path: "utils/model_utils/esm2/esm2_t33_650M_UR50D.pt"  # can be a path or the name of the esm2 model.
                                                                     # if the latter, fetched from facebook website
-                                                                    # if not provided, fetches the best match from facebook based on d_model
+                                                                    # if not provided (or empty string), AA embeddings are learned from scratch
 
 encoder_layers: 4 # number of dualcoder layers
 num_heads: 8  # number of attention heads to perform the training with
-min_spread: 3.7
-max_spread: 20.0
+learnable_spreads: False
+min_spread: 3
+max_spread: 8
 base_spread: 10.0
 num_spread: 8
-min_rbf: 0.01
-max_rbf: 0.99
+min_rbf: 0.01 # for masking far residue pairs in attention computation
+max_rbf: 0.99 # not used
 d_hidden_attn: 1024  # intermediate dimensions of decoder feed forward layer
 hidden_layers_attn: 0
 
 temperature: 0.1  # temperature for autoregressive inference (for testing)
 
 # Training configuration
-num_train: 8192  # number of training samples to use; -1 means all available
+num_train: -1  # number of training samples to use; -1 means all available
 num_val: -1  # number of validation samples to use; -1 means all available
 num_test: -1  # number of test samples to use; -1 means all available
 epochs: 100  # number of epochs
 
-# want as few combinations as possible to speed up triton autotuning
+# want as few combinations as possible to speed up triton, since it recompiles for each shape
 max_batch_size: 256  # possible samples per batch
 min_seq_size: 64 # possible sequence lengths
 max_seq_size: 8192 # possible sequence lengths
 batch_tokens: 8192 # number of valid tokens per batch 
-min_resolution: 3.5
+min_resolution: 3.5 # actually max_resolution, will fix the name later
 
 accumulation_steps: 1  # grad accumulation; how many batches to process before learning step
-beta1: 0.9  # learning rate
-beta2: 0.98  # learning rate
-epsilon: 10e-9  # learning rate
-dropout: 0.1  # percentage of dropout
-label_smoothing: 0.1  # percentage of label smoothing to use on the output labels for loss calculation
-loss_type: "mean"  # whether to use the 'sum' or the 'mean' for CEL
-loss_scale: 2000
+beta1: 0.9  # for adam optim 
+beta2: 0.98  # for adam optim
+epsilon: 10e-9  # for adam optim
+dropout: 0.2  # percentage of dropout
+attn_dropout: 0.00  # percentage of dropout for atttention, already heavily masked, 
+                    # and depends mostly on coordinates (RBF computation), 
+                    # which is already regularized by adding gaussian noise
+label_smoothing: 0.0  # percentage of label smoothing to use on the output labels for loss calculation
+loss_type: "sum"  # whether to use the 'sum' or the 'mean' for CEL
+grad_clip_norm: 5.0 # max L2 norm of gradients for gradient clipping. if set to 0, no gradient clipping is applied (not recommended if loss_type is sum)
 lr_type: plateau
 lr_step: 5e-5  # learning rate
-lr_initial_min: 5e-5
+lr_initial_min: 5e-5 # learning rate if doing cyclic, but not fully implemented so these args don't do anything
 lr_initial_max: 1e-4
 lr_final_min: 1e-5
 lr_final_max: 5e-5
 lr_cycle_length: 7.0
 
-lr_scale: 0.1  # LR scaling factor
+lr_scale: 0.1  # LR scaling factor when plateu
 lr_patience: 100  # LR patience for scaling down after plateau
-use_chain_mask: False # whether to mask all chains except the sequence cluster representative
-use_amp: True  # whether to use automatic mixed precision
+use_chain_mask: True # whether to mask all chains except the sequence cluster representative in loss computation
+use_amp: False  # whether to use automatic mixed precision. 
+                # do NOT set this to true, as get exploding 
+                # gradients since my custom kernels cast certain tensor
+                # to fp32, will fix later
 
 # ------------------------------------------------------------------------------
+
+# data augmentation
+noise_coords_std: 0.05 # stdev of noise injection into coordinates
 
 # Input MASK injection
 initial_min_MASK_injection_mean: 1.00  # initial minimum mean percentage of MASK injection injection in training

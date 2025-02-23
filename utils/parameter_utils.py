@@ -148,15 +148,19 @@ class MASK_injection():
 class HyperParameters():
 
 	def __init__(self, 	d_model,
+						learnable_wavelengths,
 						min_wl, max_wl, base_wl, 
 						d_hidden_we, hidden_layers_we, 
-						d_hidden_aa, hidden_layers_aa, esm2_weights_path,
+						d_hidden_aa, hidden_layers_aa, 
+						esm2_weights_path, learnable_esm,
 						encoder_layers, num_heads,
+						learnable_spreads,
 						min_spread, max_spread, base_spread, num_spread,
 						min_rbf, max_rbf,
 						d_hidden_attn, hidden_layers_attn, 
 						temperature, use_model ):
 		self.d_model = d_model
+		self.learnable_wavelengths = learnable_wavelengths
 		self.min_wl = min_wl
 		self.max_wl = max_wl
 		self.base_wl = base_wl 
@@ -165,8 +169,10 @@ class HyperParameters():
 		self.d_hidden_aa = d_hidden_aa
 		self.hidden_layers_aa = hidden_layers_aa
 		self.esm2_weights_path = esm2_weights_path
+		self.learnable_esm = learnable_esm
 		self.encoder_layers = encoder_layers
 		self.num_heads = num_heads
+		self.learnable_spreads = learnable_spreads
 		self.min_spread = min_spread
 		self.max_spread = max_spread 
 		self.base_spread = base_spread 
@@ -186,9 +192,10 @@ class TrainingParameters():
 						lr_initial_min, lr_initial_max, lr_final_min, lr_final_max, lr_cycle_length, # for cyclic
 						lr_scale, lr_patience, lr_step, # for plataeu
 						beta1, beta2, epsilon, # for adam optim
-						dropout, label_smoothing,
-						loss_type, loss_scale, 
-						use_amp, use_chain_mask
+						dropout, attn_dropout, label_smoothing,
+						loss_type, grad_clip_norm, 
+						use_amp, use_chain_mask,
+						noise_coords_std
 				):
 		self.epochs = epochs
 		self.accumulation_steps = accumulation_steps 
@@ -205,10 +212,12 @@ class TrainingParameters():
 		self.beta2 = beta2
 		self.epsilon = epsilon 
 		self.dropout = dropout 
+		self.attn_dropout = attn_dropout 
 		self.label_smoothing = label_smoothing
 		self.loss_type = loss_type 
-		self.loss_scale = loss_scale
+		self.grad_clip_norm = grad_clip_norm
 		self.use_amp = use_amp 
 		self.use_chain_mask = use_chain_mask
+		self.noise_coords_std = noise_coords_std
 
 # ----------------------------------------------------------------------------------------------------------------------

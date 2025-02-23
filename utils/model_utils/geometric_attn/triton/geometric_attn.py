@@ -71,8 +71,8 @@ def _attn_fwd(
 	rng_seed_ptr,
 
 	tot_N: tl.constexpr, tot_Z: tl.constexpr, nheads: tl.constexpr,
-	d_k: tl.constexpr, min_d_k: tl.constexpr, # max(16, d_k) bc tl.dot requires dim>=16
-	softmax_scale: tl.constexpr, 
+	d_k: tl.constexpr, min_d_k: tl.constexpr,
+	softmax_scale: tl.constexpr, b: tl.constexpr,
 	min_rbf: tl.constexpr, max_rbf: tl.constexpr,
 	dropout_p: tl.constexpr,
 
@@ -231,17 +231,8 @@ def _attn_fwd(
 		# set masked positions to -inf, include out of range dists in mask
 		attn_mask = (mask_i[:, None]) & (tl.load(mask_j_ptr, boundary_check=(0,), padding_option="zero").to(tl.int1)[None, :]) & (dists < max_dist) # N x N
 
-		# apply tanh to attn logits so RBFs scale them properly
-		#beta = 1 # large beta for sharper tanh (closer to sign() func)
-		#pos_exp = tl.exp(beta*Sij) # express in base e (2^(x*log2(e)))
-		#neg_exp = tl.exp(beta*-Sij)
-
-		# essentially a sign() function, if Sij is negative, RBF sign flips 
-		#tanhSij = (pos_exp - neg_exp) / (pos_exp + neg_exp)
-
 		# scale attention logits by Rij and mask invalid pairs
-		#SRij = tl.where(attn_mask, Sij + Rij*tanhSij, -inf) # N x N (fp32)
-		SRij = tl.where(attn_mask, Sij + Rij*tl.abs(Sij), -inf) # N x N (fp32)
+		SRij = tl.where(attn_mask, Sij + b*Rij*tl.abs(Sij), -inf) # N x N (fp32)
 
 		# max of each row
 		mij = tl.maximum(mi, tl.max(SRij, axis=1)) # N,  (fp32)
@@ -335,7 +326,7 @@ def _attn_bwd(
 	rng_seed_ptr,
 	
 	tot_Z: tl.constexpr, tot_N: tl.constexpr, nheads: tl.constexpr, 
-	d_k: tl.constexpr, min_d_k: tl.constexpr, softmax_scale: tl.constexpr,
+	d_k: tl.constexpr, min_d_k: tl.constexpr, softmax_scale: tl.constexpr, b: tl.constexpr,
 	min_rbf: tl.constexpr, max_rbf: tl.constexpr,
 	dropout_p: tl.constexpr, 
 
@@ -504,21 +495,12 @@ def _attn_bwd(
 		# compute rbfs (fp32)
 		Rij = tl.exp(-(dists*dists) / (2.0*spread*spread)) # N x N (fp32)
 
-		# apply tanh to attn logits so RBFs scale them properly
-		#beta = 1
-		#pos_exp = tl.exp(beta*Sij)
-		#neg_exp = tl.exp(beta*-Sij)
-
-		# essentially a sign() function, if Sij is negative, RBF sign flips 
-		#tanhSij = (pos_exp - neg_exp) / (pos_exp + neg_exp)
-
 		# mask out attention that is not relevant to this head
 		mask_i = tl.load(mask_i_ptr, boundary_check=(0, ), padding_option="zero").to(tl.int1)
 		attn_mask = (mask_i[:, None]) & (mask_j[None, :]) & (dists < max_dist) # N x N
 
 		# scale attention logits by RBFs
-		#SRij = tl.where(attn_mask, Sij + Rij*tanhSij, -inf) # N x N (fp32)
-		SRij = tl.where(attn_mask, Sij + Rij*tl.abs(Sij), -inf) # N x N (fp32)
+		SRij = tl.where(attn_mask, Sij + b*Rij*tl.abs(Sij), -inf) # N x N (fp32)
 
 		# load log sum exp statistics
 		Li = tl.load(Li_block_ptr, boundary_check=(0, ), padding_option="zero") # (fp32)
@@ -550,11 +532,10 @@ def _attn_bwd(
 
 		# compute dSij, ie grad wrt Sij. note the direct communication between dSij and Rij
 		#dSij = dSRij * (1 + Sij*Rij*beta*(1 - tanhSij*tanhSij)) # N x N
-		dSij = dSRij * (Sij!=0) * tl.where(Sij<0, 1 - Rij, 1 + Rij) # N x N # the abs is used bc for neg, deriv is 1 - 2RS, but S is negative, so goes to 1 + 2Rabs(S)
+		dSij = dSRij * (Sij!=0) * tl.where(Sij<0, 1 - b*Rij, 1 + b*Rij) # N x N # the abs is used bc for neg, deriv is 1 - 2RS, but S is negative, so goes to 1 + 2Rabs(S)
 
 		# compute gradient wrt rbfs. also direct communication between dRij and Sij
-		#dRij = dSRij * Sij * tanhSij
-		dRij = dSRij * tl.abs(Sij)
+		dRij = dSRij * b * tl.abs(Sij)
 
 		# compute the gradient wrt the spread of this head
 		# 		d_rbfs/dspreads  = d/dspreads exp(-(d^2)/(2*sigma^2))
@@ -627,7 +608,10 @@ class _geometric_attn(torch.autograd.Function):
 		assert (Q.shape == K.shape) and (K.shape == V.shape), f"Q, K, and V projection shapes must match, but got {Q.shape=}, {K.shape=}, {V.shape=}"
 		batch, nheads, N, d_k = Q.shape
 		d_model = nheads*d_k
-		softmax_scale = 1/((d_k**0.5)*2) # divide by 2 bc rbfs scale logits by two at most
+		b = 4 # how much to scale the rbf term by. higher values emphasize geometry over attention, lower values emphasize attention 
+		softmax_scale = 1/(b*(d_k**0.5)) 	# attn is now S = S + b*rbf*S, so dividing by b renormalizes logits 
+												# close to original value, not b+1 bc rbf is always <= 1, 
+												# so rescaled exactly would make logits smaller than they were before
 		assert d_model % 2 == 0, f"d_model must be divisible by 2, not {d_model=}"
 		assert coords.dim() == 3 and coords.size(2) == 3, f"coordinates must be of shape (batch, N, 3), not {coords.shape}" 
 
@@ -672,7 +656,7 @@ class _geometric_attn(torch.autograd.Function):
 							L, L.stride(0), L.stride(1), L.stride(2), # batch x nhead x N
 							mask, mask.stride(0), mask.stride(1), # batch x N
 							rng_seed,
-							N, batch, nheads, d_k, max(d_k, 16), softmax_scale,
+							N, batch, nheads, d_k, max(d_k, 16), softmax_scale, b,
 							min_rbf, max_rbf, dropout
 						)
 
@@ -683,6 +667,7 @@ class _geometric_attn(torch.autograd.Function):
 		# for backwards pass
 		ctx.save_for_backward(Q, K, V, out, L, coords, spreads, min_dist, max_dist, mask, rng_seed)
 		ctx.softmax_scale = softmax_scale
+		ctx.b = b
 		ctx.dropout = dropout
 		ctx.min_rbf = min_rbf
 		ctx.max_rbf = max_rbf
@@ -734,7 +719,7 @@ class _geometric_attn(torch.autograd.Function):
 							d_spreads, d_spreads.stride(0),
 							mask, mask.stride(0), mask.stride(1),
 							rng_seed,
-							batch, N, nheads, d_k, max(d_k, 16), ctx.softmax_scale,
+							batch, N, nheads, d_k, max(d_k, 16), ctx.softmax_scale, ctx.b,
 							ctx.min_rbf, ctx.max_rbf, ctx.dropout
 						 )
 

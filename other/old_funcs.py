@@ -2,7 +2,6 @@
 
 import torch
 
-
 class PositionalEncoding(nn.Module):
 	def __init__(self, N, d_model=512):
 		super(PositionalEncoding, self).__init__()
@@ -91,42 +90,6 @@ class StaticLayerNorm(nn.Module):
 		# Normalize to zero mean and unit variance without learned parameters
 		x_normalized = (x - mean) / torch.sqrt(var + self.eps)
 		return x_normalized
-
-class Encoder(nn.Module):
-	def __init__(self, d_model=512, nhead=8, dim_feedforward=1024, dropout=0.1):
-		super(Encoder, self).__init__()
-
-		# Self-attention layer
-		self.self_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=True)
-		
-		# Feed-forward network
-		self.linear1 = nn.Linear(d_model, dim_feedforward)
-		self.dropout = nn.Dropout(dropout)
-		self.linear2 = nn.Linear(dim_feedforward, d_model)
-		
-		# Normalization layers
-		self.norm1 = nn.LayerNorm(d_model)
-		self.norm2 = nn.LayerNorm(d_model)
-		
-		# Dropout
-		self.dropout1 = nn.Dropout(dropout)
-		self.dropout2 = nn.Dropout(dropout)
-
-	def forward(self, src, src_key_padding_mask=None):
-
-		# Multi-head self-attention
-		src2, _ = self.self_attn(src, src, src,
-							key_padding_mask=src_key_padding_mask,
-							need_weights=False)
-		src = src + self.dropout1(src2)
-		src = self.norm1(src)
-		
-		# Feed-forward network
-		src2 = self.linear2(self.dropout(F.gelu(self.linear1(src))))
-		src = src + self.dropout2(src2)
-		src = self.norm2(src)
-
-		return src
 
 def pt_to_data(pts: Path, all_bb: int=0, device="cpu", features=False, num_inputs=512, max_size=10000):
 	all_tensors = []
