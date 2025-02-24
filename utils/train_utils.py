@@ -10,7 +10,6 @@ import torch
 import torch.optim.lr_scheduler as lr_scheduler
 from torch.amp import autocast, GradScaler
 from torch.nn.functional import one_hot as onehot
-from torch import nn
 from torch.nn import CrossEntropyLoss as CEL
 
 from tqdm import tqdm
@@ -20,7 +19,6 @@ from proteusAI import proteusAI
 from utils.parameter_utils import HyperParameters, TrainingParameters, MASK_injection
 from utils.io_utils import Output
 from utils.data_utils import DataHolder
-from data.constants import blosum100
 
 # ----------------------------------------------------------------------------------------------------------------------
 
@@ -52,6 +50,7 @@ class TrainingRun():
                                                     args.learnable_wavelengths,
                                                     args.min_wl, args.max_wl, args.base_wl, 
                                                     args.d_hidden_we, args.hidden_layers_we, 
+                                                    args.use_aa,
                                                     args.d_hidden_aa, args.hidden_layers_aa, 
                                                     args.esm2_weights_path, args.learnable_esm,
                                                     args.encoder_layers, args.num_heads,
@@ -64,7 +63,8 @@ class TrainingRun():
         
         self.training_parameters = TrainingParameters(  args.epochs,
                                                         args.accumulation_steps, 
-                                                        args.lr_type, # cyclic or plataeu
+                                                        args.lr_type, # cyclic, attn, or plataeu
+                                                        args.warmup_steps, # for attn
                                                         args.lr_initial_min, args.lr_initial_max, args.lr_final_min, args.lr_final_max, args.lr_cycle_length, # for cyclic
                                                         args.lr_scale, args.lr_patience, args.lr_step, # for plataeu
                                                         args.beta1, args.beta2, args.epsilon, # for adam optim
@@ -86,7 +86,7 @@ class TrainingRun():
                                 args.min_seq_size, args.max_seq_size, 
                                 args.use_chain_mask, args.min_resolution
                             )
-        self.output = Output(args.out_path, args.loss_plot, args.seq_plot, args.weights_path, args.write_dot)
+        self.output = Output(args.out_path, args.loss_plot, args.seq_plot, args.weights_path, args.write_dot, args.model_checkpoints)
 
         self.train_losses = Losses()
         self.val_losses = Losses() # validation with all tokens being MASK
@@ -142,6 +142,7 @@ class TrainingRun():
                                 self.hyper_parameters.d_hidden_we,
                                 self.hyper_parameters.hidden_layers_we,
 
+                                self.hyper_parameters.use_aa,
                                 self.hyper_parameters.d_hidden_aa,
                                 self.hyper_parameters.hidden_layers_aa,
 
@@ -169,8 +170,8 @@ class TrainingRun():
         self.model.to(self.gpu)
 
         if self.hyper_parameters.use_model is not None:
-            pretrained_weights = torch.load(self.hyper_parameters.use_model, map_location=self.gpu)
-            self.model.load_state_dict(pretrained_weights, weights_only=True)
+            pretrained_weights = torch.load(self.hyper_parameters.use_model, map_location=self.gpu, weights_only=True)
+            self.model.load_state_dict(pretrained_weights)
         
         self.training_parameters.num_params = sum(p.numel() for p in self.model.parameters())
 
@@ -189,7 +190,7 @@ class TrainingRun():
         '''
 
         self.output.log.info("loading optimizer...")
-        self.optim = torch.optim.Adam(self.model.parameters(), lr=self.training_parameters.lr_step, 
+        self.optim = torch.optim.Adam(self.model.parameters(), lr=(self.training_parameters.lr_step if self.training_parameters.lr_type == "plateu" else 1.0), # the lambda lr scales it
                                     betas=(self.training_parameters.beta1, self.training_parameters.beta2), 
                                     eps=self.training_parameters.epsilon)
         self.optim.zero_grad()
@@ -219,11 +220,17 @@ class TrainingRun():
             lr = midpoint + amplitude*math.sin(2*math.pi*epoch/self.training_parameters.lr_cycle_length)
             
             return lr
+
+        def attn_lr(step):
+            '''lr scheduler from attn paper'''
+            return (self.hyper_parameters.d_model**(-0.5)) * min((step+1)**(-0.5), (step+1)*(self.training_parameters.warmup_steps**(-1.5)))
         
         if self.training_parameters.lr_type == "plateau":
             self.scheduler = lr_scheduler.ReduceLROnPlateau(self.optim, mode='min', factor=self.training_parameters.lr_scale, patience=self.training_parameters.lr_patience) 
-        else:
+        elif self.training_parameters.lr_type == "cyclic":
             self.scheduler = lr_scheduler.LambdaLR(self.optim, cyclic_lr)
+        elif self.training_parameters.lr_type == "attn":
+            self.scheduler = lr_scheduler.LambdaLR(self.optim, attn_lr)
 
     def setup_loss_function(self):
         '''
@@ -269,9 +276,11 @@ class TrainingRun():
                             f"for {self.training_parameters.epochs} epochs.\n" )
         
         # loop through epochs
-        for epoch in range(self.training_parameters.epochs):
-            epoch = Epoch(epoch, self)
+        for epoch_idx in range(self.training_parameters.epochs):
+            epoch = Epoch(epoch_idx, self)
             epoch.epoch_loop()
+            if (epoch_idx+1) % self.output.model_checkpoints == 0:
+                self.output.save_model(self.model, f"e{epoch_idx}_s{round(epoch.losses.get_avg()[1],2)}")
 
         self.output.plot_training(self.train_losses, self.val_losses, self.val_losses_context)
         self.output.save_model(self.model)
@@ -347,7 +356,7 @@ class TrainingRun():
                     
                 batch = Batch(label_batch, coords_batch, chain_mask, key_padding_mask, 
                                 use_amp=False, 
-                                auto_regressive=False, # set to false until i incorporate AA context 
+                                auto_regressive=self.training_parameters.use_aa, # only do autoregressive if using aa modules 
                                 temp=self.hyper_parameters.temperature, 
                             )
 
@@ -401,8 +410,10 @@ class Epoch():
 
         # setup the epoch
         self.training_run_parent.MASK_injection.calc_mean_MASK(self)
-        self.training_run_parent.output.log_epoch(self, self.training_run_parent.optim, self.training_run_parent.model, self.training_run_parent.MASK_injection)
+        self.training_run_parent.output.log_epoch(self, self.training_run_parent.scheduler.get_last_lr()[0], self.training_run_parent.model, self.training_run_parent.MASK_injection)
 
+        scheduler = self.training_run_parent.scheduler if self.training_run_parent.training_parameters.lr_type=="attn" else None # attn updates every step, others every epoch
+        
         # loop through batches
         epoch_pbar = tqdm(total=len(self.training_run_parent.data.train_data), desc="epoch_progress", unit="step")
         for b_idx, (label_batch, coords_batch, chain_mask, key_padding_mask) in enumerate(self.training_run_parent.data.train_data):
@@ -420,7 +431,7 @@ class Epoch():
             batch.noise_coords(self.training_run_parent.training_parameters.noise_coords_std)
 
             # learn
-            batch.batch_learn()
+            batch.batch_learn(scheduler=scheduler)
 
             # compile batch losses for logging
             self.gather_batch_losses(batch)
@@ -431,11 +442,12 @@ class Epoch():
         self.training_run_parent.output.log_epoch_losses(self, self.training_run_parent.train_losses)
 
         # run validation
-        self.training_run_parent.batch_MASK_validation(self)
-        self.training_run_parent.all_MASK_validation()
+        self.training_run_parent.batch_MASK_validation(self) # not using context for now
+        self.training_run_parent.all_MASK_validation() 
 
         # lr scheduler update
-        self.training_run_parent.scheduler.step(self.training_run_parent.val_losses_context.losses[-1])
+        if scheduler is None:
+            self.training_run_parent.scheduler.step(self.training_run_parent.val_losses_context.losses[-1])
 
         # switch representative cluster samples
         if self.epoch < (self.epochs - 1):
@@ -491,10 +503,9 @@ class Batch():
 
         self.coords = self.coords + noise
 
-    def batch_learn(self):
+    def batch_learn(self, scheduler=None):
         '''
-        a single iteration over a batch. applies the input perturbation parameters calculated by self.setup_epoch to each batch
-        performs the forward pass, as well as the backwards pass and stores losses
+        a single iteration over a batch.
 
         Args:
             None
@@ -507,7 +518,7 @@ class Batch():
         self.batch_forward(self.epoch_parent.training_run_parent.model, self.epoch_parent.training_run_parent.loss_function, self.epoch_parent.training_run_parent.gpu)
 
         # backward pass
-        self.batch_backward()
+        self.batch_backward(scheduler)
 
     def batch_forward(self, model, loss_function, device):
         '''
@@ -528,7 +539,7 @@ class Batch():
         # move batch to gpu
         self.move_to(device)
 
-        # mask one hot positions for loss. also only compute loss for the representative chain of the sequence cluster
+        # mask one hot positions for loss. also only compute loss for the representative chain of the sequence cluster (unless config says not to, then chain mask is all zeros)
         self.labels = torch.where(self.onehot_mask | self.chain_mask | self.key_padding_mask, -1, self.labels)
 
         # print gradients at each step if in debugging mode
@@ -551,7 +562,7 @@ class Batch():
 
         self.outputs.get_losses(loss_function)
 
-    def batch_backward(self):
+    def batch_backward(self, scheduler=None):
 
         accumulation_steps = self.epoch_parent.training_run_parent.training_parameters.accumulation_steps
         scaler = self.epoch_parent.training_run_parent.scaler
@@ -573,6 +584,8 @@ class Batch():
                 scaler.step(optim)
                 scaler.update()
                 optim.zero_grad()
+                if scheduler is not None:
+                    scheduler.step()
         else:
             loss.backward()
             if learn_step:
@@ -580,6 +593,8 @@ class Batch():
                     torch.nn.utils.clip_grad_norm_(self.epoch_parent.training_run_parent.model.parameters(), max_norm=self.epoch_parent.training_run_parent.training_parameters.grad_clip_norm)
                 optim.step()
                 optim.zero_grad()
+                if scheduler is not None:
+                    scheduler.step()
 
     def get_outputs(self, model):
         '''
@@ -643,18 +658,7 @@ class ModelOutputs():
         predictions_flat = prediction.view(-1, prediction.size(2)).to(torch.float32)
         labels_flat = self.labels.view(-1).long()
 
-        if type(loss_function).__name__ == "SquaredDistanceLoss":
-
-            mask = labels_flat==-1
-
-            # note that the rows are normalized, not the columns
-            blosum_flat = blosum100[labels_flat, :]
-
-            # compute loss
-            loss = loss_function(predictions_flat, blosum_flat, mask)
-
-        else:
-            loss = loss_function(predictions_flat, labels_flat)
+        loss = loss_function(predictions_flat, labels_flat)
 
         # compute seq sim
         seq_sim = self.compute_seq_sim(prediction)
@@ -703,33 +707,3 @@ class Losses():
     def to_numpy(self):
         '''utility when plotting losses w/ matplotlib'''
         self.losses = [loss.detach().to("cpu").numpy() for loss in self.losses if isinstance(loss, torch.Tensor)]
-
-class SquaredDistanceLoss(nn.Module):
-    def __init__(self, reduction):
-        super(SquaredDistanceLoss, self).__init__()
-
-        self.reduction = reduction 
-        assert self.reduction in ["mean", "sum", "none"]
-
-    def forward(self, prediction, true, mask, temp=2.0): # expects logits and probs, respectively
-
-        # check if shapes match
-        assert prediction.dim() == true.dim() == 2
-        assert mask.dim() == 1
-        assert prediction.size(1) == true.size(1)
-        assert prediction.size(0) == true.size(0) == mask.size(0)
-
-        # compute probs and log probs of logits
-        # allow temp scaling, might start with high temp and lower over epochs to avoid extreme gradients at the beginning
-        prediction_probs = torch.softmax(prediction, dim=1)
-
-        sqrd_dist = ((prediction_probs - true)**2).sum(dim=1)
-
-        # apply reduction
-        if self.reduction == "mean":
-            sqrd_dist = torch.where(mask, 0, sqrd_dist).sum() / (~mask).sum()
-        elif self.reduction == "sum":
-            sqrd_dist = torch.where(mask, 0, sqrd_dist).sum()
-        # else no reduction
-
-        return sqrd_dist

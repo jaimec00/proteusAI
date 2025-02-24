@@ -97,7 +97,7 @@ class AminoAcidEmbedding(nn.Module):
 			self.esm2_layernorm.weight.data = esm2_weights["esm2_layernorm.weight"]
 			self.esm2_layernorm.bias.data = esm2_weights["esm2_layernorm.bias"]
 
-			if learnable_esm:
+			if not learnable_esm:
 				self.esm2_linear_nobias.weight.requires_grad = False
 				self.esm2_layernorm.weight.requires_grad = False
 				self.esm2_layernorm.bias.requires_grad = False
@@ -117,7 +117,9 @@ class AminoAcidEmbedding(nn.Module):
 			aas = self.esm2_linear_nobias(aas)
 			aas = self.esm2_layernorm(aas)
 
-		aas = self.norm2(self.dropout(self.ffn(self.norm1(self.linear(aas) + wf))))
+		aas = self.norm1(self.linear(aas) + wf)
+
+		aas = self.norm2(aas + self.dropout(self.ffn(aas)))
 
 		return aas
 
@@ -135,7 +137,7 @@ class WavefunctionEmbedding(nn.Module):
 	def __init__(self, d_model=512, min_wl=3.7, max_wl=20, base=20, d_hidden=1024, hidden_layers=0, learnable_wavelengths=False, dropout=0.1):
 		super(WavefunctionEmbedding, self).__init__()
 
-		# compute wavenumbers from wavelengths
+		# compute wavelengths
 		self.register_buffer("wavelengths", min_wl + (max_wl - min_wl) * (torch.logspace(0,1,d_model//2, base) - 1) / (base - 1))
 
 		self.learnable_wavelengths = learnable_wavelengths
@@ -328,6 +330,7 @@ class proteusAI(nn.Module):
 						d_hidden_wl=1024, hidden_layers_wl=0, 
 
 						# aa mlp
+						use_aa=True,
 						d_hidden_aa=1024, hidden_layers_aa=0, 
 						esm2_weights_path="esm2_t12_35M_UR50D", learnable_esm=False,
 
@@ -350,10 +353,19 @@ class proteusAI(nn.Module):
 		self.wf_embedding = WavefunctionEmbedding(d_model, min_wl, max_wl, base_wl, d_hidden_wl, hidden_layers_wl, learnable_wavelengths, dropout)
 
 		# amino acids
-		# self.aa_embedding = AminoAcidEmbedding(21, d_model, esm2_weights_path, d_hidden_aa, hidden_layers_aa, learnable_esm, dropout)
+		# init aa embedding even if not used, so that state dict loads properly when used without having to use strict=False kwarg
+		self.use_aa = use_aa
+		self.aa_embedding = AminoAcidEmbedding(21, d_model, esm2_weights_path, d_hidden_aa, hidden_layers_aa, learnable_esm, dropout)
 
 		# encoders
-		self.encoders = nn.ModuleList([Encoder(d_model, d_hidden_attn, hidden_layers_attn, n_head, min_spread, max_spread, base_spreads, num_spread, min_rbf, max_rbf, learnable_spreads, dropout, attn_dropout) for _ in range(encoder_layers)])
+		self.encoders = nn.ModuleList([
+										Encoder(	d_model, d_hidden_attn, hidden_layers_attn, 
+													n_head, min_spread, max_spread, base_spreads, 
+													num_spread, min_rbf, max_rbf, learnable_spreads, 
+													dropout, attn_dropout
+												) 
+										for _ in range(encoder_layers)
+									])
 
 		# map to aa probs
 		self.out_proj = nn.Linear(d_model, 20)
@@ -377,8 +389,8 @@ class proteusAI(nn.Module):
 		if auto_regressive:
 			return self.auto_regressive(wf, coords, aas, key_padding_mask, temp)
 
-		# aa embedding + wf_encoding + ffn
-		# aas = self.aa_embedding(aas, wf)
+		if self.use_aa:
+			wf = self.aa_embedding(aas, wf)
 
 		# bidirectional encoder
 		seq_probs = self.encode(wf, coords, key_padding_mask) # batch x N x d_model (returns aa probability logits)
@@ -396,53 +408,54 @@ class proteusAI(nn.Module):
 
 	# will prob move this outside the model, and just have the input be ca and cb coords directly
 	# will import AA sizes so can update the cb magnitudes auto regressively (possibly include pKa based phase shifts too)
-	def get_coords(self, coords, key_padding_mask, chain_idxs): # chain dict
-		if coords.dim() == 3: # Ca ony model
-			coords_beta = get_Cb_from_Ca(coords, key_padding_mask, chain_idxs)
-			coords_alpha = coords
-		if coords.dim() == 4: # backbone model
-			coords_alpha, coords_beta = get_Cb_from_BB(coords, key_padding_mask, chain_idxs)
+	# def get_coords(self, coords, key_padding_mask, chain_idxs): # chain dict
+	# 	if coords.dim() == 3: # Ca ony model
+	# 		coords_beta = get_Cb_from_Ca(coords, key_padding_mask, chain_idxs)
+	# 		coords_alpha = coords
+	# 	if coords.dim() == 4: # backbone model
+	# 		coords_alpha, coords_beta = get_Cb_from_BB(coords, key_padding_mask, chain_idxs)
 
-	def get_Cb_from_Ca(self, coords, key_padding_mask, chain_idxs):
-		'''
-		note, that need to include chain mask and key_padding_mask to do this properly, in progress, same goes for get_Cb_from_BB
+	# def get_Cb_from_Ca(self, coords, key_padding_mask, chain_idxs):
+	# 	'''
+	# 	note, that need to include chain mask and key_padding_mask to do this properly, in progress, same goes for get_Cb_from_BB
 
-		compute beta carbon coords (not absolute, just relative to Ca). not used yet, need to adapt wf_embedding to use this info
-		approximates N and C as being on the line connecting adjacent Ca, with ideal bond distances
-		uses the same experimentally determined constants as PMPNN to compute linear combination of b1, b2, and b3
-		terminal Ca do not have Cb (can't approximate N and C, since no adjacent Ca), so Cb coords are (0,0,0) for these
-		'''
+	# 	compute beta carbon coords (not absolute, just relative to Ca). not used yet, need to adapt wf_embedding to use this info
+	# 	approximates N and C as being on the line connecting adjacent Ca, with ideal bond distances
+	# 	uses the same experimentally determined constants as PMPNN to compute linear combination of b1, b2, and b3
+	# 	terminal Ca do not have Cb (can't approximate N and C, since no adjacent Ca), so Cb coords (relative to Ca) are (0,0,0) for these
+	# 	'''
 
-		logical_n = coords[:, 0:-2, :]
-		logical_ca = coords[:, 1:-1, :]
-		logical_c = coords[:, 2:, :]
+	# 	logical_n = coords[:, 0:-2, :]
+	# 	logical_ca = coords[:, 1:-1, :]
+	# 	logical_c = coords[:, 2:, :]
 
-		b1 = ( logical_ca - logical_n)
-		b1 = 1.458 * b1 / torch.linalg.norm(b1, dim=2, keepdims=True)
-		b2 = (logical_c - logical_ca)
-		b2 = 1.525 * b2 / torch.linalg.norm(b2, dim=2, keepdims=True)
-		b3 = torch.linalg.cross(b1, b2)
+	# 	b1 = ( logical_ca - logical_n)
+	# 	b1 = 1.458 * b1 / torch.linalg.norm(b1, dim=2, keepdims=True)
+	# 	b2 = (logical_c - logical_ca)
+	# 	b2 = 1.525 * b2 / torch.linalg.norm(b2, dim=2, keepdims=True)
+	# 	b3 = torch.linalg.cross(b1, b2)
 
-		cb = -0.58273431*b2 + 0.56802827*b1 - 0.54067466*b3
+	# 	cb = -0.58273431*b2 + 0.56802827*b1 - 0.54067466*b3
 
-		# the first and last ca are used as inplace cb, so make cb=ca for these
-		cb = torch.cat([coords[0][None, :], cb, coords[-1][None, :]], dim=0) 
+	# 	# the first and last ca are used as inplace cb, so make cb=ca for these
+	# 	# no_cb = 
+	# 	# cb = torch.cat([, cb, coords[:, -1, :][None, :]], dim=1) 
 
-		return cb
+	# 	return cb
 
-	def get_Cb_from_BB(self, coords):
+	# def get_Cb_from_BB(self, coords):
 
-		n = coords[:, :, 0, :]
-		ca = coords[:, :, 1, :]
-		c = coords[:, :, 2, :]
+	# 	n = coords[:, :, 0, :]
+	# 	ca = coords[:, :, 1, :]
+	# 	c = coords[:, :, 2, :]
 		
-		b1 = ca - n
-		b2 = c - ca
-		b3 = torch.linalg.cross(b1, b2)
+	# 	b1 = ca - n
+	# 	b2 = c - ca
+	# 	b3 = torch.linalg.cross(b1, b2)
 
-		cb = -0.58273431*b2 + 0.56802827*b1 - 0.54067466*b3
+	# 	cb = -0.58273431*b2 + 0.56802827*b1 - 0.54067466*b3
 
-		return ca, cb
+	# 	return ca, cb
 
 	def auto_regressive(self, wf, coords, aas, key_padding_mask=None, temp=0.1):
 

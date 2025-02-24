@@ -39,10 +39,8 @@ if __name__ == "__main__":
 
 	# debugging
 	parser.add_argument("--debug_grad", default=False, type=bool, help="prints grad of each layer at each step")
-
-	# hyper parameters
 	
-	# model 
+	# model dim
 	parser.add_argument("--d_model", default=512, type=int, help="dimensionality of input embeddings")
 	
 	# wavefunction embedding
@@ -53,13 +51,14 @@ if __name__ == "__main__":
 	parser.add_argument("--d_hidden_we", default=1024, type=int, help="hidden dimensions in post wavefunction embedding MLP")
 	parser.add_argument("--hidden_layers_we", default=0, type=int, help="number of hidden layers in post wavefunction embedding MLP")
 
-	# aa embedding (just an MLP)
+	# aa embedding (not used, optimizing based on structure alone first)
+	parser.add_argument("--use_aa", default=True, type=bool, help="whether to use amino acid context or just predict from structure")
 	parser.add_argument("--d_hidden_aa", default=1024, type=int, help="hidden dimensions in AA embedding MLP")
 	parser.add_argument("--hidden_layers_aa", default=0, type=int, help="number hidden layers in AA embedding MLP")
 	parser.add_argument("--esm2_weights_path", default="", type=str, help="path to pretrained esm2 weights. can also be just the name of the model to use. if nothing is provided, the weights corresponding best to d_model are downloaded from facebook website")
 	parser.add_argument("--learnable_esm", default=False, type=bool, help="whether to make esm weights learnable")
 	
-	# dualcoder
+	# encoder
 	parser.add_argument("--encoder_layers", default=4, type=int, help="number of encoder layers")
 	parser.add_argument("--num_heads", default=8, type=int, help="number of attention heads")
 	parser.add_argument("--learnable_spreads", default=False, type=bool, help="whether to make spreads learnable")
@@ -99,7 +98,8 @@ if __name__ == "__main__":
 	parser.add_argument("--grad_clip_norm", default=5.0, type=float, help="max gradient L2 norm for gradient clipping. if 0.0, no gradient clipping is applied")
 
 	parser.add_argument("--lr_step", default=0.00005, type=float, help="learning rate")
-	parser.add_argument("--lr_type", default="custom", type=str, choices=["plateu, custom"], help="LR type")
+	parser.add_argument("--lr_type", default="custom", type=str, choices=["plateu", "cyclic", "attn"], help="LR type")
+	parser.add_argument("--warmup_steps", default=4000, type=int, help="warmup steps for attn scheduler")
 	parser.add_argument("--lr_scale", default=0.1, type=float, help="LR scaling factor")
 	parser.add_argument("--lr_patience", default=5, type=int, help="LR patience for scaling down after plateu")
 	parser.add_argument("--lr_initial_min", default=5e-5, type=float,  help="initial lr rate minimum")
@@ -135,11 +135,13 @@ if __name__ == "__main__":
 	parser.add_argument("--seq_plot", default="seq_sim_vs_epoch.png", type=Path, help="path to save plot of sequence similarity vs epochs after training")
 	parser.add_argument("--weights_path", default="model_parameters.pth", type=Path, help="path to save weights after training")
 	parser.add_argument("--write_dot", default=False, type=bool, help="whether to save the dot file of the computational graph")
+	parser.add_argument("--model_checkpoints", default=20, type=int, help="number of epochs to save the model after")
+
 
 	# input
 	parser.add_argument("--data_path", default="/gpfs_backup/wangyy_data/protAI/pmpnn_data/pdb_2021aug02", type=Path, help="path to data")
 	parser.add_argument("--use_model", default=None, type=Path, help="use pretrained model")
-	parser.add_argument("--config", default="config.yml", type=Path, help="Path to the YAML config file")
+	parser.add_argument("--config", default="config/config.yml", type=Path, help="Path to the YAML config file")
 
 	args, _ = parser.parse_known_args()
 	

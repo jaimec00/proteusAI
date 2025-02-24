@@ -151,6 +151,7 @@ class HyperParameters():
 						learnable_wavelengths,
 						min_wl, max_wl, base_wl, 
 						d_hidden_we, hidden_layers_we, 
+						use_aa,
 						d_hidden_aa, hidden_layers_aa, 
 						esm2_weights_path, learnable_esm,
 						encoder_layers, num_heads,
@@ -166,6 +167,7 @@ class HyperParameters():
 		self.base_wl = base_wl 
 		self.d_hidden_we = d_hidden_we
 		self.hidden_layers_we = hidden_layers_we 
+		self.use_aa = use_aa
 		self.d_hidden_aa = d_hidden_aa
 		self.hidden_layers_aa = hidden_layers_aa
 		self.esm2_weights_path = esm2_weights_path
@@ -188,7 +190,8 @@ class TrainingParameters():
 
 	def __init__(self, 	epochs,
 						accumulation_steps, 
-						lr_type, # cyclic or plataeu
+						lr_type, # cyclic, attn or plataeu
+						warmup_steps, # for attn
 						lr_initial_min, lr_initial_max, lr_final_min, lr_final_max, lr_cycle_length, # for cyclic
 						lr_scale, lr_patience, lr_step, # for plataeu
 						beta1, beta2, epsilon, # for adam optim
@@ -200,6 +203,7 @@ class TrainingParameters():
 		self.epochs = epochs
 		self.accumulation_steps = accumulation_steps 
 		self.lr_type = lr_type 
+		self.warmup_steps = warmup_steps
 		self.lr_initial_min = lr_initial_min
 		self.lr_initial_max = lr_initial_max
 		self.lr_final_min = lr_final_min

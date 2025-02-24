@@ -19,7 +19,7 @@ import sys
 
 class Output():
 
-	def __init__(self, out_path, loss_plot=Path("loss_plot.png"), seq_plot=Path("seq_sim_plot.png"), weights_path=Path("model_parameters.pth"), write_dot=False):
+	def __init__(self, out_path, loss_plot=Path("loss_plot.png"), seq_plot=Path("seq_sim_plot.png"), weights_path=Path("model_parameters.pth"), write_dot=False, model_checkpoints=20):
 
 		out_path.mkdir(parents=True, exist_ok=True)
 		self.out_path = out_path
@@ -28,6 +28,8 @@ class Output():
 		self.weights_path = self.out_path / weights_path
 		self.write_dot = write_dot
 		self.log = self.setup_logging(self.out_path / Path("log.txt"))
+		self.model_checkpoints = model_checkpoints
+
 
 	def setup_logging(self, log_file):
 
@@ -114,11 +116,8 @@ class Output():
 
 		self.log.info(log)
 
-	def log_epoch(self, epoch, optim, model, MASK_injection):
+	def log_epoch(self, epoch, current_lr, model, MASK_injection):
 
-		for param_group in optim.param_groups:
-			current_lr = param_group['lr']
-	
 		self.log.info(textwrap.dedent(f'''
 		
 			{'-'*80}
@@ -199,9 +198,13 @@ class Output():
 		dot = make_dot(output, params=dict(model.named_parameters()))
 		dot.render(self.dot_out, format="pdf")
 
-	def save_model(self, model):
-		torch.save(model.state_dict(), self.weights_path)
-		self.log.info(f"weights saved to {self.weights_path}")
+	def save_model(self, model, appended_str=""):
+		if appended_str:
+			weights_path = self.weights_path.parent / Path(f"{'.'.join(self.weights_path.name.split(".")[:-1])}_{appended_str}.{self.weights_path.name.split(".")[-1]}") 
+		else:
+			weights_path = self.weights_path
+		torch.save(model.state_dict(), weights_path)
+		self.log.info(f"weights saved to {weights_path}")
 
 	def write_new_clusters(self, cluster_info, val_clusters, test_clusters):
 
@@ -221,35 +224,4 @@ class Output():
 		# save training pdbs
 		cluster_info.to_csv(self.out_path / Path("list.csv"), index=False)
 
-	def plot_aa_counts(self, aa_counts, file=Path("aa_hist.png")):
-
-		aas = aa_counts.keys()
-		counts = aa_counts.values()
-
-		plt.bar(aas, counts)
-
-		plt.xlabel('Amino Acids')
-		plt.ylabel('Count')
-		plt.title('Amino Acid Counts')
-
-		plt.savefig(self.out_path / file)
-
-		self.log.info(f"bar graph of aa counts saved to {self.out_path / file}")
-
-		plt.figure()
-
-	def plot_seq_len_hist(self, seq_lens, bins=20, file=Path("seq_len_hist.png")):
-		
-		plt.hist(seq_lens, bins=bins, edgecolor="black", alpha=0.7)
-
-		plt.xlabel('Sequence Length')
-		plt.ylabel('Count')
-		plt.title('Sequence Length Histogram')
-
-		plt.savefig(self.out_path / file)
-
-		self.log.info(f"histogram of sequence lengths saved to {self.out_path / file}")
-
-
-		plt.figure()
 # ----------------------------------------------------------------------------------------------------------------------

@@ -17,52 +17,6 @@ def lbl_2_aa(label):
     else:
         return alphabet[label]
 
-aa_freqs = {
-    'A': 0.074,
-    'C': 0.025,
-    'D': 0.050,
-    'E': 0.061,
-    'F': 0.042,
-    'G': 0.072,
-    'H': 0.023,
-    'I': 0.053,
-    'K': 0.064,
-    'L': 0.089,
-    'M': 0.023,
-    'N': 0.045,
-    'P': 0.052,
-    'Q': 0.040,
-    'R': 0.052,
-    'S': 0.073,
-    'T': 0.056,
-    'V': 0.064,
-    'W': 0.013,
-    'Y': 0.034
-}
-# blosum matrices are from https://ftp.ncbi.nlm.nih.gov/blast/matrices
-blosum_scales = { # each matrix is stored in different bit units
-    "blosum30": 1/5,
-    "blosum45": 1/3,
-    "blosum100": 1/3
-}
-def get_blosum_probs(name):
-
-    # stored in 1/5 bits
-    blosum_path = Path(f"{Path(__file__).parent}/{name}.csv")
-    # blosum_np = pd.read_csv(blosum_path, index_col=0).loc[canonical_aas, canonical_aas].to_numpy()*blosum_scales[name] * math.log(2)
-    # blosum_torch = torch.tensor(blosum_np, device=("cuda" if torch.cuda.is_available() else "cpu"))
-    # blosum = torch.softmax(blosum_torch, dim=1)
-    # convert to probabilities
-    bits_to_probs = lambda x: pd.Series([aa_freqs[x.name]*aa_freqs[aa]*(2**(x.at[aa]*math.log(math.e,2)*blosum_scales[name])) for aa in x.index])
-    blosum_np = pd.read_csv(blosum_path, index_col=0).loc[canonical_aas, canonical_aas].apply(bits_to_probs, axis=1).to_numpy()
-    blosum_torch = torch.tensor(blosum_np, device=("cuda" if torch.cuda.is_available() else "cpu"))
-    blosum = blosum_torch / blosum_torch.sum(dim=1, keepdim=True) # normalize the rows
-    return blosum
-
-blosum30 = get_blosum_probs("blosum30")
-blosum45 = get_blosum_probs("blosum45")
-blosum100 = get_blosum_probs("blosum100")
-
 pKas = {
     "A": [2.34, 9.69],        # Alanine
     "R": [2.17, 9.04, 12.48], # Arginine (guanidinium)
