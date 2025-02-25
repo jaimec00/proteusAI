@@ -157,7 +157,7 @@ class HyperParameters():
 						encoder_layers, num_heads,
 						learnable_spreads,
 						min_spread, max_spread, base_spread, num_spread,
-						min_rbf, max_rbf,
+						min_rbf, max_rbf, beta,
 						d_hidden_attn, hidden_layers_attn, 
 						temperature, use_model ):
 		self.d_model = d_model
@@ -177,6 +177,7 @@ class HyperParameters():
 		self.learnable_spreads = learnable_spreads
 		self.min_spread = min_spread
 		self.max_spread = max_spread 
+		self.beta = beta
 		self.base_spread = base_spread 
 		self.num_spread = num_spread 
 		self.min_rbf = min_rbf

@@ -178,7 +178,7 @@ class WavefunctionEmbedding(nn.Module):
 		wf = wf_embedding(coords, wavenumbers, alpha, key_padding_mask) # batch x N x 3 --> batch x N x d_model
 
 		wf = self.norm1(wf)
-		wf = self.norm2(wf + self.dropout(self.ffn(wf)))
+		# wf = self.norm2(wf + self.dropout(self.ffn(wf)))
 
 		return wf
 
@@ -190,7 +190,7 @@ class GeoAttention(nn.Module):
 	see the imported function (supports fwd and bwd) triton implementation
 	'''
 
-	def __init__(self, d_model=512, nhead=8, min_spread=1, max_spread=6, base=20, num_spread=8, min_rbf=0.01, max_rbf=0.99, learnable_spreads=False, dropout=0.1):
+	def __init__(self, d_model=512, nhead=8, min_spread=1, max_spread=6, base=20, num_spread=8, min_rbf=0.01, max_rbf=0.99, beta=2.0, learnable_spreads=False, dropout=0.1):
 		super(GeoAttention, self).__init__()
 
 		self.nhead = nhead
@@ -226,6 +226,7 @@ class GeoAttention(nn.Module):
 
 		self.min_rbf = min_rbf
 		self.max_rbf = max_rbf
+		self.beta = beta
 
 		# QKV projection weight and bias matrices
 
@@ -270,7 +271,7 @@ class GeoAttention(nn.Module):
 		dropout = self.dropout if self.training else 0.0
 
 		# perform attention
-		out = geometric_attn(Q, K, V, coords, self.get_spreads(), mask=key_padding_mask, min_rbf=self.min_rbf, max_rbf=self.max_rbf, dropout=dropout)  # batch x nhead x N x d_k
+		out = geometric_attn(Q, K, V, coords, self.get_spreads(), mask=key_padding_mask, min_rbf=self.min_rbf, max_rbf=self.max_rbf, beta=self.beta, dropout=dropout)  # batch x nhead x N x d_k
 
 		out = out.permute(0,2,3,1) # batch x N x d_k x nhead
 		out = out.reshape(batch, N, self.d_model) # batch x N x d_k x nhead --> batch x N x d_model
@@ -286,11 +287,11 @@ class Encoder(nn.Module):
 	bidirectional encoder
 	'''
 
-	def __init__(self, d_model=512, d_hidden=1024, hidden_layers=0, nhead=8, min_spread=1, max_spread=6, base=20, num_spread=8, min_rbf=0.01, max_rbf=0.99, learnable_spreads=False, dropout=0.0, attn_dropout=0.0):
+	def __init__(self, d_model=512, d_hidden=1024, hidden_layers=0, nhead=8, min_spread=1, max_spread=6, base=20, num_spread=8, min_rbf=0.01, max_rbf=0.99, beta=2.0, learnable_spreads=False, dropout=0.0, attn_dropout=0.0):
 		super(Encoder, self).__init__()
 
 		# Self-attention layers
-		self.attn = GeoAttention(d_model, nhead, min_spread=min_spread, max_spread=max_spread, base=base, num_spread=num_spread, min_rbf=min_rbf, max_rbf=max_rbf, learnable_spreads=False, dropout=attn_dropout)
+		self.attn = GeoAttention(d_model, nhead, min_spread=min_spread, max_spread=max_spread, base=base, num_spread=num_spread, min_rbf=min_rbf, max_rbf=max_rbf, beta=beta, learnable_spreads=False, dropout=attn_dropout)
 		self.attn_norm = nn.LayerNorm(d_model)
 		self.attn_dropout = nn.Dropout(dropout)
 
@@ -339,7 +340,7 @@ class proteusAI(nn.Module):
 						n_head=4,
 						learnable_spreads=False,
 						min_spread=3.7, max_spread=7, base_spreads=20, num_spread=4,
-						min_rbf=0.01, max_rbf=0.99,
+						min_rbf=0.01, max_rbf=0.99, beta=2.0,
 						d_hidden_attn=1024, hidden_layers_attn=0,
 						
 						# dropout
@@ -361,7 +362,7 @@ class proteusAI(nn.Module):
 		self.encoders = nn.ModuleList([
 										Encoder(	d_model, d_hidden_attn, hidden_layers_attn, 
 													n_head, min_spread, max_spread, base_spreads, 
-													num_spread, min_rbf, max_rbf, learnable_spreads, 
+													num_spread, min_rbf, max_rbf, beta, learnable_spreads, 
 													dropout, attn_dropout
 												) 
 										for _ in range(encoder_layers)

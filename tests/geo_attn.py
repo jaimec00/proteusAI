@@ -180,7 +180,7 @@ def torch_attn(Q, K, V, coords, spreads, min_rbf=0.99, max_rbf=0.99, mask=None):
 	coords = coords.contiguous()
 	spreads = spreads.contiguous()
 	mask = mask.contiguous()
-	b = 2
+	b = 1
 
 	S = torch.matmul(Q, K.transpose(2,3)) / (b*(d_k**0.5)) # batch x nheads x N x N
 
@@ -195,10 +195,9 @@ def torch_attn(Q, K, V, coords, spreads, min_rbf=0.99, max_rbf=0.99, mask=None):
 
 	rbfs = torch.exp(-(dists**2)/(2*(spreads[None, :, None, None]**2)))
 
-	attn_mask = mask[:, None, :, None] | mask[:, None, None, :] # | (dists>=max_dist)
+	attn_mask = mask[:, None, :, None] | mask[:, None, None, :]  | (dists>=max_dist)
 
-	S = torch.where(attn_mask, float("-inf"), S + b*rbfs*torch.abs(S)) #rbfs*tanhS))
-
+	S = torch.where(attn_mask, float("-inf"), S + b*rbfs*F.softplus(S, threshold=float("inf"))) 
 	P = torch.softmax(S, dim=-1)
 
 	out = torch.matmul(P, V) # batch x nheads x N x d_k

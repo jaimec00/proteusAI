@@ -86,6 +86,9 @@ class Output():
 			min_spread: {hyper_parameters.min_spread} 
 			max_spread: {hyper_parameters.max_spread} 
 			base_spread: {hyper_parameters.base_spread}
+			min_rbf: {hyper_parameters.min_rbf} 
+			max_rbf: {hyper_parameters.max_rbf}
+			beta: {hyper_parameters.beta}
 			d_hidden_attn: {hyper_parameters.d_hidden_attn}
 			hidden_layers_attn: {hyper_parameters.hidden_layers_attn}
 			temperature: {hyper_parameters.temperature}
@@ -128,8 +131,8 @@ class Output():
 	
 			training inputs contain:
 				
-				mean MASK injection: {round(MASK_injection.MASK_injection_mean, 2)}
-				stdev MASK injection: {round(MASK_injection.MASK_injection_stdev, 2)}
+				mean MASK injection: {round(MASK_injection.MASK_injection_mean, 2) if epoch.training_run_parent.hyper_parameters.use_aa else "N/A"}
+				stdev MASK injection: {round(MASK_injection.MASK_injection_stdev, 2) if epoch.training_run_parent.hyper_parameters.use_aa else "N/A"}
 
 				''')
 			)

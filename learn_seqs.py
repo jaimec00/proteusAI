@@ -37,9 +37,6 @@ if __name__ == "__main__":
 
 	parser = argparse.ArgumentParser()
 
-	# debugging
-	parser.add_argument("--debug_grad", default=False, type=bool, help="prints grad of each layer at each step")
-	
 	# model dim
 	parser.add_argument("--d_model", default=512, type=int, help="dimensionality of input embeddings")
 	
@@ -52,22 +49,23 @@ if __name__ == "__main__":
 	parser.add_argument("--hidden_layers_we", default=0, type=int, help="number of hidden layers in post wavefunction embedding MLP")
 
 	# aa embedding (not used, optimizing based on structure alone first)
-	parser.add_argument("--use_aa", default=True, type=bool, help="whether to use amino acid context or just predict from structure")
+	parser.add_argument("--use_aa", default=False, type=bool, help="whether to use amino acid context or just predict from structure")
 	parser.add_argument("--d_hidden_aa", default=1024, type=int, help="hidden dimensions in AA embedding MLP")
 	parser.add_argument("--hidden_layers_aa", default=0, type=int, help="number hidden layers in AA embedding MLP")
-	parser.add_argument("--esm2_weights_path", default="", type=str, help="path to pretrained esm2 weights. can also be just the name of the model to use. if nothing is provided, the weights corresponding best to d_model are downloaded from facebook website")
-	parser.add_argument("--learnable_esm", default=False, type=bool, help="whether to make esm weights learnable")
+	parser.add_argument("--esm2_weights_path", default="", type=str, help="path to pretrained esm2 weights. can also be just the name of the model to use. if nothing is provided, AA weights are learned from scratch")
+	parser.add_argument("--learnable_esm", default=True, type=bool, help="whether to make esm weights learnable")
 	
 	# encoder
 	parser.add_argument("--encoder_layers", default=4, type=int, help="number of encoder layers")
 	parser.add_argument("--num_heads", default=8, type=int, help="number of attention heads")
-	parser.add_argument("--learnable_spreads", default=False, type=bool, help="whether to make spreads learnable")
+	parser.add_argument("--learnable_spreads", default=True, type=bool, help="whether to make spreads learnable")
 	parser.add_argument("--min_spread", default=3.0, type=float, help="minimum spread to use for geometric attention")
-	parser.add_argument("--max_spread", default=8.0, type=float, help="maximum spread to use for geometric attention")
-	parser.add_argument("--base_spread", default=20.0, type=float, help="base to use for spread sampling in geometric attention")
+	parser.add_argument("--max_spread", default=20.0, type=float, help="maximum spread to use for geometric attention")
+	parser.add_argument("--base_spread", default=10.0, type=float, help="base to use for spread sampling in geometric attention")
 	parser.add_argument("--num_spread", default=32.0, type=float, help="number of spreads to use in geometric attention")
-	parser.add_argument("--min_rbf", default=0.01, type=float, help="minimum rbf value to use for geometric attention, distances are clamp to corresponding dist")
-	parser.add_argument("--max_rbf", default=0.99, type=float, help="maximum rbf value to use for geometric attention, distances are clamp to corresponding dist")
+	parser.add_argument("--min_rbf", default=0.01, type=float, help="minimum rbf value to use for geometric attention, values less than this are masked")
+	parser.add_argument("--max_rbf", default=0.99, type=float, help="maximum rbf value to use for geometric attention, values greater than this are masked")
+	parser.add_argument("--beta", default=2.0, type=float, help="how much to scale the RBF term by in geometric attention. higher values emphasize geometry, lower values emphasize attention.")
 	parser.add_argument("--d_hidden_attn", default=1024, type=int, help="hidden dimensions in geometric attention FFN")
 	parser.add_argument("--hidden_layers_attn", default=0, type=int, help="number of hidden layers in geometric attention FFN")
 
@@ -79,29 +77,29 @@ if __name__ == "__main__":
 	parser.add_argument("--epochs", default=50, type=int, help="number of epochs")
 
 	# input restrictions	
-	parser.add_argument("--max_batch_size", default=128, type=list, help="possible number of samples per batch, minimizes triton recompilation overhead")
-	parser.add_argument("--min_seq_size", default=512, type=list, help="possible sequence lengths, minimizes triton recompilation overhead")
-	parser.add_argument("--max_seq_size", default=16384, type=list, help="possible sequence lengths, minimizes triton recompilation overhead")
-	parser.add_argument("--batch_tokens", default=16384, type=int, help="target number of tokens per batch")
-	parser.add_argument("--min_resolution", default=3.5, type=float, help="minimum structure resolution")
+	parser.add_argument("--max_batch_size", default=256, type=list, help="possible number of samples per batch, minimizes triton recompilation overhead")
+	parser.add_argument("--min_seq_size", default=64, type=list, help="possible sequence lengths, minimizes triton recompilation overhead")
+	parser.add_argument("--max_seq_size", default=8192, type=list, help="possible sequence lengths, minimizes triton recompilation overhead")
+	parser.add_argument("--batch_tokens", default=8192, type=int, help="target number of tokens per batch")
+	parser.add_argument("--min_resolution", default=3.5, type=float, help="maximum structure resolution")
 	
 	# learning parameters
-	parser.add_argument("--accumulation_steps", default=2, type=int, help="grad accumulation; how many batches to process before learning step")
+	parser.add_argument("--accumulation_steps", default=1, type=int, help="grad accumulation; how many batches to process before learning step")
 	parser.add_argument("--beta1", default=0.9, type=float, help="beta1 parameter for Adam optimizer")
 	parser.add_argument("--beta2", default=0.98, type=float, help="beta2 parameter for Adam optimizer")
 	parser.add_argument("--epsilon", default=10e-9, type=float, help="epsilon parameter for Adam optimizer")
 
-	parser.add_argument("--dropout", default=0.1, type=float, help="percentage of dropout")
-	parser.add_argument("--attn_dropout", default=0.01, type=float, help="percentage of dropout for attention, should be smaller since it is already heavily masked")
-	parser.add_argument("--label_smoothing", default=0.1, type=float, help="percentage of label smoothing to use on the output labels for loss calculation")
-	parser.add_argument("--loss_type", default="mean", type=str, choices=['sum', 'mean'], help="whether to use the 'sum' or the 'mean' for CEL")
+	parser.add_argument("--dropout", default=0.2, type=float, help="percentage of dropout")
+	parser.add_argument("--attn_dropout", default=0.00, type=float, help="percentage of dropout for attention, should be smaller since it is already heavily masked")
+	parser.add_argument("--label_smoothing", default=0.0, type=float, help="percentage of label smoothing to use on the output labels for loss calculation")
+	parser.add_argument("--loss_type", default="sum", type=str, choices=['sum', 'mean'], help="whether to use the 'sum' or the 'mean' for CEL")
 	parser.add_argument("--grad_clip_norm", default=5.0, type=float, help="max gradient L2 norm for gradient clipping. if 0.0, no gradient clipping is applied")
 
-	parser.add_argument("--lr_step", default=0.00005, type=float, help="learning rate")
-	parser.add_argument("--lr_type", default="custom", type=str, choices=["plateu", "cyclic", "attn"], help="LR type")
+	parser.add_argument("--lr_step", default=1e-4, type=float, help="learning rate")
+	parser.add_argument("--lr_type", default="attn", type=str, choices=["plateu", "cyclic", "attn"], help="LR type")
 	parser.add_argument("--warmup_steps", default=4000, type=int, help="warmup steps for attn scheduler")
 	parser.add_argument("--lr_scale", default=0.1, type=float, help="LR scaling factor")
-	parser.add_argument("--lr_patience", default=5, type=int, help="LR patience for scaling down after plateu")
+	parser.add_argument("--lr_patience", default=3, type=int, help="LR patience for scaling down after plateu")
 	parser.add_argument("--lr_initial_min", default=5e-5, type=float,  help="initial lr rate minimum")
 	parser.add_argument("--lr_initial_max", default=1e-4, type=float,  help="initial lr rate maximum")
 	parser.add_argument("--lr_final_min", default=1e-5, type=float,  help="final lr rate minimum")
@@ -135,14 +133,16 @@ if __name__ == "__main__":
 	parser.add_argument("--seq_plot", default="seq_sim_vs_epoch.png", type=Path, help="path to save plot of sequence similarity vs epochs after training")
 	parser.add_argument("--weights_path", default="model_parameters.pth", type=Path, help="path to save weights after training")
 	parser.add_argument("--write_dot", default=False, type=bool, help="whether to save the dot file of the computational graph")
-	parser.add_argument("--model_checkpoints", default=20, type=int, help="number of epochs to save the model after")
-
+	parser.add_argument("--model_checkpoints", default=10, type=int, help="number of epochs to save the model after")
 
 	# input
 	parser.add_argument("--data_path", default="/gpfs_backup/wangyy_data/protAI/pmpnn_data/pdb_2021aug02", type=Path, help="path to data")
 	parser.add_argument("--use_model", default=None, type=Path, help="use pretrained model")
 	parser.add_argument("--config", default="config/config.yml", type=Path, help="Path to the YAML config file")
 
+	# debugging
+	parser.add_argument("--debug_grad", default=False, type=bool, help="prints gradients of each layer at each step")
+	
 	args, _ = parser.parse_known_args()
 	
 	# Load YAML configuration if file exists

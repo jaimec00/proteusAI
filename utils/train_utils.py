@@ -56,7 +56,7 @@ class TrainingRun():
                                                     args.encoder_layers, args.num_heads,
                                                     args.learnable_spreads,
                                                     args.min_spread, args.max_spread, args.base_spread, args.num_spread,
-                                                    args.min_rbf, args.max_rbf,
+                                                    args.min_rbf, args.max_rbf, args.beta,
                                                     args.d_hidden_attn, args.hidden_layers_attn, 
                                                     args.temperature, args.use_model
                                                 )
@@ -159,6 +159,7 @@ class TrainingRun():
                                 self.hyper_parameters.num_spread,
                                 self.hyper_parameters.min_rbf,
                                 self.hyper_parameters.max_rbf,
+                                self.hyper_parameters.beta,
 
                                 self.hyper_parameters.d_hidden_attn,
                                 self.hyper_parameters.hidden_layers_attn,
@@ -190,7 +191,11 @@ class TrainingRun():
         '''
 
         self.output.log.info("loading optimizer...")
-        self.optim = torch.optim.Adam(self.model.parameters(), lr=(self.training_parameters.lr_step if self.training_parameters.lr_type == "plateu" else 1.0), # the lambda lr scales it
+        if self.training_parameters.lr_type == "plateu":
+            lr = self.training_parameters.lr_step 
+        else:
+            lr = 1.0 # the lambda lr scales it
+        self.optim = torch.optim.Adam(self.model.parameters(), lr=lr, 
                                     betas=(self.training_parameters.beta1, self.training_parameters.beta2), 
                                     eps=self.training_parameters.epsilon)
         self.optim.zero_grad()
@@ -221,9 +226,14 @@ class TrainingRun():
             
             return lr
 
+        # compute the scale
+        if self.training_parameters.lr_step == 0.0:
+            scale = self.hyper_parameters.d_model**(-0.5)
+        else:
+            scale = self.training_parameters.warmup_steps**(0.5) * self.training_parameters.lr_step # scale needed so max lr is what was specified
         def attn_lr(step):
             '''lr scheduler from attn paper'''
-            return (self.hyper_parameters.d_model**(-0.5)) * min((step+1)**(-0.5), (step+1)*(self.training_parameters.warmup_steps**(-1.5)))
+            return scale * min((step+1)**(-0.5), (step+1)*(self.training_parameters.warmup_steps**(-1.5)))
         
         if self.training_parameters.lr_type == "plateau":
             self.scheduler = lr_scheduler.ReduceLROnPlateau(self.optim, mode='min', factor=self.training_parameters.lr_scale, patience=self.training_parameters.lr_patience) 
@@ -244,12 +254,7 @@ class TrainingRun():
         '''
 
         self.output.log.info("loading loss function...") 
-
-        use_blosum = False
-        if use_blosum:
-            self.loss_function = SquaredDistanceLoss(reduction=self.training_parameters.loss_type)
-        else:
-            self.loss_function = CEL(ignore_index=-1, reduction=self.training_parameters.loss_type, label_smoothing=self.training_parameters.label_smoothing)
+        self.loss_function = CEL(ignore_index=-1, reduction=self.training_parameters.loss_type, label_smoothing=self.training_parameters.label_smoothing)
 
     def train(self):
         '''
@@ -300,6 +305,7 @@ class TrainingRun():
         # switch to evaluation mode to perform validation
         self.model.eval()
 
+        # store intermediate losses here temporarily before storing the avg in the training run losses
         val_losses = Losses()
         
         # turn off gradient calculation
@@ -356,7 +362,7 @@ class TrainingRun():
                     
                 batch = Batch(label_batch, coords_batch, chain_mask, key_padding_mask, 
                                 use_amp=False, 
-                                auto_regressive=self.training_parameters.use_aa, # only do autoregressive if using aa modules 
+                                auto_regressive=self.hyper_parameters.use_aa, # only do autoregressive if using aa modules 
                                 temp=self.hyper_parameters.temperature, 
                             )
 
@@ -389,7 +395,6 @@ class Epoch():
 
         self.epoch = epoch
         self.epochs = self.training_run_parent.training_parameters.epochs
-        self.stage = epoch / self.epochs
 
         self.losses = Losses()
         
@@ -424,8 +429,9 @@ class Epoch():
                             use_amp=self.training_run_parent.training_parameters.use_amp, 
                         )
 
-            # inject MASK tokens for prediction
-            self.training_run_parent.MASK_injection.MASK_tokens(batch)
+            if self.training_run_parent.hyper_parameters.use_aa:
+                # inject MASK tokens for prediction
+                self.training_run_parent.MASK_injection.MASK_tokens(batch)
 
             # add random noise
             batch.noise_coords(self.training_run_parent.training_parameters.noise_coords_std)
