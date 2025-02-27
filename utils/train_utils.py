@@ -13,6 +13,7 @@ from torch.nn.functional import one_hot as onehot
 from torch.nn import CrossEntropyLoss as CEL
 
 from tqdm import tqdm
+import numpy as np
 import math
 
 from proteusAI import proteusAI
@@ -48,6 +49,7 @@ class TrainingRun():
 
         self.hyper_parameters = HyperParameters(    args.d_model,
                                                     args.learnable_wavelengths,
+                                                    args.wf_type, args.anisotropic_wf,
                                                     args.min_wl, args.max_wl, args.base_wl, 
                                                     args.d_hidden_we, args.hidden_layers_we, 
                                                     args.use_aa,
@@ -86,11 +88,12 @@ class TrainingRun():
                                 args.min_seq_size, args.max_seq_size, 
                                 args.use_chain_mask, args.min_resolution
                             )
-        self.output = Output(args.out_path, args.loss_plot, args.seq_plot, args.weights_path, args.write_dot, args.model_checkpoints)
+        
+        self.output = Output(args.out_path, args.loss_plot, args.seq_plot, args.weights_path, args.model_checkpoints)
 
         self.train_losses = Losses()
         self.val_losses = Losses() # validation with all tokens being MASK
-        self.val_losses_context = Losses() # validation with the same MASK injection as the training batches from current epoch
+        self.val_losses_context = Losses() if args.use_aa else None # validation with the same MASK injection as the training batches from current epoch
         self.test_losses = Losses()
 
         self.gpu = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
@@ -135,6 +138,7 @@ class TrainingRun():
         self.model = proteusAI(	self.hyper_parameters.d_model, 
 
                                 self.hyper_parameters.learnable_wavelengths,
+                                self.hyper_parameters.wf_type, self.hyper_parameters.anisotropic_wf, 
                                 self.hyper_parameters.min_wl,
                                 self.hyper_parameters.max_wl,
                                 self.hyper_parameters.base_wl,
@@ -175,6 +179,17 @@ class TrainingRun():
             self.model.load_state_dict(pretrained_weights)
         
         self.training_parameters.num_params = sum(p.numel() for p in self.model.parameters())
+
+        # print gradients at each step if in debugging mode
+        if self.debug_grad:
+            def print_grad(name):
+                def hook(grad):
+                    print(f"Gradient at {name}: mean={grad.mean().item():.6f}, std={grad.std().item():.6f}, max={grad.abs().max().item():.6f}")
+                return hook
+
+            # Attach hook to all parameters
+            for name, param in self.model.named_parameters():
+                param.register_hook(print_grad(name))
 
         # compile the model
         # self.model = torch.compile(self.model)
@@ -231,6 +246,7 @@ class TrainingRun():
             scale = self.hyper_parameters.d_model**(-0.5)
         else:
             scale = self.training_parameters.warmup_steps**(0.5) * self.training_parameters.lr_step # scale needed so max lr is what was specified
+        
         def attn_lr(step):
             '''lr scheduler from attn paper'''
             return scale * min((step+1)**(-0.5), (step+1)*(self.training_parameters.warmup_steps**(-1.5)))
@@ -285,7 +301,7 @@ class TrainingRun():
             epoch = Epoch(epoch_idx, self)
             epoch.epoch_loop()
             if (epoch_idx+1) % self.output.model_checkpoints == 0:
-                self.output.save_model(self.model, f"e{epoch_idx}_s{round(epoch.losses.get_avg()[1],2)}")
+                self.output.save_model(self.model, f"e{epoch_idx}_s{round(self.val_losses.matches[-1],2)}")
 
         self.output.plot_training(self.train_losses, self.val_losses, self.val_losses_context)
         self.output.save_model(self.model)
@@ -315,41 +331,49 @@ class TrainingRun():
             val_pbar = tqdm(total=len(self.data.val_data), desc="epoch_validation_progress", unit="step")
             
             # loop through validation batches
-            for label_batch, coords_batch, chain_mask, key_padding_mask in self.data.val_data:
+            for label_batch, coords_batch, chain_mask, chain_idxs, key_padding_mask in self.data.val_data:
                     
-                batch = Batch(	label_batch, coords_batch, chain_mask, key_padding_mask, 
-                                epoch=epoch, use_amp=False, auto_regressive=False
+                # init batch
+                batch = Batch(	label_batch, coords_batch, 
+                                chain_mask, chain_idxs, 
+                                key_padding_mask, 
+                                epoch=epoch, 
+                                use_amp=False, auto_regressive=False
                             )
 
+                # mask tokens depending on required context
                 if epoch is not None:
                     self.MASK_injection.MASK_tokens(batch)
                 else:
                     self.MASK_all(batch)
 
+                # run the model
                 batch.batch_forward(self.model, self.loss_function, self.gpu)
 
                 # store losses
-                loss, seq_sim = batch.outputs.output_losses.get_avg()
-                val_losses.add_losses(float(loss.item()), seq_sim)
+                val_losses.extend_losses(batch.outputs.output_losses)
 
+                # update pbar
                 val_pbar.update(1)
 
+            # add the avg losses to the global loss and log
             if epoch is None:
-                self.val_losses.add_losses(*val_losses.get_avg())
+                self.output.log_val_losses(val_losses, self.val_losses)
             else:
-                self.val_losses_context.add_losses(*val_losses.get_avg())
-
-            self.output.log_val_losses(val_losses)
+                self.output.log_val_losses(val_losses, self.val_losses_context)
 
     def test(self):
 
         # switch to evaluation mode
         self.model.eval()
         
+        # load testing data
         self.output.log.info("loading testing data...")
         self.data.load("test")
 
-        test_losses, test_seq_sims, test_ar_seq_sims = [], [], []
+        # init losses
+        test_losses = Losses()
+        test_ar_losses = Losses()
 
         # turn off gradient calculation
         with torch.no_grad():
@@ -358,31 +382,30 @@ class TrainingRun():
             test_pbar = tqdm(total=len(self.data.test_data), desc="test_progress", unit="step")
 
             # loop through testing batches
-            for label_batch, coords_batch, chain_mask, key_padding_mask in self.data.test_data:
+            for label_batch, coords_batch, chain_mask, chain_idxs, key_padding_mask in self.data.test_data:
                     
-                batch = Batch(label_batch, coords_batch, chain_mask, key_padding_mask, 
+                # init batch
+                batch = Batch(  label_batch, coords_batch, chain_mask, chain_idxs, key_padding_mask, 
                                 use_amp=False, 
                                 auto_regressive=self.hyper_parameters.use_aa, # only do autoregressive if using aa modules 
                                 temp=self.hyper_parameters.temperature, 
                             )
 
+                # mask all tokens
                 self.MASK_all(batch)
 
+                # run the model
                 batch.batch_forward(self.model, self.loss_function, self.gpu)
 
-                loss, seq_sim = batch.outputs.output_losses.get_avg()
-                _, ar_seq_sim = batch.outputs.ar_output_losses.get_avg()
-                
-                test_losses.append(float(loss.item()) )
-                test_seq_sims.append(seq_sim)
-                test_ar_seq_sims.append(ar_seq_sim)
+                # add the losses
+                test_losses.extend_losses(batch.outputs.output_losses)
+                test_ar_losses.extend_losses(batch.outputs.ar_output_losses)
 
+                # update pbar
                 test_pbar.update(1)
         
-        self.output.log.info(f"testing loss: {sum(test_losses) / len(test_losses)}")
-        self.output.log.info(f"test sequence similarity: {sum(test_seq_sims) / len(test_seq_sims)}")
-        if None not in test_ar_seq_sims:
-            self.output.log.info(f"test auto-regressive sequence similarity: {sum(test_ar_seq_sims) / len(test_ar_seq_sims)}")
+        # log the losses
+        self.data.log_test_losses(test_losses, test_ar_losses)
 
     def MASK_all(self, batch):
 
@@ -395,6 +418,7 @@ class Epoch():
 
         self.epoch = epoch
         self.epochs = self.training_run_parent.training_parameters.epochs
+        self.stage = epoch / self.epochs
 
         self.losses = Losses()
         
@@ -421,10 +445,10 @@ class Epoch():
         
         # loop through batches
         epoch_pbar = tqdm(total=len(self.training_run_parent.data.train_data), desc="epoch_progress", unit="step")
-        for b_idx, (label_batch, coords_batch, chain_mask, key_padding_mask) in enumerate(self.training_run_parent.data.train_data):
+        for b_idx, (label_batch, coords_batch, chain_mask, chain_idxs, key_padding_mask) in enumerate(self.training_run_parent.data.train_data):
                     
             # instantiate this batch
-            batch = Batch(	label_batch, coords_batch, chain_mask, key_padding_mask, 
+            batch = Batch(	label_batch, coords_batch, chain_mask, chain_idxs, key_padding_mask, 
                             b_idx=b_idx, epoch=self, 
                             use_amp=self.training_run_parent.training_parameters.use_amp, 
                         )
@@ -440,7 +464,7 @@ class Epoch():
             batch.batch_learn(scheduler=scheduler)
 
             # compile batch losses for logging
-            self.gather_batch_losses(batch)
+            self.losses.extend_losses(batch.outputs.output_losses)
 
             epoch_pbar.update(1)
         
@@ -448,7 +472,8 @@ class Epoch():
         self.training_run_parent.output.log_epoch_losses(self, self.training_run_parent.train_losses)
 
         # run validation
-        self.training_run_parent.batch_MASK_validation(self) # not using context for now
+        if self.training_run_parent.hyper_parameters.use_aa:
+            self.training_run_parent.batch_MASK_validation(self) # not using context for now
         self.training_run_parent.all_MASK_validation() 
 
         # lr scheduler update
@@ -460,12 +485,8 @@ class Epoch():
             self.training_run_parent.output.log.info("loading next epoch's training data...")
             self.training_run_parent.data.train_data.rotate_data()
 
-
-    def gather_batch_losses(self, batch):
-        self.losses.extend_losses(batch.outputs.output_losses)
-
 class Batch():
-    def __init__(self, labels, coords, chain_mask, key_padding_mask, 
+    def __init__(self, labels, coords, chain_mask, chain_idxs, key_padding_mask, 
                     b_idx=None, epoch=None,
                     use_amp=True, auto_regressive=False, temp=0.1
                 ):
@@ -473,6 +494,7 @@ class Batch():
         self.labels = labels
         self.coords = coords 
         self.chain_mask = chain_mask
+        self.chain_idxs = chain_idxs # for computing virtual Cb if using Ca only model, otherwise is computed directly from backbone coords
         self.use_amp = use_amp
 
         # input is always 21 dim, last dim is mask token
@@ -548,18 +570,6 @@ class Batch():
         # mask one hot positions for loss. also only compute loss for the representative chain of the sequence cluster (unless config says not to, then chain mask is all zeros)
         self.labels = torch.where(self.onehot_mask | self.chain_mask | self.key_padding_mask, -1, self.labels)
 
-        # print gradients at each step if in debugging mode
-        if self.epoch_parent is not None:
-            if self.epoch_parent.training_run_parent.debug_grad:
-                def print_grad(name):
-                    def hook(grad):
-                        print(f"Gradient at {name}: mean={grad.mean().item():.6f}, std={grad.std().item():.6f}, max={grad.abs().max().item():.6f}")
-                    return hook
-
-                # Attach hook to all parameters
-                for name, param in model.named_parameters():
-                    param.register_hook(print_grad(name))
-
         if self.use_amp: # optional AMP
             with autocast('cuda'):
                 self.outputs = self.get_outputs(model)
@@ -620,13 +630,13 @@ class Batch():
         # cant compute cel with one hot vector, this is only for testing
         with torch.no_grad():
             if self.auto_regressive: 
-                ar_output_prediction = model(self.coords, self.predictions, key_padding_mask=self.key_padding_mask, 
+                ar_output_prediction = model(self.coords, self.predictions, self.chain_idxs, key_padding_mask=self.key_padding_mask, 
                                             auto_regressive=self.auto_regressive, temp=self.temp)
             else:
                 ar_output_prediction = None
 
         # compute one shot also
-        output_prediction = model(self.coords, self.predictions, key_padding_mask=self.key_padding_mask, auto_regressive=False)
+        output_prediction = model(self.coords, self.predictions, self.chain_idxs, key_padding_mask=self.key_padding_mask, auto_regressive=False)
 
         return ModelOutputs(output_prediction, ar_output_prediction, self.labels)
 
@@ -635,29 +645,32 @@ class Batch():
 
 class ModelOutputs():
 
-    def __init__(self, output_predictions, ar_output_predictions, labels):
+    def __init__(self, output_predictions, ar_output_predictions, labels, loss_type="sum"):
         
         self.output_predictions = output_predictions
         self.ar_output_predictions = ar_output_predictions
 
         self.labels = labels
+        self.valid_toks = (labels!=-1).sum().item() if loss_type == "sum" else 1 # 1 valid tok if computing mean since already normalized
+        self.loss_type = loss_type
 
         self.output_losses = Losses()
         self.ar_output_losses = Losses()
 
-    def compute_seq_sim(self, prediction):
-        '''greedy selection'''
+    def compute_matches(self, prediction):
+        '''greedy selection, just for tracking progress'''
         
         prediction_flat = prediction.contiguous().view(-1, prediction.size(-1)) # batch*N x 20
         labels_flat = self.labels.view(-1) # batch x N --> batch*N,
 
         seq_predictions = torch.argmax(prediction_flat, dim=-1) # batch*N x 20 --> batch*N,
         valid_mask = labels_flat != -1 # batch*N, 
-        valid_positions = torch.sum(valid_mask) # 1,
-        matches = ((seq_predictions == labels_flat) & (valid_mask)).sum() # 1, 
-        seq_sim = ((matches / valid_positions).float()*100).mean().item()
+        matches = ((seq_predictions == labels_flat) & (valid_mask)).sum().item() # 1, 
+
+        if self.loss_type == "mean": # not true seq sim per tok, but easier to deal with
+            matches /= self.valid_toks
         
-        return seq_sim
+        return matches # seq_sim
 
     def compute_losses(self, prediction, loss_function=None):
 
@@ -667,9 +680,9 @@ class ModelOutputs():
         loss = loss_function(predictions_flat, labels_flat)
 
         # compute seq sim
-        seq_sim = self.compute_seq_sim(prediction)
+        matches = self.compute_matches(prediction)
 
-        return loss, seq_sim
+        return loss, matches
 
     def get_losses(self, loss_function):
 
@@ -678,9 +691,9 @@ class ModelOutputs():
                                             ):
 
             # for some reason gives tuple to cel and None to seq sim if do 'cel, seq_sim = self.compute...'
-            cel_and_seq_sim = self.compute_losses(prediction, loss_function) if prediction is not None else (None, None)
-            cel, seq_sim = cel_and_seq_sim
-            prediction_loss.add_losses(cel, seq_sim)
+            nll_and_matches = self.compute_losses(prediction, loss_function) if prediction is not None else (None, None)
+            nll, matches = nll_and_matches
+            prediction_loss.add_losses(nll, matches, self.valid_toks)
 
 class Losses():
     '''
@@ -689,27 +702,30 @@ class Losses():
     def __init__(self): 
 
         self.losses = []
-        self.seq_sims = []
+        self.matches = []
+        self.valid_toks = 0
 
     def get_avg(self):
+        '''this method is just for logging purposes, does not rescale loss used in bwd pass'''
 
         avg_loss, avg_seq_sim = 0, 0 # will make None later, but 0 for now since operated on like a float later
         if None not in self.losses:
-            avg_loss = sum(self.losses) / len(self.losses)
-        if None not in self.seq_sims:
-            avg_seq_sim = sum(self.seq_sims) / len(self.seq_sims)
+            avg_loss = sum(loss.item() for loss in self.losses) / self.valid_toks
+        if None not in self.matches:
+            avg_seq_sim = 100*sum(self.matches) / self.valid_toks
         
         return avg_loss, avg_seq_sim
 
-    def add_losses(self, cel, seq_sim):
-        self.losses.append(cel)
-        self.seq_sims.append(seq_sim)
+    def add_losses(self, nll, matches, valid=1):
+        self.losses.append(nll)
+        self.matches.append(matches)
+        self.valid_toks += valid
 
-    def extend_losses(self, other, normalize=False):
-        divisor = other.valid if normalize else 1
-        self.losses.extend([loss / divisor for loss in other.losses])
-        self.seq_sims.extend(other.seq_sims)
+    def extend_losses(self, other):
+        self.valid_toks += other.valid_toks
+        self.losses.extend(other.losses)
+        self.matches.extend(other.matches)
 
     def to_numpy(self):
         '''utility when plotting losses w/ matplotlib'''
-        self.losses = [loss.detach().to("cpu").numpy() for loss in self.losses if isinstance(loss, torch.Tensor)]
+        self.losses = [loss.detach().to("cpu").numpy() if isinstance(loss, torch.Tensor) else np.array([loss]) for loss in self.losses]

@@ -3,7 +3,7 @@
 import torch
 import math
 from utils.test_utils import calculate_error, profile_func, profile_bwd 
-from utils.model_utils.wf_embedding.cuda.wf_embedding import wf_embedding 
+from utils.model_utils.wf_embedding.isotropic.cuda.wf_embedding import wf_embedding 
 
 def main():
 
@@ -16,13 +16,14 @@ def main():
 	# prepare inputs
 	batch, N, d_model = 1, 2048, 512
 	alpha = 1
+	mag_type = 3
 	min_wl, max_wl, base = 3.7, 20, 20
 	coords = max_wl * torch.randn((batch, N, 3), dtype=torch.float32, device=device)
 	mask = (torch.rand((batch, N), device=device) > 1)
 	wavenumbers = torch.randn((d_model//2,), device=coords.device, dtype=torch.float32, requires_grad=True)
 
 	# to make it easier
-	params = [coords, wavenumbers, alpha, mask]
+	params = [coords, wavenumbers, mag_type, mask]
 
 	# synchronize device
 	torch.cuda.synchronize()  # Ensure no ongoing GPU operations
@@ -32,21 +33,8 @@ def main():
 	end_event = torch.cuda.Event(enable_timing=True)
 	atol, rtol = 1e-2, 1e-2
 
-	# if intermediate tensor size is too big for torch, just run the kernel twice
-	# mem_size = 4*(batch * N * N * d_model/2) / (1024**3)
-	# if mem_size > 16: # GB
-	# 	print("intermediate tensor size is too big for pytorch comparison, running kernel twice...\n")
-	# wf_embedding_torch = wf_embedding
-	# else:
-	# wf_embedding_torch = wf_embedding_torch
-
 	# profiling section for nsight compute
 	torch.cuda.cudart().cudaProfilerStart()
-
-	# first run it a couple times to minimize overhead
-	# for i in range(3):
-	# 	_, _, _ = profile_func(wf_embedding, params, start_event, end_event)	
-
 
 	# run the cuda and torch implementations
 	cuda_out, cuda_time, cuda_memory = profile_func(wf_embedding, params, start_event, end_event)	
@@ -90,7 +78,7 @@ def main():
 	print(f"cuda kernel memory usage: {cuda_memory / (1024 ** 3):.3f} GB")
 
 	# optional debugging prints
-	# print(torch_out)
+	print(torch_out)
 	print(cuda_out)
 	# print(torch_out/cuda_out)
 	# print(mask)
@@ -99,7 +87,7 @@ def main():
 	# print(cuda_dk)
 	# print(torch_dk/cuda_dk)
 
-def wf_embedding_torch(coords, wavenumbers, alpha=1.0, mask=None):
+def wf_embedding_torch(coords, wavenumbers, mag_type=1, mask=None):
 
 	# get shape and prepare inputs
 	batch, N, _ = coords.shape
@@ -117,7 +105,14 @@ def wf_embedding_torch(coords, wavenumbers, alpha=1.0, mask=None):
 	mask = mask[:, :, None] | mask[:, None, :] | (dists==0)
 
 	# get the magnitudes of the wavefunctions
-	magnitudes = 1 / torch.where(mask, float("inf"), dists)[:, :, :, None] # Z x N x N x 1
+	if mag_type==0:
+		magnitudes = torch.where(mask, torch.zeros_like(dists), torch.ones_like(dists))[:, :, :, None]
+	elif mag_type == 1:
+		magnitudes = 1 / torch.where(mask, float("inf"), dists)[:, :, :, None] # Z x N x N x 1
+	elif mag_type == 2: # log2 of 0 is -inf, so 0 dists evaluate to 1/-inf = -0
+		magnitudes = 1 / torch.log2(dists)[:, :, :, None] # Z x N x N x 1
+	elif mag_type == 3:
+		magnitudes = 1 / torch.where(mask, float("inf"), torch.sqrt(dists))[:, :, :, None]
 
 	# compute real and imag parts
 	real = magnitudes * torch.cos(phases) # Z x N x N x w
@@ -129,8 +124,6 @@ def wf_embedding_torch(coords, wavenumbers, alpha=1.0, mask=None):
 
 	# convert to features
 	features = torch.stack([real_superposition, imag_superposition], dim=-1).view(batch, N, d_model) # Z x N x d_model
-
-	features *= alpha
 
 	return features
 

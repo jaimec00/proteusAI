@@ -10,7 +10,7 @@ esm2_t30_150M_UR50D		30			150M		UR50/D 2021_04		640
 esm2_t12_35M_UR50D		12			35M			UR50/D 2021_04		480
 esm2_t6_8M_UR50D		6			8M			UR50/D 2021_04		320
 
-can be downloaded dynamically based on target d_model and whether to round up or down, based on model name, or saved to disk given a specific model.
+can be downloaded dynamically based on target d_model and whether to round up or down, dynamically based on model name, or saved to disk given a specific model.
 '''
 
 from pathlib import Path

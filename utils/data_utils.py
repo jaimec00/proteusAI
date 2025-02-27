@@ -341,17 +341,23 @@ class Data():
 			labels = []
 			coords = []
 			chain_masks = []
+			chain_idxs = []
+
+			# chain_idxs is a list of lists of lists. outermost is of samples, next is chains in the sample, like [startidx, stopidx]
+			# don't need to be tensors, since number of chains in the samples is very variable
 
 			for idx, _ in batch:
+
 				labels.append(self.epoch_biounits[idx].labels)
 				coords.append(self.epoch_biounits[idx].coords)
+				chain_idxs.append(self.epoch_biounits[idx].chain_idxs.values()) # append the [start,stop] idxs of each chain in the sample, chain ids not necessary
 
 				if self.use_chain_mask:
-					
-					start_idx, end_idx = self.epoch_biounits[idx].chain_idxs[self.epoch_biounits.chains[idx]]
 
+					start_idx, end_idx = self.epoch_biounits[idx].chain_idxs[self.epoch_biounits.chains[idx]]
 					chain_mask = torch.ones(self.epoch_biounits[idx].labels.shape, dtype=torch.bool, device=self.device)
 					chain_mask[start_idx:end_idx] = False
+
 				else:
 					# mask of zeros i.e. no mask
 					chain_mask = torch.zeros(self.epoch_biounits[idx].labels.shape, dtype=torch.bool, device=self.device)
@@ -370,7 +376,8 @@ class Data():
 			chain_masks = self.pad_and_batch(chain_masks, pad_val="one", max_size=seq_size).to(torch.bool)
 			key_padding_masks = labels==-1
 
-			yield labels, coords, chain_masks, key_padding_masks
+			# chain idxs are necessary to properly compute approximate beta carbon coordinates
+			yield labels, coords, chain_masks, chain_idxs, key_padding_masks
 
 	def __len__(self):
 		return len(self.epoch_biounits)

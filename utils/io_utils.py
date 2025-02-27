@@ -7,7 +7,6 @@ description:	utility classes for input/output operations during training
 # ----------------------------------------------------------------------------------------------------------------------
 
 import matplotlib.pyplot as plt
-from torchviz import make_dot
 from pathlib import Path
 import textwrap
 import logging
@@ -19,14 +18,13 @@ import sys
 
 class Output():
 
-	def __init__(self, out_path, loss_plot=Path("loss_plot.png"), seq_plot=Path("seq_sim_plot.png"), weights_path=Path("model_parameters.pth"), write_dot=False, model_checkpoints=20):
+	def __init__(self, out_path, loss_plot=Path("loss_plot.png"), seq_plot=Path("seq_sim_plot.png"), weights_path=Path("model_parameters.pth"), model_checkpoints=20):
 
 		out_path.mkdir(parents=True, exist_ok=True)
 		self.out_path = out_path
 		self.loss_plot = self.out_path / loss_plot
 		self.seq_plot = self.out_path / seq_plot
 		self.weights_path = self.out_path / weights_path
-		self.write_dot = write_dot
 		self.log = self.setup_logging(self.out_path / Path("log.txt"))
 		self.model_checkpoints = model_checkpoints
 
@@ -53,7 +51,7 @@ class Output():
 
 	def log_hyperparameters(self, training_parameters, hyper_parameters, MASK_injection, data):
 
-		MASK_info = textwrap.dedent(f'''
+		MASK_info = "" if not hyper_parameters.use_aa else textwrap.dedent(f'''
 		MASK injection cycle length: {MASK_injection.MASK_injection_cycle_length} epochs
 
 			initial minimum MASK injection mean: {MASK_injection.initial_min_MASK_injection_mean}
@@ -121,6 +119,19 @@ class Output():
 
 	def log_epoch(self, epoch, current_lr, model, MASK_injection):
 
+
+		if not epoch.training_run_parent.hyper_parameters.use_aa:
+			MASK_info =  ""  
+		else: 
+			MASK_info = textwrap.dedent(f'''
+			
+				training inputs contain:
+					
+					mean MASK injection: {round(MASK_injection.MASK_injection_mean, 2)}
+					stdev MASK injection: {round(MASK_injection.MASK_injection_stdev, 2)}
+			
+			''')
+
 		self.log.info(textwrap.dedent(f'''
 		
 			{'-'*80}
@@ -128,39 +139,44 @@ class Output():
 			{'-'*80}
 			
 			current learning rate: {current_lr}
-	
-			training inputs contain:
-				
-				mean MASK injection: {round(MASK_injection.MASK_injection_mean, 2) if epoch.training_run_parent.hyper_parameters.use_aa else "N/A"}
-				stdev MASK injection: {round(MASK_injection.MASK_injection_stdev, 2) if epoch.training_run_parent.hyper_parameters.use_aa else "N/A"}
-
-				''')
-			)
+			{MASK_info}
+		''')
+		)
 
 	def log_epoch_losses(self, epoch, losses):
 
-		output_loss, output_seq_sim = epoch.losses.get_avg()
-		self.log.info(f"train output loss: {str(output_loss.item())}")
-		self.log.info(f"train output seq_sim: {str(output_seq_sim)}\n")		
-		losses.add_losses(output_loss, output_seq_sim)
+		loss, seq_sim = epoch.losses.get_avg()
+		self.log.info(f"train loss per token: {str(loss)}")
+		self.log.info(f"train seq_sim per token: {str(seq_sim)}\n")		
+		losses.add_losses(loss, seq_sim)
 
-	def log_val_losses(self, losses):
+	def log_val_losses(self, losses, all_losses):
 		
 		# compute epoch loss
 		loss, seq_sim = losses.get_avg()
-		self.log.info(f"validation loss: {str(loss)}")
-		self.log.info(f"validation seq_sim: {str(seq_sim)}\n")
+		self.log.info(f"validation loss per token: {str(loss)}")
+		self.log.info(f"validation seq_sim per token: {str(seq_sim)}\n")
+		all_losses.add_losses(loss, seq_sim)
 
+	def log_test_losses(test_losses, test_ar_losses):
+		test_loss, test_seq_sim = test_losses.get_avg()
+		_, test_ar_seq_sim = test_ar_losses.get_avg()
+		self.log.info(f"testing loss per token: {test_loss}")
+		self.log.info(f"test sequence similarity per token: {test_seq_sim}")
+		self.log.info(f"test auto-regressive sequence similarity per token: {test_ar_seq_sim}")
+	
 	def plot_training(self, train_losses, val_losses, val_losses_context):
 
 		# convert to numpy arrays
 		for losses in [train_losses, val_losses, val_losses_context]:
-			losses.to_numpy()
+			if losses is not None:
+				losses.to_numpy()
 
 		# Create the plot
 		plt.plot([i + 1 for i in range(len(train_losses.losses))], train_losses.losses, marker='o', color='red', label="Training Output")
 		plt.plot([i + 1 for i in range(len(val_losses.losses))], val_losses.losses, marker='o', color='blue', label="Validation Output (no context)")
-		plt.plot([i + 1 for i in range(len(val_losses_context.losses))], val_losses_context.losses, marker='o', color='orange', label="Validation Output (w/ context)")
+		if val_losses_context is not None:
+			plt.plot([i + 1 for i in range(len(val_losses_context.losses))], val_losses_context.losses, marker='o', color='orange', label="Validation Output (w/ context)")
 		
 		# Adding title and labels
 		plt.title('Cross Entropy Loss vs. Epochs')
@@ -180,9 +196,10 @@ class Output():
 
 		plt.figure()
 
-		plt.plot([i + 1 for i in range(len(train_losses.seq_sims))], train_losses.seq_sims, marker='o', color='red', label="Training Output")
-		plt.plot([i + 1 for i in range(len(val_losses.seq_sims))], val_losses.seq_sims, marker='o', color='blue', label="Validation Output (no context)")
-		plt.plot([i + 1 for i in range(len(val_losses_context.seq_sims))], val_losses_context.seq_sims, marker='o', color='orange', label="Validation Output (w/ context)")
+		plt.plot([i + 1 for i in range(len(train_losses.matches))], train_losses.matches, marker='o', color='red', label="Training Output")
+		plt.plot([i + 1 for i in range(len(val_losses.matches))], val_losses.matches, marker='o', color='blue', label="Validation Output (no context)")
+		if val_losses_context is not None:
+			plt.plot([i + 1 for i in range(len(val_losses_context.matches))], val_losses_context.matches, marker='o', color='orange', label="Validation Output (w/ context)")
 		
 		# Adding title and labels
 		plt.title('Mean Sequence Similarity vs. Epochs')
@@ -196,10 +213,6 @@ class Output():
 		plt.grid(True)
 		plt.savefig(self.seq_plot)
 		self.log.info(f"graph of seq_similarity vs. epoch saved to {self.seq_plot}")
-
-	def write_dot(self, model, output):
-		dot = make_dot(output, params=dict(model.named_parameters()))
-		dot.render(self.dot_out, format="pdf")
 
 	def save_model(self, model, appended_str=""):
 		if appended_str:

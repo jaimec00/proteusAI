@@ -149,6 +149,7 @@ class HyperParameters():
 
 	def __init__(self, 	d_model,
 						learnable_wavelengths,
+						wf_type, anisotropic_wf,
 						min_wl, max_wl, base_wl, 
 						d_hidden_we, hidden_layers_we, 
 						use_aa,
@@ -162,6 +163,8 @@ class HyperParameters():
 						temperature, use_model ):
 		self.d_model = d_model
 		self.learnable_wavelengths = learnable_wavelengths
+		self.wf_type = wf_type
+		self.anisotropic_wf = anisotropic_wf
 		self.min_wl = min_wl
 		self.max_wl = max_wl
 		self.base_wl = base_wl 

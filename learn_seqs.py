@@ -42,6 +42,8 @@ if __name__ == "__main__":
 	
 	# wavefunction embedding
 	parser.add_argument("--learnable_wavelengths", default=False, type=bool, help="whether to make wavelengths learnable")
+	parser.add_argument("--wf_type", default=1, type=int, choices=[0,1,2,3], help="magnitude scaling in wf_embedding. 0->mag=1, 1->mag=1/|R|, 2->mag=1/log2(|R|), 3->mag=1/sqrt(|R|)")
+	parser.add_argument("--anisotropic_wf", default=False, type=bool, help="whether to use the anisotropic version (includes beta carbon info) or isotropic wf_embedding")
 	parser.add_argument("--min_wl", default=3.7, type=float, help="minimum wavelength to use in wavelength sampling")
 	parser.add_argument("--max_wl", default=20.0, type=float, help="maximum wavelength to use in wavelength sampling")
 	parser.add_argument("--base_wl", default=20.0, type=float, help="base to use in wavelength sampling")
@@ -132,7 +134,6 @@ if __name__ == "__main__":
 	parser.add_argument("--loss_plot", default="loss_vs_epoch.png", type=Path, help="path to save plot of loss vs epochs after training")
 	parser.add_argument("--seq_plot", default="seq_sim_vs_epoch.png", type=Path, help="path to save plot of sequence similarity vs epochs after training")
 	parser.add_argument("--weights_path", default="model_parameters.pth", type=Path, help="path to save weights after training")
-	parser.add_argument("--write_dot", default=False, type=bool, help="whether to save the dot file of the computational graph")
 	parser.add_argument("--model_checkpoints", default=10, type=int, help="number of epochs to save the model after")
 
 	# input

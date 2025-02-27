@@ -1,5 +1,5 @@
 import torch
-from utils.model_utils.wf_embedding.cuda import wf_embedding_kernel
+from utils.model_utils.wf_embedding.isotropic.cuda import wf_embedding_kernel
 
 # for testing and development
 
@@ -10,16 +10,19 @@ from utils.model_utils.wf_embedding.cuda import wf_embedding_kernel
 # wf_embedding_kernel = load(
 # 	name="wf_embedding_kernel",
 # 	sources=[os.path.join(base_dir, "wf_embedding_if.cpp"), os.path.join(base_dir, "wf_embedding_kernel.cu")],
+# 	# extra_include_paths=["/opt/nvidia/hpc_sdk/Linux_x86_64/24.11/cuda/include"],
 # 	verbose=True  # Verbose output for debugging
 # )
 
-def wf_embedding(coords, wavenumbers, alpha=1.0, mask=None):
-	return _wf_embedding.apply(coords, wavenumbers, alpha, mask)
+def wf_embedding(coords, wavenumbers, magnitude_type=1, mask=None):
+	return _wf_embedding.apply(coords, wavenumbers, magnitude_type, mask)
 
 class _wf_embedding(torch.autograd.Function):
 
 	@staticmethod
-	def forward(ctx, coords, wavenumbers, alpha, mask):
+	def forward(ctx, coords, wavenumbers, magnitude_type, mask):
+
+		assert magnitude_type in [0,1,2,3] # mag=1, mag=1/|R|, mag=1/log2(|R|), mag=1/sqrt(|R|)
 
 		# bake the mask into coords w/ arbitrary val. less likely to give NaNs than using inf
 		coords = torch.where(mask.unsqueeze(2), 12345, coords)
@@ -45,13 +48,9 @@ class _wf_embedding(torch.autograd.Function):
 		# call the kernel
 		wf_embedding_kernel.forward(    coords, wavenumbers, 
 										out,
-										cos_sums, sin_sums
+										cos_sums, sin_sums,
+										magnitude_type
 								)
-
-		# scaling factor (A in green's func)
-		out *= alpha
-		cos_sums *= alpha
-		sin_sums *= alpha
 
 		# save for the backward
 		ctx.save_for_backward(cos_sums, sin_sums)

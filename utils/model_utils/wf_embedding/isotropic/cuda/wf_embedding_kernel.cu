@@ -9,6 +9,7 @@ descripiton:    cuda kernel to embed 3d coordinates to target feature space usin
 */
 
 #include <cuda_runtime.h>
+#include <iostream>
 
 // define function to sum the values of threads within a warp
 // this is used to superpose the wavefunctions computed by individual threads in a warp
@@ -32,7 +33,7 @@ __global__ void wf_embedding_kernel(
 	float* cos_sums_ptr, int stride_cos_sums_Z, int stride_cos_sums_N, int stride_cos_sums_K,
 	float* sin_sums_ptr, int stride_sin_sums_Z, int stride_sin_sums_N, int stride_sin_sums_K,
 
-	int tot_Z, int tot_N, int d_model
+	int tot_Z, int tot_N, int d_model, int magnitude_type
 ) {
 	
 	// compute global thread index
@@ -166,6 +167,22 @@ __global__ void wf_embedding_kernel(
 		float dists = mask_IJ * dists_raw * rsqrtf(dists_raw + (!mask_IJ)); // fast approximation of sqrt ( + !mask avoids div by 0, 
 																			// mult by mask ensures invalid dists are 0 for consistent masking)
 
+		float magnitude;
+		switch (magnitude_type) {
+			case 0: // no magnitude scaling, each observer sees the full effect of all sources
+				magnitude = 1.0;
+				break;
+			case 1: // same magnitude as green's func, i.e. 1/|R|
+				magnitude = 1.0 / (dists + (!mask_IJ));
+				break;
+			case 2:	// take the log2 of the distance, i.e. 1/log2(|R|) to account more for distant interactions
+				magnitude = 1.0 / log2f(dists + 2*(!mask_IJ)); // evaluates to 1 / log2(0+2*1) = 1/1 = 1 for 0 dists. cos and sine are already masked
+				break;
+			case 3: // take the sqrt of dists 1/sqrt(dists). 
+				magnitude = mask_IJ * rsqrtf(dists + (!mask_IJ));
+				break;
+		}
+
 		// loop over wavenumbers in shared memory
 		#pragma unroll 1
 		for (int k = 0; k < num_wn; ++k) {
@@ -180,16 +197,14 @@ __global__ void wf_embedding_kernel(
 			float sine = mask_IJ * __sinf(phase);  // Fast approximation of sine
 
 			// compute real and imaginary parts
-			// divide by one for invalid to avoid nans
-			// note that cos and sin are 0 for invalid threads already
-			float real = cosine / (dists + (!mask_IJ));
-			float imag = sine / (dists + (!mask_IJ));
+			float real = cosine*magnitude;
+			float imag = sine*magnitude;
 
-			// have each warp sum the contributions of its threads
 			float real_superposition = warp_sum(real);
 			float imag_superposition = warp_sum(imag);
-			float cos_sum = warp_sum(cosine);
-			float sin_sum = warp_sum(sine);
+
+			float cos_sum = warp_sum(real*dists); // d_imag
+			float sin_sum = warp_sum(imag*dists); // d_real
 
 			if (lane_id==0){ // first thread in the warp writes to mem
 
@@ -254,7 +269,7 @@ void wf_embedding_kernel_forward(
 	float* cos_sums_ptr, int stride_cos_sums_Z, int stride_cos_sums_N, int stride_cos_sums_K,
 	float* sin_sums_ptr, int stride_sin_sums_Z, int stride_sin_sums_N, int stride_sin_sums_K,
 
-	int tot_Z, int tot_N, int d_model, 
+	int tot_Z, int tot_N, int d_model, int magnitude_type,
 	cudaStream_t stream
 ) {
 	// define block and grid dimensions
@@ -293,6 +308,6 @@ void wf_embedding_kernel_forward(
 		out_ptr,  stride_out_Z, stride_out_N, stride_out_D,
 		cos_sums_ptr, stride_cos_sums_Z, stride_cos_sums_N, stride_cos_sums_K,
 		sin_sums_ptr, stride_sin_sums_Z, stride_sin_sums_N, stride_sin_sums_K,
-		tot_Z, tot_N, d_model
+		tot_Z, tot_N, d_model, magnitude_type
 	);
 }

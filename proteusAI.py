@@ -14,7 +14,8 @@ import torch.nn.init as init
 import torch.nn.functional as F
 
 from utils.model_utils.esm2.get_esm_weights import get_esm_weights
-from utils.model_utils.wf_embedding.cuda.wf_embedding import wf_embedding
+from utils.model_utils.wf_embedding.isotropic.cuda.wf_embedding import wf_embedding as wf_embedding_iso
+# from utils.model_utils.wf_embedding.anisotropic.cuda.wf_embedding import wf_embedding as wf_embedding_aniso # not implemented yet
 from utils.model_utils.geometric_attn.triton.geometric_attn import geometric_attn
 
 # ----------------------------------------------------------------------------------------------------------------------
@@ -79,7 +80,7 @@ class AminoAcidEmbedding(nn.Module):
 
 		self.use_esm = esm2_weights_path != ""
 
-		if self.use_esm: # choose a esm2 model based on d_model and download
+		if self.use_esm:
 			if not esm2_weights_path.endswith(".pt"): # download the chosen model
 				esm2_weights = get_esm_weights(esm2_weights_path)
 			else: # load from precomputed file, note that this should be created w/ main func of utils/model_utils/esm2/get_esm_weights.py for proper mapping to proteusAI alphabet
@@ -89,13 +90,13 @@ class AminoAcidEmbedding(nn.Module):
 					raise e(f"could not find ESM2 weights at {esm2_weights_path}")
 
 			# initialize esm2 weights
-			esm2_d_model = esm2_weights["esm2_linear_nobias.weight"].size(1)
-			self.esm2_linear_nobias = nn.Linear(in_features=num_aas, out_features=esm2_d_model, bias=False)
-			self.esm2_linear_nobias.weight.data = esm2_weights["esm2_linear_nobias.weight"].T
+			aa_d_model = esm2_weights["esm2_linear_nobias.weight"].size(1)
+			self.aa_linear_nobias = nn.Linear(in_features=num_aas, out_features=aa_d_model, bias=False)
+			self.aa_linear_nobias.weight.data = esm2_weights["esm2_linear_nobias.weight"].T
 
-			self.esm2_layernorm = nn.LayerNorm(normalized_shape=esm2_d_model)
-			self.esm2_layernorm.weight.data = esm2_weights["esm2_layernorm.weight"]
-			self.esm2_layernorm.bias.data = esm2_weights["esm2_layernorm.bias"]
+			self.aa_layernorm = nn.LayerNorm(normalized_shape=aa_d_model)
+			self.aa_layernorm.weight.data = esm2_weights["esm2_layernorm.weight"]
+			self.aa_layernorm.bias.data = esm2_weights["esm2_layernorm.bias"]
 
 			if not learnable_esm:
 				self.esm2_linear_nobias.weight.requires_grad = False
@@ -103,23 +104,23 @@ class AminoAcidEmbedding(nn.Module):
 				self.esm2_layernorm.bias.requires_grad = False
 				
 		else:
-			esm2_d_model = num_aas
+			aa_d_model = d_model
+			self.aa_linear_nobias = nn.Linear(num_aas, aa_d_model, bias=False)
+			self.aa_layernorm = nn.LayerNorm(aa_d_model)
 
-		self.linear = nn.Linear(esm2_d_model, d_model) # to map to d_model
-		self.ffn = MLP(d_model, d_model, d_hidden_aa, hidden_layers_aa, dropout)
+		self.ffn = MLP(aa_d_model + d_model, d_model, d_hidden_aa, hidden_layers_aa, dropout)
 		self.dropout = nn.Dropout(dropout)
-		self.norm1 = nn.LayerNorm(d_model)
-		self.norm2 = nn.LayerNorm(d_model)
+		self.norm = nn.LayerNorm(d_model)
 
 	def forward(self, aas, wf):
 
-		if self.use_esm:
-			aas = self.esm2_linear_nobias(aas)
-			aas = self.esm2_layernorm(aas)
+		aas = self.aa_linear_nobias(aas)
+		aas = self.aa_layernorm(aas)
 
-		aas = self.norm1(self.linear(aas) + wf)
+		# esm dim and wf dim dont need to match, since cating and putting through mlp
+		aas = torch.cat([aas, wf], dim=2)
 
-		aas = self.norm2(aas + self.dropout(self.ffn(aas)))
+		aas = self.norm(wf + self.dropout(self.ffn(aas)))
 
 		return aas
 
@@ -134,7 +135,7 @@ class WavefunctionEmbedding(nn.Module):
 	also includes mlp after the embedding layer
 	actual function implemented in cuda, optimized for h100 (not really, only takes advantage of large shared mem, need a rewrite to use TMA, possibly WGMMA)
 	'''
-	def __init__(self, d_model=512, min_wl=3.7, max_wl=20, base=20, d_hidden=1024, hidden_layers=0, learnable_wavelengths=False, dropout=0.1):
+	def __init__(self, d_model=512, min_wl=3.7, max_wl=20, base=20, d_hidden=1024, hidden_layers=0, learnable_wavelengths=False, magnitude_type=1, anisotropic_wf=False, dropout=0.1):
 		super(WavefunctionEmbedding, self).__init__()
 
 		# compute wavelengths
@@ -154,11 +155,15 @@ class WavefunctionEmbedding(nn.Module):
 			inv_dist_pct = 1 - (dist_pct**(1/d_model)) # invert by subtracting pct from 1, also take the d_model root to emphasize the diagonals more
 			log_inv = torch.log(inv_dist_pct) # take the log to prepare it for softmax
 			self.wavelength_weights = nn.Parameter(log_inv)# initialize the learnable weight matrix
-			
+		
+		self.magnitude_type = magnitude_type
+		self.anisotropic_wf = anisotropic_wf
+
 		self.ffn = MLP(d_model, d_model, d_hidden, hidden_layers, dropout)
 		self.norm1 = nn.LayerNorm(d_model)
 		self.norm2 = nn.LayerNorm(d_model)
 		self.dropout = nn.Dropout(dropout)
+		self.linear = nn.Linear(d_model, d_model, bias=False)
 
 	def get_wavelengths(self):
 		
@@ -170,14 +175,17 @@ class WavefunctionEmbedding(nn.Module):
 
 		return wavelengths		
 
-	def forward(self, coords, key_padding_mask):
+	def forward(self, coords_alpha, coords_beta=None, key_padding_mask=None):
 
 		wavenumbers = 2 * torch.pi / self.get_wavelengths()
-		alpha = 1
 
-		wf = wf_embedding(coords, wavenumbers, alpha, key_padding_mask) # batch x N x 3 --> batch x N x d_model
+		if self.anisotropic_wf: # not implemented yet
+			raise NotImplementedError("anisotropic wavefunction embedding not implemented, please run isotropic version for now")
+			# wf = wf_embedding_aniso(coords_alpha, coords_beta, wavenumbers, self.alpha, self.magnitude_type, key_padding_mask) # batch x N x 3 --> batch x N x d_model
+		else:
+			wf = wf_embedding_iso(coords_alpha, wavenumbers, self.magnitude_type, key_padding_mask) # batch x N x 3 --> batch x N x d_model
 
-		wf = self.norm1(wf)
+		wf = self.norm1(self.linear(wf))
 		# wf = self.norm2(wf + self.dropout(self.ffn(wf)))
 
 		return wf
@@ -259,7 +267,8 @@ class GeoAttention(nn.Module):
 		'''
 
 		# make sure shape is compatible
-		assert (q.shape == k.shape) and (q.shape == v.shape)
+		assert q.shape == k.shape == v.shape
+		assert q.dim() == 3
 		batch, N, d_model = q.shape
 		assert d_model == self.d_model
 
@@ -327,6 +336,7 @@ class proteusAI(nn.Module):
 
 						# wf embedding + wf mlp
 						learnable_wavelengths=False,
+						wf_mag_type=1, anisotropic_wf=False,
 						min_wl=3.7, max_wl=20, base_wl=20, 
 						d_hidden_wl=1024, hidden_layers_wl=0, 
 
@@ -351,15 +361,26 @@ class proteusAI(nn.Module):
 		super(proteusAI, self).__init__()
 
 		# wavefunc
-		self.wf_embedding = WavefunctionEmbedding(d_model, min_wl, max_wl, base_wl, d_hidden_wl, hidden_layers_wl, learnable_wavelengths, dropout)
+		self.wf_embedding = WavefunctionEmbedding(d_model, min_wl, max_wl, base_wl, d_hidden_wl, hidden_layers_wl, learnable_wavelengths, wf_mag_type, anisotropic_wf, dropout)
+		self.anisotropic_wf = anisotropic_wf # false means use isotropic version
+
+		# encoders
+		self.encoders = nn.ModuleList([
+										Encoder(	d_model, d_hidden_attn, hidden_layers_attn, 
+													n_head, min_spread, max_spread, base_spreads, 
+													num_spread, min_rbf, max_rbf, beta, learnable_spreads, 
+													dropout, attn_dropout
+												) 
+										for _ in range(encoder_layers)
+									])
 
 		# amino acids
 		# init aa embedding even if not used, so that state dict loads properly when used without having to use strict=False kwarg
 		self.use_aa = use_aa
 		self.aa_embedding = AminoAcidEmbedding(21, d_model, esm2_weights_path, d_hidden_aa, hidden_layers_aa, learnable_esm, dropout)
 
-		# encoders
-		self.encoders = nn.ModuleList([
+		# not an actual decoder, but name fits better, just a bunch of encoders, use same args as encoder bc just testing for now
+		self.decoders = nn.ModuleList([
 										Encoder(	d_model, d_hidden_attn, hidden_layers_attn, 
 													n_head, min_spread, max_spread, base_spreads, 
 													num_spread, min_rbf, max_rbf, beta, learnable_spreads, 
@@ -373,90 +394,50 @@ class proteusAI(nn.Module):
 		init_xavier(self.out_proj)
 
 
-	def forward(self, coords, aas, key_padding_mask=None, auto_regressive=False, temp=0.1):
+	def forward(self, coords, aas, chain_idxs, key_padding_mask=None, auto_regressive=False, temp=0.1):
 		"""
 		Forward pass of the model with optional auto-regressive inference
 		"""
-		# coords: batch x N x 3 or batch x N x 3 x 3 for backbone atoms (N, C, and Ca)
+		# coords: batch x N x 3 for Ca only model or batch x N x 3 x 3 for backbone atoms (N, C, and Ca)
 		# aas: batch x N x 21
 
 		# still need to implement properly
-		# coords_alpha, coords_beta = get_coords(coords, key_padding_mask, chain_mask)
+		if self.anisotropic_wf:
+			coords_alpha, coords_beta = get_coords(coords, chain_idxs, key_padding_mask)
+		else:
+			coords_alpha, coords_beta = coords, None # only works w/ ca model for now
 
 		# wave function embedding (replaces positional encoding)
-		wf = self.wf_embedding(coords, key_padding_mask) # batch x N x 3 --> batch x N x d_model
+		wf = self.wf_embedding(coords_alpha, coords_beta, key_padding_mask) # batch x N x 3 --> batch x N x d_model
+
+		# encoder layers
+		wf = self.encode(wf, coords_alpha, key_padding_mask) # batch x N x d_model (returns aa probability logits)
 
 		# initial wf embedding is the same, so dont recompute each time in auto regressive
 		if auto_regressive:
-			return self.auto_regressive(wf, coords, aas, key_padding_mask, temp)
+			return self.auto_regressive(wf, coords_alpha, aas, key_padding_mask, temp)
 
 		if self.use_aa:
-			wf = self.aa_embedding(aas, wf)
+			wf = self.aa_embedding(aas, wf) # cat and mlp
+			wf = self.decode(wf, coords_alpha, key_padding_mask)
 
-		# bidirectional encoder
-		seq_probs = self.encode(wf, coords, key_padding_mask) # batch x N x d_model (returns aa probability logits)
+		seq_probs = self.out_proj(wf)
 
 		return seq_probs
 
-	def encode(self, aas, coords, key_padding_mask):
+	def encode(self, wf, coords, key_padding_mask):
 
 		for encoder in self.encoders:
-			aas = encoder(aas, coords, key_padding_mask)
+			wf = encoder(wf, coords, key_padding_mask)
 
-		seq_probs = self.out_proj(aas)
+		return wf
 
-		return seq_probs
+	def decode(self, aas, coords, key_padding_mask):
 
-	# will prob move this outside the model, and just have the input be ca and cb coords directly
-	# will import AA sizes so can update the cb magnitudes auto regressively (possibly include pKa based phase shifts too)
-	# def get_coords(self, coords, key_padding_mask, chain_idxs): # chain dict
-	# 	if coords.dim() == 3: # Ca ony model
-	# 		coords_beta = get_Cb_from_Ca(coords, key_padding_mask, chain_idxs)
-	# 		coords_alpha = coords
-	# 	if coords.dim() == 4: # backbone model
-	# 		coords_alpha, coords_beta = get_Cb_from_BB(coords, key_padding_mask, chain_idxs)
+		for decoder in self.decoders:
+			aas = decoder(aas, coords, key_padding_mask)
 
-	# def get_Cb_from_Ca(self, coords, key_padding_mask, chain_idxs):
-	# 	'''
-	# 	note, that need to include chain mask and key_padding_mask to do this properly, in progress, same goes for get_Cb_from_BB
-
-	# 	compute beta carbon coords (not absolute, just relative to Ca). not used yet, need to adapt wf_embedding to use this info
-	# 	approximates N and C as being on the line connecting adjacent Ca, with ideal bond distances
-	# 	uses the same experimentally determined constants as PMPNN to compute linear combination of b1, b2, and b3
-	# 	terminal Ca do not have Cb (can't approximate N and C, since no adjacent Ca), so Cb coords (relative to Ca) are (0,0,0) for these
-	# 	'''
-
-	# 	logical_n = coords[:, 0:-2, :]
-	# 	logical_ca = coords[:, 1:-1, :]
-	# 	logical_c = coords[:, 2:, :]
-
-	# 	b1 = ( logical_ca - logical_n)
-	# 	b1 = 1.458 * b1 / torch.linalg.norm(b1, dim=2, keepdims=True)
-	# 	b2 = (logical_c - logical_ca)
-	# 	b2 = 1.525 * b2 / torch.linalg.norm(b2, dim=2, keepdims=True)
-	# 	b3 = torch.linalg.cross(b1, b2)
-
-	# 	cb = -0.58273431*b2 + 0.56802827*b1 - 0.54067466*b3
-
-	# 	# the first and last ca are used as inplace cb, so make cb=ca for these
-	# 	# no_cb = 
-	# 	# cb = torch.cat([, cb, coords[:, -1, :][None, :]], dim=1) 
-
-	# 	return cb
-
-	# def get_Cb_from_BB(self, coords):
-
-	# 	n = coords[:, :, 0, :]
-	# 	ca = coords[:, :, 1, :]
-	# 	c = coords[:, :, 2, :]
-		
-	# 	b1 = ca - n
-	# 	b2 = c - ca
-	# 	b3 = torch.linalg.cross(b1, b2)
-
-	# 	cb = -0.58273431*b2 + 0.56802827*b1 - 0.54067466*b3
-
-	# 	return ca, cb
+		return aas
 
 	def auto_regressive(self, wf, coords, aas, key_padding_mask=None, temp=0.1):
 
@@ -472,8 +453,11 @@ class proteusAI(nn.Module):
 			# embed to feature space
 			aa_embedded = self.aa_embedding(aas, wf)
 
-			# decode the wavefunction
-			seq_probs = self.encode(aa_embedded, coords, key_padding_mask) # batch x N x 512 --> batch x N X 20 
+			# decode
+			decoded = self.decode(aa_embedded, coords, key_padding_mask)
+
+			# get seq prob logits
+			seq_probs = self.out_proj(decoded)
 
 			# convert to probability distribution
 			seq_probs = F.softmax(seq_probs, dim=2) # batch x N x 20
@@ -520,5 +504,99 @@ class proteusAI(nn.Module):
 		aa_onehot = torch.where((predicted_positions_mask.unsqueeze(-1).expand(-1, -1, aa_onehot.size(-1))), aa_onehot, aa_onehot_temp)
 
 		return aa_onehot
+
+	# will import AA sizes so can update the cb magnitudes auto regressively (possibly include pKa based phase shifts too)
+	def get_coords(self, coords, chain_idxs): 
+
+		# in both cases, ca and cb coords are batch x N x 3
+		if coords.dim() == 3: # Ca only model
+			coords_beta = get_Cb_from_Ca(coords, chain_idxs)
+			coords_alpha = coords
+		elif coords.dim() == 4: # backbone model
+			coords_alpha, coords_beta = get_Cb_from_BB(coords)
+		else:
+			raise ValueError(f"invalid input size for coordinates, expected (batch,N,3) for Ca only model or (batch,N,3,3) for backbone model, but got {coords.shape=}")
+
+	def get_Cb_from_Ca(self, coords, chain_idxs):
+		'''
+		compute beta carbon coords (not absolute, just relative to Ca). not used yet, need to adapt wf_embedding to use this info
+		approximates N and C as being on the line connecting adjacent Ca, with ideal bond distances
+		uses the same experimentally determined constants as PMPNN to compute linear combination of b1, b2, and b3
+		terminal Ca do not have Cb (can't approximate N and C, since no adjacent Ca), so Cb coords (relative to Ca) are (0,0,0) for these
+		possibly add aa info to the cb coords by scaling cb by avg side chain length of predicted residues
+
+		chain_idxs is a list of lists of lists. not a tensor because can't use indexing since each chain is of a 
+		different size. 
+		i don't think it can be done efficiently, either way, say big biounit of 8192 has 50 chains, will only have two samples, say each has 100
+		chains at most, so only 200 iters of fast computation. if have smaller inputs, say 64 samples of 128 resi w/ 4 chains each, need 64*4 = 256 iters, 
+		so pretty feasible, but we'll see how it goes once i implement the anisotropic wf embedding to use this info
+
+		can probably make a cuda kernel to do this, so that each block processes a chain, since these are independant, depends on how slow the looping is
+		if so, the function will convert the chain list to a batch x max_chains_in_sample x 2(start,stop) tensor and read the appropriate idxs of coords 
+		from gmem and process them within the block 
+
+		chain_idxs looks like:
+			[ 
+				[ 
+					[sample1_chain1_start, sample1_chain1_stop], 
+					[sample1_chain2_start, sample1_chain2_stop] 
+				], 
+				[
+					[sample2_chain1_start, sample2_chain1_stop], 
+					[sample2_chain2_start, sample2_chain2_stop] 
+				]
+			]
+		
+		loops through chains of each sample, the chain idxs are consistent with the actual indexes of coords, 
+		and no padding applied to chain idxs, so no masking necessary
+
+		'''
+
+		# default cb position is 0,0,0
+		all_cb = torch.zeros_like(coords)
+
+		# loop through samples
+		for sample in chain_idxs:
+
+			# loop through chains in the sample
+			for chain_start, chain_stop in sample:
+
+				logical_n = coords[sample, chain_start:chain_stop-2, :] # chain_len-2 x 3
+				logical_ca = coords[sample, chain_start+1:chain_stop-1, :]
+				logical_c = coords[sample, chain_start+2:chain_stop, :]
+
+				b1 = ( logical_ca - logical_n)
+				b1 = 1.458 * b1 / torch.linalg.norm(b1, dim=1, keepdims=True)
+				b2 = (logical_c - logical_ca)
+				b2 = 1.525 * b2 / torch.linalg.norm(b2, dim=1, keepdims=True)
+				b3 = torch.linalg.cross(b1, b2)
+
+				cb = -0.58273431*b2 + 0.56802827*b1 - 0.54067466*b3
+
+				# the first and last ca are used as inplace cb, so these coords are already zero in all_cb, just make sure
+				# indexing is consistent by excluding the first and last resi of the chain here
+				all_cb[sample, chain_start+1:chain_stop-1, :] = cb
+				# samples not appended are all zeros, which is ok since these should be masked or approximated as glycine (no cb)
+
+		return all_cb
+
+	def get_Cb_from_BB(self, coords):
+
+		'''
+		don't need chain idxs here, since the input is a batch x N x 3(N,Ca,C) x 3 tensor, so can use the coords tensor directly
+		no masking necessary, as cb ends up being 0,0,0 for masked vals, since masked coords are 0,0,0
+		'''
+
+		n = coords[:, :, 0, :]
+		ca = coords[:, :, 1, :]
+		c = coords[:, :, 2, :]
+		
+		b1 = ca - n
+		b2 = c - ca
+		b3 = torch.linalg.cross(b1, b2, dim=2)
+
+		cb = -0.58273431*b2 + 0.56802827*b1 - 0.54067466*b3
+
+		return ca, cb
 
 # ----------------------------------------------------------------------------------------------------------------------

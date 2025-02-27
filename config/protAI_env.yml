@@ -1,3 +1,9 @@
+# for my purposes i used cuda 12.4 to avoid headaches, since pytorch latest pre-compiled version is compiled w/ 12.4,
+# but this should work with cuda 12.0+ as long as you change pytorch and cuda versions
+# i explicitly set all of the cuda libraries to 12.4, bc some of them had cuda 12.8 dependencies, 
+# which made compiling the custom kernels difficult, but i havent tested which of these causes cuda version mismatches
+# if anyone is curious and would like to help out, you can try different configurations and check explicitly w/ <conda list | grep cuda>
+
 name: protAI_env
 channels:
   - pytorch
@@ -9,8 +15,17 @@ dependencies:
   - python>=3.9
   - pytorch=2.5.1
   - pytorch-cuda=12.4
-  - cudatoolkit=11.8.0
+  - cuda-toolkit=12.4 
   - cuda-runtime=12.4
+  - cuda-compiler=12.4
+  - cuda-nvcc=12.4      
+  - cuda-nsight=12.4
+  - cuda-version=12.4
+  - cuda-tools=12.4
+  - cuda-command-line-tools=12.4
+  - cuda-libraries-dev=12.4
+  - cuda-libraries-static=12.4
+  - cuda-visual-tools=12.4
   - numpy
   - pandas
   - requests
@@ -18,8 +33,10 @@ dependencies:
   - biopython=1.84
   - tqdm
   - matplotlib
+  - plotly
   - pip
   - pip:
-      - torchviz
       - triton
-prefix: /usr/local/usrapps/wangyy/hjc2538/conda/envs/protAI_env
+      - ninja
+
+# prefix: /scratch/hjc2538/conda/envs/protAI_env
