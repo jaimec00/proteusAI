@@ -2,6 +2,7 @@
 #include <torch/extension.h>  // for pytorch c++ extensions
 #include <ATen/cuda/CUDAContext.h>  // for accessing cuda streams
 #include <cuda_runtime.h>  // for cuda runtime functions
+#include <cstdint>
 
 // declare the cuda kernel implemented in wf_embedding_kernel.cu
 void wf_embedding_kernel_forward(
@@ -12,7 +13,7 @@ void wf_embedding_kernel_forward(
     float* cos_sums, int stride_cos_sums_Z, int stride_cos_sums_N, int stride_cos_sums_K,
     float* sin_sums, int stride_sin_sums_Z, int stride_sin_sums_N, int stride_sin_sums_K,
 
-    int tot_Z, int tot_N, int d_model, int magnitude_type,
+    int tot_Z, int tot_N, int d_model, int magnitude_type, float dropout_p, uint32_t rng_seed,
     cudaStream_t stream
 );
 
@@ -20,7 +21,7 @@ void wf_embedding_forward(
     torch::Tensor coords, torch::Tensor wavenumbers, 
     torch::Tensor out, 
     torch::Tensor cos_sums, torch::Tensor sin_sums,
-    int magnitude_type
+    int magnitude_type, float dropout_p, uint32_t rng_seed
 ) {
 
 
@@ -67,7 +68,7 @@ void wf_embedding_forward(
         cos_sums.stride(0), cos_sums.stride(1), cos_sums.stride(2),
         sin_sums_ptr, 
         sin_sums.stride(0), sin_sums.stride(1), sin_sums.stride(2),
-        tot_Z, tot_N, d_model, magnitude_type,
+        tot_Z, tot_N, d_model, magnitude_type, dropout_p, rng_seed,
         stream
     );
 

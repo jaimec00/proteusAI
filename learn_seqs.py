@@ -10,7 +10,7 @@ from pathlib import Path
 import argparse
 import yaml
 
-from utils.train_utils import TrainingRun
+from utils.train_utils.training_run import TrainingRun
 
 # ----------------------------------------------------------------------------------------------------------------------
 
@@ -40,8 +40,13 @@ if __name__ == "__main__":
 	# model dim
 	parser.add_argument("--d_model", default=512, type=int, help="dimensionality of input embeddings")
 	
+	parser.add_argument("--freeze_structure_weights", default=False, type=bool, help="whether to freeze weights associated with structure (for transfer learning)")
+	parser.add_argument("--freeze_sequence_weights", default=False, type=bool, help="whether to freeze weights associated with sequence (for transfer learning)")
+	parser.add_argument("--cp_struct_enc_2_seq_enc", default=False, type=bool, help="whether to copy the structure encoder weights to the sequence encoder weights (for transfer learning)")
+
 	# wavefunction embedding
 	parser.add_argument("--learnable_wavelengths", default=False, type=bool, help="whether to make wavelengths learnable")
+	parser.add_argument("--wf_dropout", default=0.0, type=float, help="percentage of dropout to apply to wave function embedding")
 	parser.add_argument("--wf_type", default=1, type=int, choices=[0,1,2,3], help="magnitude scaling in wf_embedding. 0->mag=1, 1->mag=1/|R|, 2->mag=1/log2(|R|), 3->mag=1/sqrt(|R|)")
 	parser.add_argument("--anisotropic_wf", default=False, type=bool, help="whether to use the anisotropic version (includes beta carbon info) or isotropic wf_embedding")
 	parser.add_argument("--min_wl", default=3.7, type=float, help="minimum wavelength to use in wavelength sampling")
@@ -58,7 +63,8 @@ if __name__ == "__main__":
 	parser.add_argument("--learnable_esm", default=True, type=bool, help="whether to make esm weights learnable")
 	
 	# encoder
-	parser.add_argument("--encoder_layers", default=4, type=int, help="number of encoder layers")
+	parser.add_argument("--struct_encoder_layers", default=4, type=int, help="number of encoder layers")
+	parser.add_argument("--seq_encoder_layers", default=4, type=int, help="number of encoder layers")
 	parser.add_argument("--num_heads", default=8, type=int, help="number of attention heads")
 	parser.add_argument("--learnable_spreads", default=True, type=bool, help="whether to make spreads learnable")
 	parser.add_argument("--min_spread", default=3.0, type=float, help="minimum spread to use for geometric attention")
@@ -118,16 +124,14 @@ if __name__ == "__main__":
 	parser.add_argument("--noise_coords_std", default=0.02, type=float, help="standard deviation of gaussian noise injection into input coordinates for data augmentation")
 
 	# input one-hot injection
-	parser.add_argument("--initial_min_MASK_injection_mean", default=0.05, type=float, help="initial minimum mean percentage of one-hot label injection in training")
-	parser.add_argument("--initial_max_MASK_injection_mean", default=0.1, type=float, help="initial maximum mean percentage of one-hot label injection in training")
-	parser.add_argument("--final_min_MASK_injection_mean", default=0.9, type=float, help="final minimum mean percentage of one-hot label injection in training")
-	parser.add_argument("--final_max_MASK_injection_mean", default=0.95, type=float, help="final maximum mean percentage of one-hot label injection in training")
-	parser.add_argument("--MASK_injection_stdev", default=0.05, type=float, help="stdev percentage of one-hot label injection in training")
-	parser.add_argument("--randAA_pct", default=0.05, type=float, help="stdev percentage of one-hot label injection in training")
-	parser.add_argument("--trueAA_pct", default=0.05, type=float, help="stdev percentage of one-hot label injection in training")
-
-	# cycle length of one-hot injection
-	parser.add_argument("--MASK_injection_cycle_length", default=4.3, type=float, help="input one-hot injection cycle length. operates at different frequency than label smooth and noise cycles")
+	parser.add_argument("--mean_mask_pct",  default=0.50, type=float, help="mask percentages are sampled from gauss distribution on a per sample basis, this is the mean")
+	parser.add_argument("--std_mask_pct", default=0.25, type=float, help="mask percentages are sampled from gauss distribution on a per sample basis, this is the standard deviation")
+	parser.add_argument("--min_mask_pct", default=0.15, type=float, help="minimum mask_pct, anything lower is clampled")
+	parser.add_argument("--max_mask_pct", default=1.00, type=float, help="max mask_pct, higher is clamped")
+	parser.add_argument("--mean_span", default=10, type=int, help="mean span length, sampled from gauss dist independantly for each sample")
+	parser.add_argument("--std_span", default=5, type=int, help="std span length, sampled from gauss dist independantly for each sample")
+	parser.add_argument("--randAA_pct", default=0.1, type=float, help="percentage of true AA to inject into inputs, relative to the percent of masked tokens")
+	parser.add_argument("--trueAA_pct", default=0.1, type=float, help="percentage of random AA to inject into inputs, relative to the percent of masked tokens")
 
 	# output
 	parser.add_argument("--out_path", default="output", type=Path, help="path to store output, such as plots and weights file.")
@@ -135,6 +139,8 @@ if __name__ == "__main__":
 	parser.add_argument("--seq_plot", default="seq_sim_vs_epoch.png", type=Path, help="path to save plot of sequence similarity vs epochs after training")
 	parser.add_argument("--weights_path", default="model_parameters.pth", type=Path, help="path to save weights after training")
 	parser.add_argument("--model_checkpoints", default=10, type=int, help="number of epochs to save the model after")
+	parser.add_argument("--early_stopping_thresh", default=0.0, type=float, help="delta validation seq sim. takes the max value from early_stopping_tolerance epochs to determine if the model has converged. negative vals mean that the validation seq sim must decrease before early stopping")
+	parser.add_argument("--early_stopping_tolerance", default=3, type=int, help="tolerance in number of epochs for early stopping, waits to see if the threshold is passed within this number of epochs before stopping")
 
 	# input
 	parser.add_argument("--data_path", default="/gpfs_backup/wangyy_data/protAI/pmpnn_data/pdb_2021aug02", type=Path, help="path to data")

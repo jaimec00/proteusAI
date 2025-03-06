@@ -16,14 +16,15 @@ def main():
 	# prepare inputs
 	batch, N, d_model = 1, 2048, 512
 	alpha = 1
-	mag_type = 3
+	mag_type = 1
+	dropout_p = 0.1
 	min_wl, max_wl, base = 3.7, 20, 20
 	coords = max_wl * torch.randn((batch, N, 3), dtype=torch.float32, device=device)
 	mask = (torch.rand((batch, N), device=device) > 1)
 	wavenumbers = torch.randn((d_model//2,), device=coords.device, dtype=torch.float32, requires_grad=True)
 
 	# to make it easier
-	params = [coords, wavenumbers, mag_type, mask]
+	params = [coords, wavenumbers, mag_type, dropout_p, mask]
 
 	# synchronize device
 	torch.cuda.synchronize()  # Ensure no ongoing GPU operations
@@ -78,8 +79,8 @@ def main():
 	print(f"cuda kernel memory usage: {cuda_memory / (1024 ** 3):.3f} GB")
 
 	# optional debugging prints
-	print(torch_out)
-	print(cuda_out)
+	# print(torch_out)
+	# print(cuda_out)
 	# print(torch_out/cuda_out)
 	# print(mask)
 	# print(wavenumbers)
@@ -87,7 +88,7 @@ def main():
 	# print(cuda_dk)
 	# print(torch_dk/cuda_dk)
 
-def wf_embedding_torch(coords, wavenumbers, mag_type=1, mask=None):
+def wf_embedding_torch(coords, wavenumbers, mag_type=1, dropout_p=0.0, mask=None):
 
 	# get shape and prepare inputs
 	batch, N, _ = coords.shape

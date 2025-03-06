@@ -7,13 +7,20 @@
 # hyperparameters
 
 d_model: 512 # dimensionality of input embeddings
+
+# for transfer learning
+freeze_structure_weights: False
+freeze_sequence_weights: True
+cp_struct_enc_2_seq_enc: False
+
 learnable_wavelengths: False # whether to make wavelengths learnable, comparable performance either way, but seems better without
+wf_dropout: 0.1
 wf_type: 1  # 0 mean no magnitude scaling (all sources are fully felt by all observers regardless of distance)
             # 1 means scale like in greens func (1/|R|)
             # 2 means do log scaling (1/log2(|R|)) so that distant sources have a bigger effect than in regular greens func
               # note that layer norm is applied after, so the base you use for type 2 does not matter, 
               # as that is equivilant to multiplying all interactions by the same constant (log2(base))
-            # 3 means do 1/sqrt(|R|) so that distant sources have bigger effect, but not as aggressive as log scaling. not implemented yet
+            # 3 means do 1/sqrt(|R|) so that distant sources have bigger effect, but not as aggressive as log scaling.
 anisotropic_wf: False # whether to use anisotropic version that uses Cb info. raises NotImplementedError if True for now
 min_wl: 3.7  # minimum wl to use in wavelength sampling
 max_wl: 20.0  # maximum wl to use in wavelength sampling
@@ -22,7 +29,7 @@ d_hidden_we: 1024 # hidden layer dim in WF embedding MLP
 hidden_layers_we: 0 # number of hidden layers
 
 # aa context not used, first optimizing wf embedding by itself
-use_aa: True
+use_aa: False
 d_hidden_aa: 1024 # hidden dim of mlp
 hidden_layers_aa: 3 # hidden layers
 learnable_esm: True # whether to make ESM2 embeddings learnable, only applicable if use_aa is true and esm2_weights_path is not empty 
@@ -35,14 +42,15 @@ esm2_weights_path: "utils/model_utils/esm2/esm2_t33_650M_UR50D.pt"  # can be a p
 # note that changing some of these parameters requires triton to recompile the geometric attention kernel, 
 # so first few iterations may be slow, but will speed up after most of the input shapes have been seen at least once (see dataset configuration section for more details)
 
-encoder_layers: 3 # number of encoder layers
+struct_encoder_layers: 4 # number of encoder layers
+seq_encoder_layers: 2 # number of encoder layers
 num_heads: 8  # number of attention heads to perform the training with
 learnable_spreads: False # whether to make the spreads learnable, new version shows small gains when making spreads learnable (set to False if beta is 0.0, see below)
 
 # if you want all heads to have the same spread, set min_spread=max_spread. in this case the base used does not matter. otherwise, base must be > 1
 min_spread: 3 # min spread RBFs in attention
-max_spread: 15 # max spread
-base_spread: 10.0 # base to use for logarithmic sampling
+max_spread: 20 # max spread
+base_spread: 5.0 # base to use for logarithmic sampling
 num_spread: 32 # only matters if spreads are learnable, if not this is automatically set to num_heads
 
 # if you want global attention, set min_rbf to 0.0 and max_rbf to 1.0, 0.001 and 0.999 w/ rbf scaling (beta approx. 1) seems to work better
@@ -51,9 +59,9 @@ max_rbf: 0.999 # for masking spatially close residue pairs, ensures RBF bias doe
 
 # if you want no scaling (use raw attention logits), set beta to 0.0, note that masking is still done according to min and max rbf args (above)
 # note that scaling (beta>0) seems to improve performance
-beta: 1.0 # how much to scale the RBF term by, larger values emphasize geometry, lower emphasize raw attention
+beta: 2.0 # how much to scale the RBF term by, larger values emphasize geometry, lower emphasize raw attention
 
-d_hidden_attn: 1024  # intermediate dimensions of encoder feed forward layer
+d_hidden_attn: 2048  # intermediate dimensions of encoder feed forward layer
 hidden_layers_attn: 0 # hidden layers for ffn
 
 temperature: 0.1  # temperature for autoregressive inference (for testing). only used if use_aa is true
@@ -65,7 +73,7 @@ temperature: 0.1  # temperature for autoregressive inference (for testing). only
 num_train: -1  # number of training samples to use; -1 means all available
 num_val: -1  # number of validation samples to use; -1 means all available
 num_test: -1  # number of test samples to use; -1 means all available
-epochs: 10  # number of epochs
+epochs: 100  # number of epochs
 
 # want as few batch_size/seq_length combinations as possible to speed up triton, since it 
 # recompiles the geometric attention kernel for each shape
@@ -81,11 +89,11 @@ min_resolution: 3.5 # actually max_resolution, will fix the name later
 
 # training params
 
-accumulation_steps: 1  # grad accumulation; how many batches to process before learning step
+accumulation_steps: 16  # grad accumulation; how many batches to process before learning step
 beta1: 0.9  # for adam optim 
 beta2: 0.98  # for adam optim
 epsilon: 10e-9  # for adam optim
-dropout: 0.0  # percentage of dropout
+dropout: 0.1  # percentage of dropout
 attn_dropout: 0.00  # percentage of dropout for atttention
 label_smoothing: 0.0  # percentage of label smoothing to use for loss calculation
 loss_type: "sum"  # whether to use the 'sum' or the 'mean' for NLL
@@ -93,9 +101,9 @@ grad_clip_norm: 1.0 # max L2 norm of gradients for gradient clipping. if set to 
 
 lr_type: "attn" # learning rate scheduler, "attn" is the lr scheduler used in the original attention paper, other options are plateu and cyclic
 
-warmup_steps: 4000 # for scheduler from attn is all you need
+warmup_steps: 3000 # for scheduler from attn is all you need
 
-lr_step: 1e-4  # learning rate (starting point for plateu, or max lr for attn, not used for cyclic)
+lr_step: 1e-3  # learning rate (starting point for plateu, or max lr for attn, not used for cyclic)
 lr_scale: 0.1  # LR scaling factor when plateu
 lr_patience: 3  # LR patience for scaling down after plateau
 
@@ -115,27 +123,29 @@ use_amp: False  # whether to use automatic mixed precision.
 # ------------------------------------------------------------------------------
 
 # data augmentation
-noise_coords_std: 0.10 # stdev of noise injection into coordinates during training
+noise_coords_std: 0.1 # stdev of noise injection into coordinates during training
 
-# Input MASK injection
-initial_min_MASK_injection_mean: 1.0  # initial minimum mean percentage of MASK injection injection in training
-final_min_MASK_injection_mean: 0.15  # final minimum mean percentage of MASK injection injection in training
-initial_max_MASK_injection_mean: 1.0  # initial maximum mean percentage of MASK injection injection in training
-final_max_MASK_injection_mean: 0.15  # final maximum mean percentage of MASK injection injection in training
-MASK_injection_stdev: 0.00  # stdev percentage of MASK injection injection in training
-MASK_injection_cycle_length: 20  # input MASK token injection cycle length
+# MASK injection
+mean_mask_pct: 0.5
+std_mask_pct: 0.25
+min_mask_pct: 0.15
+max_mask_pct: 1.00
+mean_span: 10
+std_span: 5
+randAA_pct: 0.1
+trueAA_pct: 0.1
 
 # ------------------------------------------------------------------------------
 
 # prints each layers gradients after each step so can check for exploding/vanishing gradients
 # note it is printed before grad clipping
-debug_grad: False 
+debug_grad: False
 
 # ------------------------------------------------------------------------------
 
 # Output
 # out_path: "/share/wangyy/hjc2538/proteusAI/models/test"  # path to store output, such as plots and weights file. for nc state hpc
-out_path: "/scratch/hjc2538/projects/proteusAI/models/enc_dec"  # path to store output, such as plots and weights file. for uncw hpc
+out_path: "/scratch/hjc2538/projects/proteusAI/models/struct_only_accum16_3kwu"  # path to store output, such as plots and weights file. for uncw hpc
 loss_plot: "loss_vs_epoch.png"  # path to save plot of loss vs epochs after training
 seq_plot: "seq_sim_vs_epoch.png"  # path to save plot of sequence similarity vs epochs after training
 weights_path: "model_parameters.pth"  # path to save weights after training
@@ -147,11 +157,11 @@ model_checkpoints: 10 # number of epochs to save a checkpoint of the model after
 # data_path: "/share/wangyy/hjc2538/proteusAI/pdb_2021aug02_filtered"  # path to data for ncs hpc
 data_path: "/scratch/hjc2538/projects/proteusAI/pdb_2021aug02_filtered"  # path to data for uncw hpc
 config: "config/config.yml"  # Path to the YAML config file. defined here for clarity, but need to call this as CL arg for it to work
-# use_model: "/scratch/hjc2538/projects/proteusAI/models/no_aa_attn_lr/model_parameters_e69_s22.82.pth" # start from pretrained model, expects path to a pt file
+# use_model: "/scratch/hjc2538/projects/proteusAI/models/small_test_wf/model_parameters.pth" # start from pretrained model, expects path to a pt file
 
 # ------------------------------------------------------------------------------
 
-# not implemented yet
-# early_stopping: # delta delta seq sim threshold: diff in delta seq sim between train and val across adjacent epochs 
-
+# convergence criteria
+early_stopping_thresh: 0.00 # delta validation sequence similarity, if below this value, training is stopped. negative values mean the seq sim must decrease before stopping
+early_stopping_tolerance: 3 # how many epochs to consider when calculating delta seq sim for early stopping. takes the max delta seq sim between current epoch and last n epochs, and decides based on this
 # ------------------------------------------------------------------------------

@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=1protAI_train
+#SBATCH --job-name=protAI_train
 #SBATCH --partition=gpu
 #SBATCH --ntasks=1
 #SBATCH --nodes=1
@@ -7,10 +7,10 @@
 #SBATCH --gres=gpu:1
 #SBATCH --mem=64G
 #SBATCH --time=10:00:00
-#SBATCH --output=train1.out
-#SBATCH --error=train1.err
+#SBATCH --output=train.out
+#SBATCH --error=train.err
 
 source ~/.bashrc
 conda activate protAI_env
 nvidia-smi
-python -u learn_seqs.py --config config/config.yml
+python -u learn_seqs.py --config config/train.yml

@@ -9,7 +9,7 @@ descripiton:    cuda kernel to embed 3d coordinates to target feature space usin
 */
 
 #include <cuda_runtime.h>
-#include <iostream>
+#include <cstdint>
 
 // define function to sum the values of threads within a warp
 // this is used to superpose the wavefunctions computed by individual threads in a warp
@@ -24,6 +24,27 @@ __device__ float warp_sum(float value) {
 	return value; 
 }
 
+__device__ uint32_t hash5(int a, int b, int c, int d, uint32_t seed) {
+
+	// PCG-XSH-RR based hash algorithm
+    uint32_t h = seed;
+    h ^= (static_cast<uint32_t>(a) * 0x85ebca6b) + 0x9e3779b9;
+    h ^= (static_cast<uint32_t>(b) * 0xc2b2ae35) + 0x165667b1;
+    h ^= (static_cast<uint32_t>(c) * 0x27d4eb2f) + 0xd6e8feb8;
+    h ^= (static_cast<uint32_t>(d) * 0x85ebca6b) + 0x1b873593;
+    h = (h ^ (h >> 16)) * 0x85ebca6b;
+    h ^= (h >> 13);
+    h = (h ^ (h >> 16)) * 0xc2b2ae35;
+    h ^= (h >> 16);
+    return h;
+}
+
+__device__ bool dropout(int Z, int I, int J, int K, uint32_t seed, float dropout_prob) {
+    uint32_t h = hash5(Z, I, J, K, seed);
+    float normalized = h / float(UINT32_MAX); // Convert to [0,1]
+    return normalized >= dropout_prob;
+}
+
 // device kernel for wavefunction embedding
 __global__ void wf_embedding_kernel(
 	const float* coords_ptr, int stride_coords_Z, int stride_coords_S, int stride_coords_N,
@@ -33,7 +54,7 @@ __global__ void wf_embedding_kernel(
 	float* cos_sums_ptr, int stride_cos_sums_Z, int stride_cos_sums_N, int stride_cos_sums_K,
 	float* sin_sums_ptr, int stride_sin_sums_Z, int stride_sin_sums_N, int stride_sin_sums_K,
 
-	int tot_Z, int tot_N, int d_model, int magnitude_type
+	int tot_Z, int tot_N, int d_model, int magnitude_type, float dropout_p, uint32_t rng_seed
 ) {
 	
 	// compute global thread index
@@ -43,7 +64,7 @@ __global__ void wf_embedding_kernel(
 	// calculate the unique local id for each thread (will evaluate to theadIdx.y)
 	int thread_id = threadIdx.x + threadIdx.y * blockDim.x + threadIdx.z * blockDim.x * blockDim.y;
 	int num_threads = blockDim.x * blockDim.y * blockDim.z; // number of threads in a block
-	
+
 	// compute warp id (within a block), then the lane id (thread id within a warp)
 	// int warp_id = thread_id / warpSize; // not used
 	int lane_id = thread_id % warpSize;
@@ -164,7 +185,8 @@ __global__ void wf_embedding_kernel(
 		// compute the distance and the masks
 		float dists_raw = dist_x*dist_x + dist_y*dist_y + dist_z*dist_z;
 		bool mask_IJ = mask_NI && mask_NJ && (dists_raw!=0); // prevent div by 0
-		float dists = mask_IJ * dists_raw * rsqrtf(dists_raw + (!mask_IJ)); // fast approximation of sqrt ( + !mask avoids div by 0, 
+		float inv_dist = mask_IJ * rsqrtf(dists_raw + (!mask_IJ));
+		float dists = dists_raw * inv_dist; // fast approximation of sqrt ( + !mask avoids div by 0, 
 																			// mult by mask ensures invalid dists are 0 for consistent masking)
 
 		float magnitude;
@@ -173,12 +195,12 @@ __global__ void wf_embedding_kernel(
 				magnitude = 1.0;
 				break;
 			case 1: // same magnitude as green's func, i.e. 1/|R|
-				magnitude = 1.0 / (dists + (!mask_IJ));
+				magnitude = inv_dist;
 				break;
 			case 2:	// take the log2 of the distance, i.e. 1/log2(|R|) to account more for distant interactions
 				magnitude = 1.0 / log2f(dists + 2*(!mask_IJ)); // evaluates to 1 / log2(0+2*1) = 1/1 = 1 for 0 dists. cos and sine are already masked
 				break;
-			case 3: // take the sqrt of dists 1/sqrt(dists). 
+			case 3: // take the sqrt of dists 1/sqrt(dists). not as aggressive as log2, but still accounts for distant sources
 				magnitude = mask_IJ * rsqrtf(dists + (!mask_IJ));
 				break;
 		}
@@ -193,13 +215,22 @@ __global__ void wf_embedding_kernel(
 
 			// compute sine and cosine
 			// multiply by mask to zero out invalid threads
-			float cosine = mask_IJ * __cosf(phase);  // Fast approximation of cosine
-			float sine = mask_IJ * __sinf(phase);  // Fast approximation of sine
+			float sine, cosine;
+			__sincosf(phase, &sine, &cosine); // compute trig ops in one call
+			cosine = mask_IJ*cosine;
+			sine = mask_IJ*sine;
 
 			// compute real and imaginary parts
 			float real = cosine*magnitude;
 			float imag = sine*magnitude;
 
+			if (dropout_p != 0.0) {
+				// lightweight hash based dropout, avoids overhead of built in cuda rngs
+				bool drop_val = dropout( offs_Z, offs_NI, offs_NJ, k, rng_seed, dropout_p);
+				real = drop_val * real / (1-dropout_p);
+				imag = drop_val * imag / (1-dropout_p);
+			}
+			
 			float real_superposition = warp_sum(real);
 			float imag_superposition = warp_sum(imag);
 
@@ -269,7 +300,7 @@ void wf_embedding_kernel_forward(
 	float* cos_sums_ptr, int stride_cos_sums_Z, int stride_cos_sums_N, int stride_cos_sums_K,
 	float* sin_sums_ptr, int stride_sin_sums_Z, int stride_sin_sums_N, int stride_sin_sums_K,
 
-	int tot_Z, int tot_N, int d_model, int magnitude_type,
+	int tot_Z, int tot_N, int d_model, int magnitude_type, float dropout_p, uint32_t rng_seed,
 	cudaStream_t stream
 ) {
 	// define block and grid dimensions
@@ -308,6 +339,6 @@ void wf_embedding_kernel_forward(
 		out_ptr,  stride_out_Z, stride_out_N, stride_out_D,
 		cos_sums_ptr, stride_cos_sums_Z, stride_cos_sums_N, stride_cos_sums_K,
 		sin_sums_ptr, stride_sin_sums_Z, stride_sin_sums_N, stride_sin_sums_K,
-		tot_Z, tot_N, d_model, magnitude_type
+		tot_Z, tot_N, d_model, magnitude_type, dropout_p, rng_seed
 	);
 }

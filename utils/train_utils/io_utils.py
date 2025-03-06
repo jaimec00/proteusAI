@@ -52,20 +52,28 @@ class Output():
 	def log_hyperparameters(self, training_parameters, hyper_parameters, MASK_injection, data):
 
 		MASK_info = "" if not hyper_parameters.use_aa else textwrap.dedent(f'''
-		MASK injection cycle length: {MASK_injection.MASK_injection_cycle_length} epochs
-
-			initial minimum MASK injection mean: {MASK_injection.initial_min_MASK_injection_mean}
-			initial maximum MASK injection mean: {MASK_injection.initial_max_MASK_injection_mean}
-			final minimum MASK injection mean: {MASK_injection.final_min_MASK_injection_mean}
-			final maximum MASK injection mean: {MASK_injection.final_max_MASK_injection_mean}
-			MASK injection stdev: {MASK_injection.MASK_injection_stdev}
+		mean_mask_pct: {MASK_injection.mean_mask_pct}
+		std_mask_pct: {MASK_injection.std_mask_pct}
+		min_mask_pct: {MASK_injection.min_mask_pct} 
+		max_mask_pct: {MASK_injection.max_mask_pct} 
+		mean_span: {MASK_injection.mean_span}
+		std_span: {MASK_injection.std_span}
 		''')
+
+		wf_types = {0: "none", 1: "inverse", 2: "log2", 3: "sqrt"}
 
 		log = 	textwrap.dedent(f'''
 
 		model hyper-parameters:
-			model parameters: {training_parameters.num_params}
+			model parameters: {training_parameters.num_params:,}
 			d_model: {hyper_parameters.d_model}
+			
+			structure weights are{" " if hyper_parameters.freeze_structure_weights else " NOT "}frozen
+			sequence weights are{" " if hyper_parameters.freeze_sequence_weights else " NOT "}frozen
+			structure encoder weights are{" " if hyper_parameters.cp_struct_enc_2_seq_enc else " NOT "}copied to sequence encoder
+			
+			using {"anisotropic" if hyper_parameters.anisotropic_wf else "isotropic"} wave function embedding
+			wave function embedding normalization: {wf_types[hyper_parameters.wf_type]}
 			learnable_wavelengths: {hyper_parameters.learnable_wavelengths}
 			min_wl: {hyper_parameters.min_wl} 
 			max_wl: {hyper_parameters.max_wl} 
@@ -78,7 +86,8 @@ class Output():
 			ESM2 weights: {hyper_parameters.esm2_weights_path}
 			learnable_ESM2_weights: {hyper_parameters.learnable_esm}
 
-			number of encoders: {hyper_parameters.encoder_layers}
+			number of structure encoders: {hyper_parameters.struct_encoder_layers}
+			number of sequence encoders: {hyper_parameters.seq_encoder_layers}
 			number of attention heads: {hyper_parameters.num_heads}
 			learnable_spreads: {hyper_parameters.learnable_spreads}
 			min_spread: {hyper_parameters.min_spread} 
@@ -117,20 +126,7 @@ class Output():
 
 		self.log.info(log)
 
-	def log_epoch(self, epoch, current_lr, model, MASK_injection):
-
-
-		if not epoch.training_run_parent.hyper_parameters.use_aa:
-			MASK_info =  ""  
-		else: 
-			MASK_info = textwrap.dedent(f'''
-			
-				training inputs contain:
-					
-					mean MASK injection: {round(MASK_injection.MASK_injection_mean, 2)}
-					stdev MASK injection: {round(MASK_injection.MASK_injection_stdev, 2)}
-			
-			''')
+	def log_epoch(self, epoch, current_lr):
 
 		self.log.info(textwrap.dedent(f'''
 		
@@ -139,7 +135,6 @@ class Output():
 			{'-'*80}
 			
 			current learning rate: {current_lr}
-			{MASK_info}
 		''')
 		)
 
@@ -158,7 +153,7 @@ class Output():
 		self.log.info(f"validation seq_sim per token: {str(seq_sim)}\n")
 		all_losses.add_losses(loss, seq_sim)
 
-	def log_test_losses(test_losses, test_ar_losses):
+	def log_test_losses(self, test_losses, test_ar_losses):
 		test_loss, test_seq_sim = test_losses.get_avg()
 		_, test_ar_seq_sim = test_ar_losses.get_avg()
 		self.log.info(f"testing loss per token: {test_loss}")

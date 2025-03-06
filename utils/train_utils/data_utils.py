@@ -21,7 +21,7 @@ import math
 import os
 import argparse
 
-from utils.io_utils import Output
+from utils.train_utils.io_utils import Output
 
 
 # ----------------------------------------------------------------------------------------------------------------------

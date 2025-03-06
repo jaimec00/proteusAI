@@ -217,11 +217,7 @@ def _attn_fwd(
 		attn_mask = (mask_i[:, None]) & (tl.load(mask_j_ptr, boundary_check=(0,), padding_option="zero").to(tl.int1)[None, :]) & (Rij <= max_rbf) & (Rij >= min_rbf) # N x N
 
 		# scale attention logits by Rij and mask invalid pairs
-		# with abs
 		SRij = tl.where(attn_mask, Sij + beta*(2*Rij-1)*tl.abs(Sij), -inf) # N x N (fp32)
-		# with softplus
-		# SPSij = tl.log(1 + tl.exp(Sij))
-		# SRij = tl.where(attn_mask, Sij + beta*(2*Rij-1)*SPSij, -inf) # N x N (fp32)
 
 		# max of each row
 		mij = tl.maximum(mi, tl.max(SRij, axis=1)) # N,  (fp32)
@@ -478,12 +474,7 @@ def _attn_bwd(
 		attn_mask = (mask_i[:, None]) & (mask_j[None, :]) & (Rij <= max_rbf) & (Rij >= min_rbf) # N x N
 
 		# scale attention logits by RBFs
-		# w/ abs
 		SRij = tl.where(attn_mask, Sij + beta*(2*Rij - 1)*tl.abs(Sij), -inf) # N x N (fp32)
-		# w/ softplus
-		# expSij = tl.exp(Sij) # compute this seperately so don't recompute for bwd
-		# SPSij = tl.log(1 + expSij)
-		# SRij = tl.where(attn_mask, Sij + beta*(2*Rij - 1)*SPSij, -inf) # N x N (fp32)
 
 		# load log sum exp statistics
 		Li = tl.load(Li_block_ptr, boundary_check=(0, ), padding_option="zero") # (fp32)
@@ -514,17 +505,10 @@ def _attn_bwd(
 		dSRij = Pij * (dPij -  tl.load(Di_block_ptr, boundary_check=(0, ), padding_option="zero")[:, None]) # N x N
 
 		# compute dSij, ie grad wrt Sij. note the direct communication between dSij and Rij
-		# w/ abs
 		dSij = dSRij* (1 + beta*(2*Rij - 1)*tl.where(Sij<0, -1, 1)*(Sij!=0)) # N x N
-		# w/ softplus
-		# dSPSij = expSij / (1 + expSij)
-		# dSij = dSRij* (1 + beta*(2*Rij - 1)*dSPSij) # N x N
 
 		# compute gradient wrt rbfs. also direct communication between dRij and Sij
-		# w/ abs
 		dRij = dSRij * tl.abs(Sij) * 2 * beta
-		# w/ softplus
-		# dRij = dSRij * SPSij * 2 * beta
 
 		# compute the gradient wrt the spread of this head
 		# 		d_rbfs/dspreads  = d/dspreads exp(-(d^2)/(2*sigma^2))
