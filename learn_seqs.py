@@ -7,8 +7,10 @@ description:	script to train, validate, and test the model
 # ----------------------------------------------------------------------------------------------------------------------
 
 from pathlib import Path
+from box import Box
 import argparse
 import yaml
+import os
 
 from utils.train_utils.training_run import TrainingRun
 
@@ -37,128 +39,34 @@ if __name__ == "__main__":
 
 	parser = argparse.ArgumentParser()
 
-	# model dim
-	parser.add_argument("--d_model", default=512, type=int, help="dimensionality of input embeddings")
-	
-	parser.add_argument("--freeze_structure_weights", default=False, type=bool, help="whether to freeze weights associated with structure (for transfer learning)")
-	parser.add_argument("--freeze_sequence_weights", default=False, type=bool, help="whether to freeze weights associated with sequence (for transfer learning)")
-	parser.add_argument("--cp_struct_enc_2_seq_enc", default=False, type=bool, help="whether to copy the structure encoder weights to the sequence encoder weights (for transfer learning)")
+	parser.add_argument("--config", type=Path, help="Path to the YAML config file")
 
-	# wavefunction embedding
-	parser.add_argument("--learnable_wavelengths", default=False, type=bool, help="whether to make wavelengths learnable")
-	parser.add_argument("--wf_dropout", default=0.0, type=float, help="percentage of dropout to apply to wave function embedding")
-	parser.add_argument("--wf_type", default=1, type=int, choices=[0,1,2,3], help="magnitude scaling in wf_embedding. 0->mag=1, 1->mag=1/|R|, 2->mag=1/log2(|R|), 3->mag=1/sqrt(|R|)")
-	parser.add_argument("--anisotropic_wf", default=False, type=bool, help="whether to use the anisotropic version (includes beta carbon info) or isotropic wf_embedding")
-	parser.add_argument("--min_wl", default=3.7, type=float, help="minimum wavelength to use in wavelength sampling")
-	parser.add_argument("--max_wl", default=20.0, type=float, help="maximum wavelength to use in wavelength sampling")
-	parser.add_argument("--base_wl", default=20.0, type=float, help="base to use in wavelength sampling")
-	parser.add_argument("--d_hidden_we", default=1024, type=int, help="hidden dimensions in post wavefunction embedding MLP")
-	parser.add_argument("--hidden_layers_we", default=0, type=int, help="number of hidden layers in post wavefunction embedding MLP")
+	config, _ = parser.parse_known_args()
 
-	# aa embedding (not used, optimizing based on structure alone first)
-	parser.add_argument("--use_aa", default=False, type=bool, help="whether to use amino acid context or just predict from structure")
-	parser.add_argument("--d_hidden_aa", default=1024, type=int, help="hidden dimensions in AA embedding MLP")
-	parser.add_argument("--hidden_layers_aa", default=0, type=int, help="number hidden layers in AA embedding MLP")
-	parser.add_argument("--esm2_weights_path", default="", type=str, help="path to pretrained esm2 weights. can also be just the name of the model to use. if nothing is provided, AA weights are learned from scratch")
-	parser.add_argument("--learnable_esm", default=True, type=bool, help="whether to make esm weights learnable")
-	
-	# encoder
-	parser.add_argument("--struct_encoder_layers", default=4, type=int, help="number of encoder layers")
-	parser.add_argument("--seq_encoder_layers", default=4, type=int, help="number of encoder layers")
-	parser.add_argument("--num_heads", default=8, type=int, help="number of attention heads")
-	parser.add_argument("--learnable_spreads", default=True, type=bool, help="whether to make spreads learnable")
-	parser.add_argument("--min_spread", default=3.0, type=float, help="minimum spread to use for geometric attention")
-	parser.add_argument("--max_spread", default=20.0, type=float, help="maximum spread to use for geometric attention")
-	parser.add_argument("--base_spread", default=10.0, type=float, help="base to use for spread sampling in geometric attention")
-	parser.add_argument("--num_spread", default=32.0, type=float, help="number of spreads to use in geometric attention")
-	parser.add_argument("--min_rbf", default=0.01, type=float, help="minimum rbf value to use for geometric attention, values less than this are masked")
-	parser.add_argument("--max_rbf", default=0.99, type=float, help="maximum rbf value to use for geometric attention, values greater than this are masked")
-	parser.add_argument("--beta", default=2.0, type=float, help="how much to scale the RBF term by in geometric attention. higher values emphasize geometry, lower values emphasize attention.")
-	parser.add_argument("--d_hidden_attn", default=1024, type=int, help="hidden dimensions in geometric attention FFN")
-	parser.add_argument("--hidden_layers_attn", default=0, type=int, help="number of hidden layers in geometric attention FFN")
+	def merge_dicts(defaults, overrides):
+		"""Recursively merges overrides into default config."""
+		merged = defaults.copy()
+		for key, value in overrides.items():
+			if isinstance(value, dict) and key in merged:
+				merged[key] = merge_dicts(merged[key], value)  # recursive merge for nested dicts
+			else:
+				merged[key] = value  # override value
+		return merged
 
-	# training
-	parser.add_argument("--num_train", default=-1, type=int, help="number of training samples to use; -1 means all available")
-	parser.add_argument("--num_val", default=-1, type=int, help="number of validation samples to use; -1 means all available")
-	parser.add_argument("--num_test", default=-1, type=int, help="number of test samples to use; -1 means all available")
-	
-	parser.add_argument("--epochs", default=50, type=int, help="number of epochs")
+	default_config = Path(os.path.abspath(__file__)).parent / Path("config/train.yml")
+	if not default_config.exists():
+		raise FileNotFoundError(f"could not find path to default config at {default_config}.")
+	with open(default_config, "r") as d:
+		args = yaml.safe_load(d)
 
-	# input restrictions	
-	parser.add_argument("--max_batch_size", default=256, type=list, help="possible number of samples per batch, minimizes triton recompilation overhead")
-	parser.add_argument("--min_seq_size", default=64, type=list, help="possible sequence lengths, minimizes triton recompilation overhead")
-	parser.add_argument("--max_seq_size", default=8192, type=list, help="possible sequence lengths, minimizes triton recompilation overhead")
-	parser.add_argument("--batch_tokens", default=8192, type=int, help="target number of tokens per batch")
-	parser.add_argument("--min_resolution", default=3.5, type=float, help="maximum structure resolution")
-	
-	# learning parameters
-	parser.add_argument("--accumulation_steps", default=1, type=int, help="grad accumulation; how many batches to process before learning step")
-	parser.add_argument("--beta1", default=0.9, type=float, help="beta1 parameter for Adam optimizer")
-	parser.add_argument("--beta2", default=0.98, type=float, help="beta2 parameter for Adam optimizer")
-	parser.add_argument("--epsilon", default=10e-9, type=float, help="epsilon parameter for Adam optimizer")
-
-	parser.add_argument("--dropout", default=0.2, type=float, help="percentage of dropout")
-	parser.add_argument("--attn_dropout", default=0.00, type=float, help="percentage of dropout for attention, should be smaller since it is already heavily masked")
-	parser.add_argument("--label_smoothing", default=0.0, type=float, help="percentage of label smoothing to use on the output labels for loss calculation")
-	parser.add_argument("--loss_type", default="sum", type=str, choices=['sum', 'mean'], help="whether to use the 'sum' or the 'mean' for CEL")
-	parser.add_argument("--grad_clip_norm", default=5.0, type=float, help="max gradient L2 norm for gradient clipping. if 0.0, no gradient clipping is applied")
-
-	parser.add_argument("--lr_step", default=1e-4, type=float, help="learning rate")
-	parser.add_argument("--lr_type", default="attn", type=str, choices=["plateu", "cyclic", "attn"], help="LR type")
-	parser.add_argument("--warmup_steps", default=4000, type=int, help="warmup steps for attn scheduler")
-	parser.add_argument("--lr_scale", default=0.1, type=float, help="LR scaling factor")
-	parser.add_argument("--lr_patience", default=3, type=int, help="LR patience for scaling down after plateu")
-	parser.add_argument("--lr_initial_min", default=5e-5, type=float,  help="initial lr rate minimum")
-	parser.add_argument("--lr_initial_max", default=1e-4, type=float,  help="initial lr rate maximum")
-	parser.add_argument("--lr_final_min", default=1e-5, type=float,  help="final lr rate minimum")
-	parser.add_argument("--lr_final_max", default=5e-5, type=float,  help="final lr rate maximum")
-	parser.add_argument("--lr_cycle_length", default=7.0, type=float,  help="epochs that make up a cycle")
-
-	parser.add_argument("--use_amp", default=True, type=bool,  help="whether to use automatic mixed precision")
-	parser.add_argument("--use_chain_mask", default=True, type=bool,  help="whether to compute loss only for chain representative of the cluster, or the whole biounit")
-
-	# other
-	parser.add_argument("--temperature", default=0.01, type=float, help="temperature for autoregressive inference (for testing)")
-	
-	# data augmentation
-	parser.add_argument("--noise_coords_std", default=0.02, type=float, help="standard deviation of gaussian noise injection into input coordinates for data augmentation")
-
-	# input one-hot injection
-	parser.add_argument("--mean_mask_pct",  default=0.50, type=float, help="mask percentages are sampled from gauss distribution on a per sample basis, this is the mean")
-	parser.add_argument("--std_mask_pct", default=0.25, type=float, help="mask percentages are sampled from gauss distribution on a per sample basis, this is the standard deviation")
-	parser.add_argument("--min_mask_pct", default=0.15, type=float, help="minimum mask_pct, anything lower is clampled")
-	parser.add_argument("--max_mask_pct", default=1.00, type=float, help="max mask_pct, higher is clamped")
-	parser.add_argument("--mean_span", default=10, type=int, help="mean span length, sampled from gauss dist independantly for each sample")
-	parser.add_argument("--std_span", default=5, type=int, help="std span length, sampled from gauss dist independantly for each sample")
-	parser.add_argument("--randAA_pct", default=0.1, type=float, help="percentage of true AA to inject into inputs, relative to the percent of masked tokens")
-	parser.add_argument("--trueAA_pct", default=0.1, type=float, help="percentage of random AA to inject into inputs, relative to the percent of masked tokens")
-
-	# output
-	parser.add_argument("--out_path", default="output", type=Path, help="path to store output, such as plots and weights file.")
-	parser.add_argument("--loss_plot", default="loss_vs_epoch.png", type=Path, help="path to save plot of loss vs epochs after training")
-	parser.add_argument("--seq_plot", default="seq_sim_vs_epoch.png", type=Path, help="path to save plot of sequence similarity vs epochs after training")
-	parser.add_argument("--weights_path", default="model_parameters.pth", type=Path, help="path to save weights after training")
-	parser.add_argument("--model_checkpoints", default=10, type=int, help="number of epochs to save the model after")
-	parser.add_argument("--early_stopping_thresh", default=0.0, type=float, help="delta validation seq sim. takes the max value from early_stopping_tolerance epochs to determine if the model has converged. negative vals mean that the validation seq sim must decrease before early stopping")
-	parser.add_argument("--early_stopping_tolerance", default=3, type=int, help="tolerance in number of epochs for early stopping, waits to see if the threshold is passed within this number of epochs before stopping")
-
-	# input
-	parser.add_argument("--data_path", default="/gpfs_backup/wangyy_data/protAI/pmpnn_data/pdb_2021aug02", type=Path, help="path to data")
-	parser.add_argument("--use_model", default=None, type=Path, help="use pretrained model")
-	parser.add_argument("--config", default="config/config.yml", type=Path, help="Path to the YAML config file")
-
-	# debugging
-	parser.add_argument("--debug_grad", default=False, type=bool, help="prints gradients of each layer at each step")
-	
-	args, _ = parser.parse_known_args()
-	
 	# Load YAML configuration if file exists
-	if args.config.exists():
-		with open(args.config, "r") as f:
-			config = yaml.safe_load(f)
-		parser.set_defaults(**config)
+	if config.config.exists():
+		with open(config.config, "r") as f:
+			user_args = yaml.safe_load(f)
+			args = merge_dicts(args, user_args) # have user configs override defaults, if custom config specified
 
-	args = parser.parse_args()
+	# convert to box to have nested attributes that are easier to keep track of
+	args = Box(args)
 
 	main(args)
 

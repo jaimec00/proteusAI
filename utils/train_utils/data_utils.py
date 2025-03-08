@@ -143,12 +143,12 @@ class DataHolder():
 						batch_tokens=16384, max_batch_size=128, 
 						min_seq_size=64, max_seq_size=16384,
 						use_chain_mask=True,
-						min_resolution=3.5
+						max_resolution=3.5
 					):
 
 
 		# define data path
-		self.data_path = data_path
+		self.data_path = Path(data_path)
 
 		# define batch and seq sizes
 		self.batch_tokens = batch_tokens # max tokens per batch
@@ -168,7 +168,7 @@ class DataHolder():
 		pdbs_info = pd.read_csv( pdb_info_path, header=0, engine='python') # use python engine to interpret list as a list properly
 
 		# filter based on resolution
-		pdbs_info = pdbs_info.loc[pdbs_info.RESOLUTION <= min_resolution, :]
+		pdbs_info = pdbs_info.loc[pdbs_info.RESOLUTION <= max_resolution, :]
 
 		# filter out long sequences
 

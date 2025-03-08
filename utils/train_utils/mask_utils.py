@@ -39,64 +39,63 @@ class MASK_injection():
 
 		# utils
 		batch, N = key_padding_mask.shape
-		seq_idx = torch.arange(N).unsqueeze(0)
 		valid = (~key_padding_mask).sum(dim=1)
-		sample_done = lambda span_mask, valid, mask_pct: (((span_mask.sum(dim=1)+mean_span) / (valid+1e-6)) >= mask_pct) & (span_mask.any(dim=1) | (valid==0))
-		done = lambda span_mask, valid, mask_pct: sample_done(span_mask, valid, mask_pct).all()
 
-		# define the target percentage of tokens for each sample, just a guidline, as span masking makes it hard to 
-		# exactly reach the target while stilll being efficient
-		mask_pct = torch.clamp((torch.randn((batch, ))*std_mask_pct) + mean_mask_pct, min=min_mask_pct, max=max_mask_pct)
+		# get mask pcts from uniform distribution
+		mask_pct = torch.rand((batch, )).clamp( min=self.min_mask_pct, max=self.max_mask_pct)
+
+		# as number of spans (approx). 
+		overlap_factor = 1 + (self.mean_span/torch.log2(valid)) # smaller sequences have higher chance of overlap, slightly overshoots, but better than undershooting
+		num_spans = ((mask_pct * valid * overlap_factor) / (self.mean_span)).clamp(min=1).long() # div by 2 so can get first set of start idxs then second set
 
 		# sample a span length for each residue from gaussian dist with mean span length and std span length defined above
-		span_lengths = torch.round(torch.clamp((torch.randn((batch, N))*std_span) + mean_span, min=1)).to(torch.int) # Z x N
-
-		# compute the number of spans to select per iteration for each sample, to avoid small updates on large sequence lengths
-		# valid samples / mean_span lengths is approx the number of spans that fit (assuming perfect spacing). 
-		# multiply by mask pct to get number of spans to reach mask_pct
-		num_spans_per_iter = torch.clamp(torch.ceil(mask_pct * (valid / mean_span)), min=1, max=N).long().unsqueeze(1) # Z x 1
+		span_lengths = torch.round(torch.clamp((torch.randn((batch, N))*self.std_span) + self.mean_span, min=1)).to(torch.int) # Z x N
 
 		# initialize the span mask
-		span_mask = torch.zeros_like(key_padding_mask) # Z x N
+		span_mask = torch.zeros_like(key_padding_mask)
 
-		# loop until each sample reaches its mask_pct
-		while not done(span_mask, valid, mask_pct):
+		# utils
+		seq_idx = torch.arange(N).unsqueeze(0)
 
-			# get rand vals
-			rand_vals = torch.rand(batch, N) # Z x N
+		# get rand vals and remove mask positions
+		rand_vals = torch.rand(batch, N) # Z x N
 
-			# get the 1D distance from the nearest span token for each token. use this to increase likelihood of choosing isolated region for next span
-			span_batch_idxs, span_N_idxs = torch.nonzero(span_mask, as_tuple=True) # numMask
-			dists_raw = (span_N_idxs.unsqueeze(1) - seq_idx).abs() # numMask x N
-			dists = torch.full((batch, N), N, dtype=torch.long) # max dist is N, set it to this so amin works properly in next line
-			dists.scatter_reduce_(0, span_batch_idxs.unsqueeze(1).expand(-1,N), dists_raw, reduce="amin") # amin gets the minimum distance of each token from all other mask tokens
+		# perform convolution to sharpen edges, i.e. avoid clustering of spand in 1d sequence
 
-			# multiply rand vals by dists so isolated regions are more likely to be in topk
-			rand_vals *= dists
-			rand_vals.masked_fill_(span_mask | key_padding_mask, -float("inf"))
+		# Define Laplacian kernel
+		kernel = torch.tensor([-1,2,-1], dtype=torch.float32).view(1, 1, -1)  # Shape: (out_channels=1, in_channels=1, kernel_size=3)
 
-			# sort rand vals and find the kth largest (diff for each sample), use that as threshold to get start_idxs
-			rand_vals_sorted, _ = torch.sort(rand_vals, dim=1, descending=True) # Z x N
-			rand_val_thresh = torch.gather(rand_vals_sorted, 1, num_spans_per_iter-1)  # Z x 1
-			rand_val_thresh.masked_fill_(sample_done(span_mask, valid, mask_pct).unsqueeze(1), float("inf")) # so don't select anything for samples that are done
+		# Apply 1D convolution with padding to maintain shape
+		conv_output = torch.nn.functional.conv1d(rand_vals.unsqueeze(1), kernel, padding=1)  # Shape: (batch, 1, N)
 
-			# use the thresh to select start idxs
-			batch_idx, start_idx = torch.nonzero(rand_vals > rand_val_thresh, as_tuple=True) # numTrue
+		# Remove channel dimension
+		conv_output = conv_output.squeeze(1)
 
-			# define the end idx by looking up the span length of the start idx
-			end_idx = start_idx + span_lengths[batch_idx, start_idx] # numTrue
+		# sort values and get the number of elements computed to reach mask pct
+		conv_sorted, _ = torch.sort(conv_output, dim=1, descending=True)
+		conv_thresh = torch.gather(conv_sorted, 1, index=num_spans.unsqueeze(1)-1)
+		conv_output.masked_fill_(key_padding_mask, -float("inf"))
 
-			# find tokens in the span
-			in_span = (seq_idx >= start_idx.unsqueeze(1)) & (seq_idx < end_idx.unsqueeze(1)) & (~key_padding_mask[batch_idx]) # numTrue x N
+		batch_idx, start_idx = torch.nonzero(conv_output >= conv_thresh, as_tuple=True) # numTrue
 
-			# aggregate the span tokens for each sample, from numTrue x N --> Z x N, amax functions as an OR operation, since max is 1 for bool tensor
-			span_mask.scatter_reduce_(0, batch_idx.unsqueeze(1).expand(-1, N), in_span, reduce="amax")
+		# define the end idx by looking up the span length of the start idx
+		end_idx = start_idx + span_lengths[batch_idx, start_idx] # numTrue
 
-			# update the number of spans needed in next iter
-			num_spans_per_iter = torch.clamp(torch.ceil(mask_pct * ((valid-span_mask.sum(dim=1)) / mean_span)), min=1, max=N).long().unsqueeze(1) # Z x 1
+		# find tokens in the span
+		in_span = (seq_idx >= start_idx.unsqueeze(1)) & (seq_idx < end_idx.unsqueeze(1)) & (~key_padding_mask[batch_idx]) # numTrue x N
+
+		# aggregate the span tokens for each batch, from numTrue x N --> Z x N, amax functions as an OR operation, since max is 1 for bool tensor
+		span_mask.scatter_reduce_(0, batch_idx.unsqueeze(1).expand(-1, N), in_span, reduce="amax")
 
 		# span mask is true for positions to inject, false otherwise. once inject the mask tokens, invert it to be consistent w/ other masks
 		return span_mask
+
+	def get_random_mask(self, key_padding_mask):
+		batch, N = key_padding_mask.shape
+		mask_pct = torch.rand((batch,1)).clamp(min=self.min_mask_pct, max=self.max_mask_pct)
+		mask = torch.rand_like(key_padding_mask, dtype=torch.float) < mask_pct
+
+		return mask
 
 	def inject_mask(self, span_mask, predictions):
 
@@ -111,8 +110,8 @@ class MASK_injection():
 		# predictions is already a onehot representation of labels, so dont need to add true tokens, as those are already present
 
 		# add random token to predictions
-		# high in in randint_like is exclusive, so only samples from non-mask tokens
-		one_hot_rand_token = torch.nn.functional.one_hot(torch.randint((batch, N), low=0, high=num_classes-1), num_classes=num_classes)
+		# high in randint is exclusive, so only samples from non-mask tokens
+		one_hot_rand_token = torch.nn.functional.one_hot(torch.randint(low=0, high=num_classes-1, size=(batch, N)), num_classes=num_classes)
 		one_hot_mask_token = torch.nn.functional.one_hot(torch.full((batch, N), num_classes-1), num_classes=num_classes)
 
 		predictions = torch.where(rand_token.unsqueeze(2), one_hot_rand_token, predictions)
@@ -122,8 +121,8 @@ class MASK_injection():
 
 	def MASK_tokens(self, batch):
 
-		span_mask = self.get_span_mask(batch.key_padding_mask)
-		predictions = self.inject_mask(span_mask, batch.predictions) # assumes predictions is a one hot representation of labels
+		# span_mask = self.get_span_mask(batch.key_padding_mask)
+		rand_mask = self.get_random_mask(batch.key_padding_mask)
+		predictions = self.inject_mask(rand_mask, batch.predictions) # assumes predictions is a one hot representation of labels
 		
-		batch.predictions, batch.onehot_mask = predictions, (~span_mask)
-		
+		batch.predictions, batch.onehot_mask = predictions, (~rand_mask)

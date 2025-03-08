@@ -3,6 +3,7 @@ import pandas as pd
 from pathlib import Path
 import torch
 import math
+import os
 
 canonical_aas = ['A', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'K', 'L', 'M', 'N', 'P', 'Q', 'R', 'S', 'T', 'V', 'W', 'Y']
 alphabet = canonical_aas + ['X', '<mask>']
@@ -17,52 +18,13 @@ def lbl_2_aa(label):
     else:
         return alphabet[label]
 
-pKas = {
-    "A": [2.34, 9.69],        # Alanine
-    "R": [2.17, 9.04, 12.48], # Arginine (guanidinium)
-    "N": [2.02, 8.80],        # Asparagine
-    "D": [1.88, 9.60, 3.65],  # Aspartic acid (β-carboxyl)
-    "C": [1.96, 10.28, 8.18], # Cysteine (thiol)
-    "E": [2.19, 9.67, 4.25],  # Glutamic acid (γ-carboxyl)
-    "Q": [2.17, 9.13],        # Glutamine
-    "G": [2.34, 9.60],        # Glycine
-    "H": [1.82, 9.17, 6.00],  # Histidine (imidazole)
-    "I": [2.36, 9.60],        # Isoleucine
-    "L": [2.36, 9.60],        # Leucine
-    "K": [2.18, 8.95, 10.53], # Lysine (ε-amino)
-    "M": [2.28, 9.21],        # Methionine
-    "F": [1.83, 9.13],        # Phenylalanine
-    "P": [1.99, 10.60],       # Proline
-    "S": [2.21, 9.15],        # Serine
-    "T": [2.09, 9.10],        # Threonine
-    "W": [2.38, 9.39],        # Tryptophan
-    "Y": [2.20, 9.11, 10.07], # Tyrosine (phenol)
-    "V": [2.32, 9.62],        # Valine 
-    "X": []    
-}
+# these volumes are from table 3 from "Volume changes on protein folding" by Yehouda Harpaz, Mark Gerstein, and Cyrus Chothia1 (1994)
+# Vp is the volume of the residue in solution when in the protein core. SCp is Vp(AA) - Vp(GLY), i.e. just the side chain 
+aa_volumes_path = Path(os.path.abspath(__file__)).parent / Path("AA_volumes.csv")
+# only use the volumes in the core for now
+aa_volumes = torch.tensor(pd.read_csv(aa_volumes_path, index_col=0).loc[canonical_aas, "SCp"].to_numpy(), device="cuda" if torch.cuda.is_available() else "cpu")
 
-# might change this to dist from Ca along Cb axis, but wouldnt be as impactful in the modeling of inhomogenous media since it is smaller though
-aa_sizes = { # avg length along arbitrary dimension (cube root of volumes)
-    'A': 4.0615481004456795, 
-    'R': 5.289572472694207, 
-    'N': 4.5788569702133275, 
-    'D': 4.497941445275415, 
-    'C': 4.414004962442103, 
-    'E': 4.776856181035017, 
-    'Q': 4.848807585839879, 
-    'G': 0.0, 
-    'H': 4.904868131524016, 
-    'I': 4.986630952238645, 
-    'L': 4.986630952238645, 
-    'K': 5.12992784003009, 
-    'M': 4.986630952238645, 
-    'F': 5.12992784003009, 
-    'P': 4.481404746557164, 
-    'S': 4.179339196381232, 
-    'T': 4.530654896083492, 
-    'W': 5.462555571281397, 
-    'Y': 5.2048278633942004, 
-    'V': 4.7176939803165325,
-    "X": 4.558434032012989 # avg size
-}
-
+# approximation of the side chain lengths along arbitrary axis
+canonical_aa_sizes = aa_volumes**(1/3)
+aa_sizes_pre = torch.cat([canonical_aa_sizes, canonical_aa_sizes.mean(dim=0, keepdim=True)])
+aa_sizes = 3.0 * (aa_sizes_pre / aa_sizes_pre.max(dim=0, keepdim=True).values)

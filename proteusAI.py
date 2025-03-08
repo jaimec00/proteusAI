@@ -15,8 +15,10 @@ import torch.nn.functional as F
 
 from utils.model_utils.esm2.get_esm_weights import get_esm_weights
 from utils.model_utils.wf_embedding.isotropic.cuda.wf_embedding import wf_embedding as wf_embedding_iso
-# from utils.model_utils.wf_embedding.anisotropic.cuda.wf_embedding import wf_embedding as wf_embedding_aniso # not implemented yet
+from utils.model_utils.wf_embedding.anisotropic.cuda.wf_embedding import wf_embedding as wf_embedding_aniso
 from utils.model_utils.geometric_attn.triton.geometric_attn import geometric_attn
+
+from data.constants import aa_sizes # 21 d tensor containing the size for each label idx (i.e. each AA + mask)
 
 # ----------------------------------------------------------------------------------------------------------------------
 
@@ -55,7 +57,7 @@ class proteusAI(nn.Module):
 		super(proteusAI, self).__init__()
 
 		# structure modules
-		self.anisotropic_wf = anisotropic_wf # false means use isotropic version (anisotropic not implemented yet)
+		self.anisotropic_wf = anisotropic_wf # false means use isotropic version 
 		self.wf_embedding = WavefunctionEmbedding(	d_model, min_wl, max_wl, base_wl, 
 													d_hidden_wl, hidden_layers_wl, 
 													learnable_wavelengths, wf_mag_type, anisotropic_wf, 
@@ -72,32 +74,32 @@ class proteusAI(nn.Module):
 												])
 
 		# sequence modules
-		self.use_aa = use_aa
-		self.aa_embedding = AminoAcidEmbedding(21, d_model, esm2_weights_path, d_hidden_aa, hidden_layers_aa, learnable_esm, dropout)
-		self.sequence_encoders = nn.ModuleList([ # sequence encoders (use same config as structure encoder bc just testing for now)
-													Encoder(	d_model, d_hidden_attn, hidden_layers_attn, 
-																n_head, min_spread, max_spread, base_spreads, 
-																num_spread, min_rbf, max_rbf, beta, learnable_spreads, 
-																dropout, attn_dropout
-															) 
-													for _ in range(seq_encoder_layers)
-												])
+		# self.use_aa = use_aa
+		# self.aa_embedding = AminoAcidEmbedding(21, d_model, esm2_weights_path, d_hidden_aa, hidden_layers_aa, learnable_esm, dropout)
+		# self.sequence_encoders = nn.ModuleList([ # sequence encoders (use same config as structure encoder bc just testing for now)
+		# 											Encoder(	d_model, d_hidden_attn, hidden_layers_attn, 
+		# 														n_head, min_spread, max_spread, base_spreads, 
+		# 														num_spread, min_rbf, max_rbf, beta, learnable_spreads, 
+		# 														dropout, attn_dropout
+		# 													) 
+		# 											for _ in range(seq_encoder_layers)
+		# 										])
 
-		# final decoder that combines sequence and structure representation
-		self.decoders = nn.ModuleList([
-										Decoder(	d_model, d_hidden_attn, hidden_layers_attn, 
-													n_head, min_spread, max_spread, base_spreads, 
-													num_spread, min_rbf, max_rbf, beta, learnable_spreads, 
-													dropout, attn_dropout
-												) 
-										for _ in range(decoder_layers)
-									])
+		# # final decoder that combines sequence and structure representation (also uses same config as structure encoder)
+		# self.decoders = nn.ModuleList([
+		# 								Decoder(	d_model, d_hidden_attn, hidden_layers_attn, 
+		# 											n_head, min_spread, max_spread, base_spreads, 
+		# 											num_spread, min_rbf, max_rbf, beta, learnable_spreads, 
+		# 											dropout, attn_dropout
+		# 										) 
+		# 								for _ in range(decoder_layers)
+		# 							])
 
 		# map to aa prob logits
 		self.out_proj = nn.Linear(d_model, 20)
 		init_xavier(self.out_proj)
 
-	def forward(self, coords, aas, chain_idxs, key_padding_mask=None, auto_regressive=False, temp=0.1):
+	def forward(self, coords, aas, chain_idxs, key_padding_mask=None, mask_predict=False, temp=0.1, num_iters=10):
 		"""
 		Forward pass of the model with optional auto-regressive inference
 		
@@ -106,28 +108,26 @@ class proteusAI(nn.Module):
 		chain_idxs: list of lists of lists of start/stop idxs of each chain
 		"""
 
-		# still need to implement properly, right now only works w/ Ca model and returns only Ca
+		# get the virtual beta carbon coordinates, full backbone model is the same, just more accurate
 		coords_alpha, coords_beta = self.get_coords(coords, chain_idxs)
 
+		if mask_predict: # inference
+			return self.mask_predict(coords_alpha, coords_beta, aas, key_padding_mask, temp, num_iters)
+
 		# encode the structure via wave function embedding and stack of geometric attention encoders
-		wf = self.encode_structure(coords_alpha, coords_beta, key_padding_mask)
-
-		# initial wf embedding is the same, so dont recompute each time in auto regressive
-		if auto_regressive:
-			return self.auto_regressive(wf, coords_alpha, aas, key_padding_mask, temp)
-
-		# encode the sequence, if applicable, w/ aa embedding and stack of geometric attention encoders
-		if self.use_aa:
-			seq = self.decode_sequence(wf, aas, coords_alpha, key_padding_mask)
-		else:
-			seq = wf
+		wf = self.encode_structure(coords_alpha, coords_beta, aas, key_padding_mask)
 
 		# map to probability logits
-		seq_probs = self.out_proj(seq)
+		logits = self.out_proj(wf)
 
-		return seq_probs
+		return logits
 
-	def encode_structure(self, coords_alpha, coords_beta=None, key_padding_mask=None):
+	def encode_structure(self, coords_alpha, coords_beta, aas, key_padding_mask=None):
+
+		# scale the magnitude of the beta carbon proportionally to the size of the AA (uses avg size if MASK token)
+		# testing if this can be done iteratively w/ mask predict inference strat. gets rid of the problem of the model overfitting to
+		# sequence info when i have two seperate modalities, this marries them and is physically reasonable
+		coords_beta = self.inject_aas(coords_beta, aas)
 
 		# wave function embedding
 		wf = self.wf_embedding(coords_alpha, coords_beta, key_padding_mask) # batch x N x 3 --> batch x N x d_model
@@ -154,7 +154,7 @@ class proteusAI(nn.Module):
 		# amino acid embedding and bidirectional sequence encoders
 		aas = self.encode_sequence(aas, coords_alpha, key_padding_mask)
 
-		# bidirectional geometric attention decoders, see Decoder for explanation 
+		# bidirectional geometric attention decoders, see Decoder class for explanation 
 		for decoder in self.decoders:
 			wf, aas = decoder(wf, aas, coords_alpha, key_padding_mask)
 
@@ -182,6 +182,8 @@ class proteusAI(nn.Module):
 		for encoder in self.sequence_encoders:
 			for param in encoder.parameters():
 				param.requires_grad = False
+
+	def freeze_decoder_weights(self):
 		for decoder in self.decoders:
 			for param in decoder.parameters():
 				param.requires_grad = False
@@ -194,8 +196,7 @@ class proteusAI(nn.Module):
 		for struct_encoder, seq_encoder in zip(self.structure_encoders, self.sequence_encoders):
 			seq_encoder.load_state_dict(struct_encoder.state_dict())
 
-	# will change the name later
-	def auto_regressive(self, wf, coords, aas, key_padding_mask=None, temp=0.1, num_iters=10):
+	def mask_predict(self, coords_alpha, coords_beta, aas, key_padding_mask=None, temp=0.1, num_iters=10):
 		
 		# new decoding strat of CMLM paper. constant number of iterations. 
 		# predict full seq at each iter, and remask the least confident. 
@@ -211,7 +212,7 @@ class proteusAI(nn.Module):
 		for i in range(num_iters):
 
 			# run the model
-			logits = self.out_proj(self.decode_sequence(wf, aas, coords, key_padding_mask)) # Z x N x C
+			logits = self.out_proj(self.encode_structure(coords_alpha, coords_beta, aas, key_padding_mask)) # Z x N x C
 
 			# get probs w/ temp scaling
 			scaled_logits = logits / temp
@@ -226,7 +227,7 @@ class proteusAI(nn.Module):
 			entropy = -torch.sum(entropy_probs * torch.log(entropy_probs), dim=2) # Z x N
 
 			# put the mask tokens as low entropy, so they are not included when counting the number of high entropy tokens
-			entropy[mask] = -float("inf")
+			entropy[key_padding_mask] = -float("inf")
 
 			# sort by highest entropy, ie lowest confidence
 			sorted_entropy_idxs = torch.argsort(entropy, descending=True, dim=1)
@@ -246,7 +247,7 @@ class proteusAI(nn.Module):
 			reverse_sorted_predictions = torch.gather(sorted_predictions, dim=1, index=reverse_sorted_entropy_idxs)
 
 			# create the one hot tensor for the next iter
-			aas = torch.nn.functional.one_hot(reverse_sorted_predictions.long(), num_classes=num_classes)
+			aas = torch.nn.functional.one_hot(reverse_sorted_predictions.long(), num_classes=num_classes).float()
 
 		# confidence scores are the entropy of the last iteration
 		confidence_scores = entropy # will return this later
@@ -259,29 +260,24 @@ class proteusAI(nn.Module):
 		# in both cases, ca and cb coords are batch x N x 3
 		if self.anisotropic_wf:
 			if coords.dim() == 3: # Ca only model
-				coords_beta = get_Cb_from_Ca(coords, chain_idxs)
-				coords_alpha = coords
+				coords_alpha, coords_beta = self.get_Cb_from_Ca(coords, chain_idxs)
 			elif coords.dim() == 4: # backbone model
-				coords_alpha, coords_beta = get_Cb_from_BB(coords)
+				coords_alpha, coords_beta = self.get_Cb_from_BB(coords)
 			else:
 				raise ValueError(f"invalid input size for coordinates, expected (batch,N,3) for Ca only model or (batch,N,3,3) for backbone model, but got {coords.shape=}")
-		else:
+		
+		else: # isotropic version is just the bland ca only model, will probably get rid of the option bc anisotropic is just better
 			coords_alpha, coords_beta = coords, None
 
 		return coords_alpha, coords_beta
 
-	def get_Cb_from_Ca(self, coords, chain_idxs):
+	def get_Cb_from_Ca(self, coordsA, chain_idxs):
 		'''
-		compute beta carbon coords (not absolute, just relative to Ca). not used yet, need to adapt wf_embedding to use this info by making it anisotropic
+		compute beta carbon coords (not absolute, just relative to Ca). used for anisotropic wf embedding, in testing
 		approximates N and C as being on the line connecting adjacent Ca, with ideal bond distances
 		uses the same experimentally determined constants as PMPNN to compute linear combination of b1, b2, and b3
 
-		chain_idxs is a list of lists of lists. not a tensor because can't use indexing since each chain is of a different size. 
-		can probably make a cuda kernel to do this, so that each block processes a chain, since these are independant, depends on how slow the looping is
-		if so, the function will convert the chain list to a batch x max_chains_in_sample x 2(start,stop) tensor and read the appropriate idxs of coords 
-		from gmem and process them within the block 
-
-		chain_idxs looks like:
+		chain_idxs is a list of lists of lists, like:
 			[ 
 				[ 
 					[sample1_chain1_start, sample1_chain1_stop], 
@@ -293,37 +289,60 @@ class proteusAI(nn.Module):
 				]
 			]
 		
-		loops through chains of each sample, the chain idxs are consistent with the actual indexes of coords, 
-		and no padding applied to chain idxs, so no masking necessary
+		flattens the indexes to perform efficient batched computation of virtual Cb coordinates
 		'''
 
+		batch, N, space = coordsA.shape
+
 		# default cb position is 0,0,0
-		all_cb = torch.zeros_like(coords)
+		coordsB = torch.zeros_like(coordsA)
 
-		# loop through samples
-		for sample in chain_idxs:
+		# create flattened lists of idxs
+		batch_idxs_flat, start_idxs_flat, end_idxs_flat = [], [], []
+		for sample_idx, sample in enumerate(chain_idxs):
+			for start_idx, stop_idx in sample:
+				batch_idxs_flat.append(sample_idx)
+				start_idxs_flat.append(start_idx)
+				end_idxs_flat.append(stop_idx)
 
-			# loop through chains in the sample
-			for chain_start, chain_stop in sample:
+		# convert to flattened tensors and reshape
+		batch_idxs_flat = torch.tensor(batch_idxs_flat).unsqueeze(0).unsqueeze(2) # 1 x num_chains x 1
+		start_idxs_flat = torch.tensor(start_idxs_flat).unsqueeze(0).unsqueeze(2)  # 1 x num_chains x 1
+		end_idxs_flat = torch.tensor(end_idxs_flat).unsqueeze(0).unsqueeze(2) # 1 x num_chains x 1
 
-				logical_n = coords[sample, chain_start:chain_stop-2, :] # chain_len-2 x 3
-				logical_ca = coords[sample, chain_start+1:chain_stop-1, :]
-				logical_c = coords[sample, chain_start+2:chain_stop, :]
+		# create Z x num_chains x N boolean tensor, where True is the positions corresponding to each chain within its batch
+		seq_idxs = torch.arange(N).unsqueeze(0).unsqueeze(0) # 1 x 1 x N
+		batch_idxs = torch.arange(batch).unsqueeze(1).unsqueeze(2) # Z x 1 x 1
+		is_chain = (batch_idxs == batch_idxs_flat) & (seq_idxs >= start_idxs_flat) & (seq_idxs < end_idxs_flat) # Z x num_chains x N
 
-				b1 = ( logical_ca - logical_n)
-				b1 = 1.458 * b1 / torch.linalg.norm(b1, dim=1, keepdims=True)
-				b2 = (logical_c - logical_ca)
-				b2 = 1.525 * b2 / torch.linalg.norm(b2, dim=1, keepdims=True)
-				b3 = torch.linalg.cross(b1, b2)
+		# convert the boolean tensors to Z x N
+		# create boolean tensors defining if each position acts as a logical N, CA, or C, where N[i] is adjacent to CA[i] is adjacent to C[i]
+		# the max works as an OR operation along num chains dim to get Z x N boolean tensor of where each logical backbone atom goes
+		is_logical_N = (is_chain & ((seq_idxs+2) < end_idxs_flat)).max(dim=1).values # Z x N
+		is_logical_CA = (is_chain & ((seq_idxs-1) >= start_idxs_flat) & ((seq_idxs+1) < end_idxs_flat)).max(dim=1).values # Z x N
+		is_logical_C = (is_chain & ((seq_idxs-2) >= start_idxs_flat)).max(dim=1).values # Z x N
 
-				cb = -0.58273431*b2 + 0.56802827*b1 - 0.54067466*b3
+		# extract the coordinates for each
+		logical_N = coordsA[is_logical_N, :] # num_positions_in_all_chains-(2*num_chains) x 3
+		logical_CA = coordsA[is_logical_CA, :] # num_positions_in_all_chains-(2*num_chains) x 3
+		logical_C = coordsA[is_logical_C, :] # num_positions_in_all_chains-(2*num_chains) x 3
 
-				# the first and last ca are used as inplace cb, so these coords are already zero in all_cb, just make sure
-				# indexing is consistent by excluding the first and last resi of the chain here
-				# terminal Ca do not have Cb (can't approximate N and C, since no adjacent Ca), so Cb coords (relative to Ca) are (0,0,0) for these
-				all_cb[sample, chain_start+1:chain_stop-1, :] = cb
+		# compute the virtual beta carbons
+		# shapes are all # num_positions_in_all_chains-(2*num_chains) x 3
+		# uses ideal bond lengths
+		b1 = logical_CA - logical_N
+		b1 = 1.458 * b1 / torch.linalg.vector_norm(b1, dim=1, keepdim=True).clamp(min=1e-6)
+		b2 = logical_C - logical_CA
+		b2 = 1.525 * b2 / torch.linalg.vector_norm(b2, dim=1, keepdim=True).clamp(min=1e-6)
+		b3 = torch.linalg.cross(b1, b2)
 
-		return all_cb
+		# compute virtual cb w/ empirical constants
+		virtual_CB = -0.58273431*b2 + 0.56802827*b1 - 0.54067466*b3
+
+		# only the logical CA get a CB, so use the already computed boolean tensor to assign CB
+		coordsB[is_logical_CA] = virtual_CB
+
+		return coordsA, coordsB
 
 	def get_Cb_from_BB(self, coords):
 
@@ -344,6 +363,23 @@ class proteusAI(nn.Module):
 
 		return ca, cb
 
+	def inject_aas(self, coords_beta, aas):
+
+		batch, N, num_classes = aas.shape
+
+		# convert aas to token idxs
+		token_idxs = torch.argmax(aas, dim=2) # Z x N
+
+		# normalize beta carbon so can scale it
+		coords_beta_norm = torch.linalg.vector_norm(coords_beta, dim=2, keepdim=True) # Z x N x 1
+		coords_beta_norm[coords_beta_norm==0] = 1 # avoid div by zero
+		coords_beta_unit = coords_beta / coords_beta_norm # create the unit vector
+
+		# gather the corresponding distances and scale the beta carbon
+		coords_beta_magnitudes = torch.gather(aa_sizes.unsqueeze(0).unsqueeze(0).expand(batch, N, -1), dim=2, index=token_idxs.unsqueeze(2))
+		coords_beta_scaled = coords_beta_unit * coords_beta_magnitudes
+
+		return coords_beta_scaled
 
 class WavefunctionEmbedding(nn.Module):
 	'''
@@ -400,9 +436,8 @@ class WavefunctionEmbedding(nn.Module):
 		wavenumbers = 2 * torch.pi / self.get_wavelengths()
 		wf_dropout = self.wf_dropout if self.training else 0.0
 
-		if self.anisotropic_wf: # not implemented yet
-			raise NotImplementedError("anisotropic wavefunction embedding not implemented, please run isotropic version for now")
-			# wf = wf_embedding_aniso(coords_alpha, coords_beta, wavenumbers, self.alpha, self.magnitude_type, key_padding_mask) # batch x N x 3 --> batch x N x d_model
+		if self.anisotropic_wf:
+			wf = wf_embedding_aniso(coords_alpha, coords_beta, wavenumbers, self.magnitude_type, wf_dropout, key_padding_mask) # batch x N x 3 --> batch x N x d_model
 		else:
 			wf = wf_embedding_iso(coords_alpha, wavenumbers, self.magnitude_type, wf_dropout, key_padding_mask) # batch x N x 3 --> batch x N x d_model
 
@@ -514,7 +549,7 @@ class Decoder(nn.Module):
 	def __init__(self, d_model=512, d_hidden=1024, hidden_layers=0, nhead=8, min_spread=1, max_spread=6, base=20, num_spread=8, min_rbf=0.01, max_rbf=0.99, beta=2.0, learnable_spreads=False, dropout=0.0, attn_dropout=0.0):
 		super(Decoder, self).__init__()
 
-		# self-attention layers
+		# seq cross-attention layers
 		self.seq_attn = GeoAttention(d_model, nhead, min_spread=min_spread, max_spread=max_spread, base=base, num_spread=num_spread, min_rbf=min_rbf, max_rbf=max_rbf, beta=beta, learnable_spreads=learnable_spreads, dropout=attn_dropout)
 		self.seq_attn_norm = nn.LayerNorm(d_model)
 		self.seq_attn_dropout = nn.Dropout(dropout)
@@ -524,7 +559,7 @@ class Decoder(nn.Module):
 		self.seq_attn_ffn_norm = nn.LayerNorm(d_model)
 		self.seq_attn_ffn_dropout = nn.Dropout(dropout)
 
-		# cross-attention layers
+		# struct cross-attention layers
 		self.struct_attn = GeoAttention(d_model, nhead, min_spread=min_spread, max_spread=max_spread, base=base, num_spread=num_spread, min_rbf=min_rbf, max_rbf=max_rbf, beta=beta, learnable_spreads=learnable_spreads, dropout=attn_dropout)
 		self.struct_attn_norm = nn.LayerNorm(d_model)
 		self.struct_attn_dropout = nn.Dropout(dropout)

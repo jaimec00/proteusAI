@@ -20,11 +20,11 @@ class Output():
 
 	def __init__(self, out_path, loss_plot=Path("loss_plot.png"), seq_plot=Path("seq_sim_plot.png"), weights_path=Path("model_parameters.pth"), model_checkpoints=20):
 
-		out_path.mkdir(parents=True, exist_ok=True)
-		self.out_path = out_path
-		self.loss_plot = self.out_path / loss_plot
-		self.seq_plot = self.out_path / seq_plot
-		self.weights_path = self.out_path / weights_path
+		self.out_path = Path(out_path)
+		self.out_path.mkdir(parents=True, exist_ok=True)
+		self.loss_plot = self.out_path / Path(loss_plot)
+		self.seq_plot = self.out_path / Path(seq_plot)
+		self.weights_path = self.out_path / Path(weights_path)
 		self.log = self.setup_logging(self.out_path / Path("log.txt"))
 		self.model_checkpoints = model_checkpoints
 
@@ -49,15 +49,15 @@ class Output():
 
 		return logger
 
-	def log_hyperparameters(self, training_parameters, hyper_parameters, MASK_injection, data):
+	def log_hyperparameters(self, training_parameters, hyper_parameters, data):
 
-		MASK_info = "" if not hyper_parameters.use_aa else textwrap.dedent(f'''
-		mean_mask_pct: {MASK_injection.mean_mask_pct}
-		std_mask_pct: {MASK_injection.std_mask_pct}
-		min_mask_pct: {MASK_injection.min_mask_pct} 
-		max_mask_pct: {MASK_injection.max_mask_pct} 
-		mean_span: {MASK_injection.mean_span}
-		std_span: {MASK_injection.std_span}
+		MASK_info = "" if not hyper_parameters.aa.use_aa else textwrap.dedent(f'''
+		mean_mask_pct: {training_parameters.regularization.mask_injection.mean_mask_pct}
+		std_mask_pct: {training_parameters.regularization.mask_injection.std_mask_pct}
+		min_mask_pct: {training_parameters.regularization.mask_injection.min_mask_pct} 
+		max_mask_pct: {training_parameters.regularization.mask_injection.max_mask_pct} 
+		mean_span: {training_parameters.regularization.mask_injection.mean_span}
+		std_span: {training_parameters.regularization.mask_injection.std_span}
 		''')
 
 		wf_types = {0: "none", 1: "inverse", 2: "log2", 3: "sqrt"}
@@ -68,37 +68,38 @@ class Output():
 			model parameters: {training_parameters.num_params:,}
 			d_model: {hyper_parameters.d_model}
 			
-			structure weights are{" " if hyper_parameters.freeze_structure_weights else " NOT "}frozen
-			sequence weights are{" " if hyper_parameters.freeze_sequence_weights else " NOT "}frozen
-			structure encoder weights are{" " if hyper_parameters.cp_struct_enc_2_seq_enc else " NOT "}copied to sequence encoder
+			structure weights are{" " if training_parameters.weights.freeze_structure_weights else " NOT "}frozen
+			sequence weights are{" " if training_parameters.weights.freeze_sequence_weights else " NOT "}frozen
+			structure encoder weights are{" " if training_parameters.weights.cp_struct_enc_2_seq_enc else " NOT "}copied to sequence encoder
 			
-			using {"anisotropic" if hyper_parameters.anisotropic_wf else "isotropic"} wave function embedding
-			wave function embedding normalization: {wf_types[hyper_parameters.wf_type]}
-			learnable_wavelengths: {hyper_parameters.learnable_wavelengths}
-			min_wl: {hyper_parameters.min_wl} 
-			max_wl: {hyper_parameters.max_wl} 
-			base_wl: {hyper_parameters.base_wl}
-			d_hidden_we: {hyper_parameters.d_hidden_we}
-			hidden_layers_we: {hyper_parameters.hidden_layers_we}
+			using {"anisotropic" if hyper_parameters.wf.anisotropic_wf else "isotropic"} wave function embedding
+			wave function embedding normalization: {wf_types[hyper_parameters.wf.wf_mag_type]}
+			learnable_wavelengths: {hyper_parameters.wf.learnable_wavelengths}
+			min_wl: {hyper_parameters.wf.min_wl} 
+			max_wl: {hyper_parameters.wf.max_wl} 
+			base_wl: {hyper_parameters.wf.base_wl}
+			d_hidden_we: {hyper_parameters.wf.d_hidden_we}
+			hidden_layers_we: {hyper_parameters.wf.hidden_layers_we}
 
-			d_hidden_aa: {hyper_parameters.d_hidden_aa}
-			hidden_layers_aa: {hyper_parameters.hidden_layers_aa}
-			ESM2 weights: {hyper_parameters.esm2_weights_path}
-			learnable_ESM2_weights: {hyper_parameters.learnable_esm}
+			d_hidden_aa: {hyper_parameters.aa.d_hidden_aa}
+			hidden_layers_aa: {hyper_parameters.aa.hidden_layers_aa}
+			ESM2 weights: {hyper_parameters.aa.esm2_weights_path}
+			learnable_ESM2_weights: {hyper_parameters.aa.learnable_esm}
 
-			number of structure encoders: {hyper_parameters.struct_encoder_layers}
-			number of sequence encoders: {hyper_parameters.seq_encoder_layers}
-			number of attention heads: {hyper_parameters.num_heads}
-			learnable_spreads: {hyper_parameters.learnable_spreads}
-			min_spread: {hyper_parameters.min_spread} 
-			max_spread: {hyper_parameters.max_spread} 
-			base_spread: {hyper_parameters.base_spread}
-			min_rbf: {hyper_parameters.min_rbf} 
-			max_rbf: {hyper_parameters.max_rbf}
-			beta: {hyper_parameters.beta}
-			d_hidden_attn: {hyper_parameters.d_hidden_attn}
-			hidden_layers_attn: {hyper_parameters.hidden_layers_attn}
-			temperature: {hyper_parameters.temperature}
+			number of structure encoders: {hyper_parameters.struct_encoders.layers}
+			number of sequence encoders: {hyper_parameters.seq_encoders.layers}
+			number of decoders: {hyper_parameters.decoders.layers}
+			number of attention heads: {hyper_parameters.struct_encoders.num_heads}
+			learnable_spreads: {hyper_parameters.struct_encoders.learnable_spreads}
+			min_spread: {hyper_parameters.struct_encoders.min_spread} 
+			max_spread: {hyper_parameters.struct_encoders.max_spread} 
+			base_spread: {hyper_parameters.struct_encoders.base_spread}
+			min_rbf: {hyper_parameters.struct_encoders.min_rbf} 
+			max_rbf: {hyper_parameters.struct_encoders.max_rbf}
+			beta: {hyper_parameters.struct_encoders.beta}
+			d_hidden_attn: {hyper_parameters.struct_encoders.d_hidden_attn}
+			hidden_layers_attn: {hyper_parameters.struct_encoders.hidden_layers_attn}
+			temperature: {training_parameters.inference.temperature}
 
 			dataset split ({data.num_train + data.num_val + data.num_test} clusters total): 
 				train clusters: {data.num_train}
@@ -108,16 +109,15 @@ class Output():
 			max batch size (samples): {data.max_batch_size}
 			min sequence length (tokens): {data.min_seq_size}
 			max sequence length (tokens): {data.max_seq_size}
-			effective batch size (tokens): {data.batch_tokens * training_parameters.accumulation_steps}
+			effective batch size (tokens): {data.batch_tokens * training_parameters.loss.accumulation_steps}
 
 			epochs: {training_parameters.epochs}
-			learning rate: {training_parameters.lr_step}
-			learning rate plateau scaling factor: {training_parameters.lr_scale}
-			learning rate plateau patience: {training_parameters.lr_patience}
-			dropout: {training_parameters.dropout}
-			dropout_attention: {training_parameters.attn_dropout}
-			label-smoothing: {training_parameters.label_smoothing}
-			coordinate_noise_stdev: {training_parameters.noise_coords_std} A
+			max learning rate: {training_parameters.lr.lr_step}
+			warmup steps: {training_parameters.lr.warmup_steps}
+			dropout: {training_parameters.regularization.dropout}
+			dropout_attention: {training_parameters.regularization.attn_dropout}
+			label-smoothing: {training_parameters.regularization.label_smoothing}
+			coordinate_noise_stdev: {training_parameters.regularization.noise_coords_std} A
 			
 			{MASK_info}
 
