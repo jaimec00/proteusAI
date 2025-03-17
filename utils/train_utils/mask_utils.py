@@ -13,24 +13,20 @@ import torch.nn.functional as F
 
 class MASK_injection():
 
-	def __init__(self,  mean_mask_pct=0.5,
-						std_mask_pct=0.25,
+	def __init__(self,  mask_type="rand",
 						min_mask_pct=0.00,
 						max_mask_pct=1.00,
 						mean_span=10,
 						std_span=5,
-						randAA_pct=0.0, trueAA_pct=0.0
+						randAA_pct=0.0
 					):
 
-		self.mean_mask_pct = mean_mask_pct
-		self.std_mask_pct = std_mask_pct
+		self.mask_type = mask_type
 		self.min_mask_pct = min_mask_pct
 		self.max_mask_pct = max_mask_pct
 		self.mean_span = mean_span
 		self.std_span = std_span
-
 		self.randAA_pct = randAA_pct
-		self.trueAA_pct = trueAA_pct
 
 	def get_span_mask(self, key_padding_mask):
 		'''
@@ -62,11 +58,16 @@ class MASK_injection():
 
 		# perform convolution to sharpen edges, i.e. avoid clustering of spand in 1d sequence
 
-		# Define Laplacian kernel
-		kernel = torch.tensor([-1,2,-1], dtype=torch.float32).view(1, 1, -1)  # Shape: (out_channels=1, in_channels=1, kernel_size=3)
+		# Define convolution kernel
+		kernel_size = (self.mean_span//2) + 1 # make it an odd number so centered properly
+		num_supress = (kernel_size - 1)//2
+		center_val = torch.tensor([self.mean_span*2])
+		suppress_vals = -(1 + torch.arange(num_supress).float())*num_supress
+		suppress_vals_rev = torch.flip(suppress_vals, dims=[0])
+		kernel = torch.cat([suppress_vals, center_val, suppress_vals_rev], dim=0).view(1, 1, -1)  # out_channels x in_channels x kernel_size
 
 		# Apply 1D convolution with padding to maintain shape
-		conv_output = torch.nn.functional.conv1d(rand_vals.unsqueeze(1), kernel, padding=1)  # Shape: (batch, 1, N)
+		conv_output = torch.nn.functional.conv1d(rand_vals.unsqueeze(1), kernel, padding=num_supress)  # Shape: (batch, 1, N)
 
 		# Remove channel dimension
 		conv_output = conv_output.squeeze(1)
@@ -97,32 +98,44 @@ class MASK_injection():
 
 		return mask
 
-	def inject_mask(self, span_mask, predictions):
+	def inject_mask(self, mask, key_padding_mask, predictions):
 
 		batch, N, num_classes = predictions.shape
 
-		rand_vals = torch.where(span_mask, torch.rand_like(span_mask, dtype=torch.float), float("inf")) # dont touch positions not included in span mask
+		rand_vals = torch.rand_like(mask, dtype=torch.float)
 
-		true_token = rand_vals<self.trueAA_pct
-		rand_token = ~true_token & (rand_vals<(self.trueAA_pct+self.randAA_pct) )
-		mask_token = ~true_token & ~rand_token & (rand_vals!=float("inf"))
+		# inject random tokens into non-masked positions
+		# if self.randAA_pct is -1, sample the randAA pct from uniform distribution for each sample, else, it is constant
+		if self.randAA_pct == -1:
+			randAA_pct = torch.rand((batch, 1), device=mask.device)
+		else:
+			randAA_pct = self.randAA_pct
 
-		# predictions is already a onehot representation of labels, so dont need to add true tokens, as those are already present
+		rand_token = torch.where(mask | key_padding_mask, False, rand_vals < randAA_pct)
 
 		# add random token to predictions
 		# high in randint is exclusive, so only samples from non-mask tokens
 		one_hot_rand_token = torch.nn.functional.one_hot(torch.randint(low=0, high=num_classes-1, size=(batch, N)), num_classes=num_classes)
+		
+		# for the mask token
 		one_hot_mask_token = torch.nn.functional.one_hot(torch.full((batch, N), num_classes-1), num_classes=num_classes)
 
+		# replace these positions in predictions
 		predictions = torch.where(rand_token.unsqueeze(2), one_hot_rand_token, predictions)
-		predictions = torch.where(mask_token.unsqueeze(2), one_hot_mask_token, predictions)
+		predictions = torch.where(mask.unsqueeze(2), one_hot_mask_token, predictions)
 
 		return predictions
 
 	def MASK_tokens(self, batch):
 
-		# span_mask = self.get_span_mask(batch.key_padding_mask)
-		rand_mask = self.get_random_mask(batch.key_padding_mask)
-		predictions = self.inject_mask(rand_mask, batch.predictions) # assumes predictions is a one hot representation of labels
+		if self.mask_type == "rand":
+			mask = self.get_random_mask(batch.key_padding_mask)
+		elif self.mask_type == "span":
+			mask = self.get_span_mask(batch.key_padding_mask)
+		elif self.mask_type == "noise": # no masking, just replace true aas with random aas
+			mask = torch.zeros_like(batch.key_padding_mask)
+		else:
+			raise ValueError(f"invalid mask injection option: {mask_type}. valid options are 'rand' or 'span'")
 		
-		batch.predictions, batch.onehot_mask = predictions, (~rand_mask)
+		predictions = self.inject_mask(mask, batch.key_padding_mask, batch.predictions) # assumes predictions is a one hot representation of labels
+		batch.predictions, batch.onehot_mask = predictions, (~mask)

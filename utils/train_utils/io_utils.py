@@ -51,15 +51,6 @@ class Output():
 
 	def log_hyperparameters(self, training_parameters, hyper_parameters, data):
 
-		MASK_info = "" if not hyper_parameters.aa.use_aa else textwrap.dedent(f'''
-		mean_mask_pct: {training_parameters.regularization.mask_injection.mean_mask_pct}
-		std_mask_pct: {training_parameters.regularization.mask_injection.std_mask_pct}
-		min_mask_pct: {training_parameters.regularization.mask_injection.min_mask_pct} 
-		max_mask_pct: {training_parameters.regularization.mask_injection.max_mask_pct} 
-		mean_span: {training_parameters.regularization.mask_injection.mean_span}
-		std_span: {training_parameters.regularization.mask_injection.std_span}
-		''')
-
 		wf_types = {0: "none", 1: "inverse", 2: "log2", 3: "sqrt"}
 
 		log = 	textwrap.dedent(f'''
@@ -67,10 +58,6 @@ class Output():
 		model hyper-parameters:
 			model parameters: {training_parameters.num_params:,}
 			d_model: {hyper_parameters.d_model}
-			
-			structure weights are{" " if training_parameters.weights.freeze_structure_weights else " NOT "}frozen
-			sequence weights are{" " if training_parameters.weights.freeze_sequence_weights else " NOT "}frozen
-			structure encoder weights are{" " if training_parameters.weights.cp_struct_enc_2_seq_enc else " NOT "}copied to sequence encoder
 			
 			using {"anisotropic" if hyper_parameters.wf.anisotropic_wf else "isotropic"} wave function embedding
 			wave function embedding normalization: {wf_types[hyper_parameters.wf.wf_mag_type]}
@@ -81,14 +68,7 @@ class Output():
 			d_hidden_we: {hyper_parameters.wf.d_hidden_we}
 			hidden_layers_we: {hyper_parameters.wf.hidden_layers_we}
 
-			d_hidden_aa: {hyper_parameters.aa.d_hidden_aa}
-			hidden_layers_aa: {hyper_parameters.aa.hidden_layers_aa}
-			ESM2 weights: {hyper_parameters.aa.esm2_weights_path}
-			learnable_ESM2_weights: {hyper_parameters.aa.learnable_esm}
-
 			number of structure encoders: {hyper_parameters.struct_encoders.layers}
-			number of sequence encoders: {hyper_parameters.seq_encoders.layers}
-			number of decoders: {hyper_parameters.decoders.layers}
 			number of attention heads: {hyper_parameters.struct_encoders.num_heads}
 			learnable_spreads: {hyper_parameters.struct_encoders.learnable_spreads}
 			min_spread: {hyper_parameters.struct_encoders.min_spread} 
@@ -119,7 +99,10 @@ class Output():
 			label-smoothing: {training_parameters.regularization.label_smoothing}
 			coordinate_noise_stdev: {training_parameters.regularization.noise_coords_std} A
 			
-			{MASK_info}
+			min_mask_pct: {training_parameters.regularization.mask_injection.min_mask_pct} 
+			max_mask_pct: {training_parameters.regularization.mask_injection.max_mask_pct} 
+			mean_span: {training_parameters.regularization.mask_injection.mean_span}
+			std_span: {training_parameters.regularization.mask_injection.std_span}
 
 			output directory: {self.out_path}
 		''')
@@ -153,12 +136,12 @@ class Output():
 		self.log.info(f"validation seq_sim per token: {str(seq_sim)}\n")
 		all_losses.add_losses(loss, seq_sim)
 
-	def log_test_losses(self, test_losses, test_ar_losses):
+	def log_test_losses(self, test_losses, test_mp_losses):
 		test_loss, test_seq_sim = test_losses.get_avg()
-		_, test_ar_seq_sim = test_ar_losses.get_avg()
+		_, test_mp_seq_sim = test_mp_losses.get_avg()
 		self.log.info(f"testing loss per token: {test_loss}")
 		self.log.info(f"test sequence similarity per token: {test_seq_sim}")
-		self.log.info(f"test auto-regressive sequence similarity per token: {test_ar_seq_sim}")
+		self.log.info(f"test mask-predict sequence similarity per token: {test_mp_seq_sim}")
 	
 	def plot_training(self, train_losses, val_losses, val_losses_context):
 

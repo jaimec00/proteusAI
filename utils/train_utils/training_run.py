@@ -50,14 +50,12 @@ class TrainingRun():
 		self.hyper_parameters = args.hyper_parameters
 		self.training_parameters = args.training_parameters
 		
-		self.MASK_injection = MASK_injection(	args.training_parameters.regularization.mask_injection.mean_mask_pct,
-												args.training_parameters.regularization.mask_injection.std_mask_pct,
+		self.MASK_injection = MASK_injection(	args.training_parameters.regularization.mask_injection.mask_type,
 												args.training_parameters.regularization.mask_injection.min_mask_pct,
 												args.training_parameters.regularization.mask_injection.max_mask_pct,
 												args.training_parameters.regularization.mask_injection.mean_span,
 												args.training_parameters.regularization.mask_injection.std_span,
 												args.training_parameters.regularization.mask_injection.randAA_pct, 
-												args.training_parameters.regularization.mask_injection.trueAA_pct
 											)
 		
 		self.data = DataHolder(	args.data.data_path, 
@@ -71,7 +69,7 @@ class TrainingRun():
 
 		self.train_losses = Losses()
 		self.val_losses = Losses() # validation with all tokens being MASK
-		self.val_losses_context = Losses() if args.hyper_parameters.aa.use_aa else None # validation with the same MASK injection as the training batches from current epoch
+		self.val_losses_context = Losses() if args.hyper_parameters.wf.use_aa else None # validation with the same MASK injection as the training batches from current epoch
 		self.test_losses = Losses()
 
 		self.gpu = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
@@ -124,17 +122,7 @@ class TrainingRun():
 								self.hyper_parameters.wf.d_hidden_we,
 								self.hyper_parameters.wf.hidden_layers_we,
 
-								self.hyper_parameters.aa.use_aa,
-								self.hyper_parameters.aa.d_hidden_aa,
-								self.hyper_parameters.aa.hidden_layers_aa,
-								self.hyper_parameters.aa.esm2_weights_path,
-								self.hyper_parameters.aa.learnable_esm,
-
 								self.hyper_parameters.struct_encoders.layers,
-								self.hyper_parameters.seq_encoders.layers,
-								self.hyper_parameters.decoders.layers,
-
-								# just use the same configs for all enc/dec rn, uses struct encoder config
 								self.hyper_parameters.struct_encoders.num_heads, 
 								self.hyper_parameters.struct_encoders.learnable_spreads,
 								self.hyper_parameters.struct_encoders.min_spread,
@@ -149,7 +137,10 @@ class TrainingRun():
 
 								self.training_parameters.regularization.dropout,
 								self.training_parameters.regularization.attn_dropout, # attention has less aggressive dropout, as it is already heavily masked
-								self.training_parameters.regularization.wf_dropout
+								self.training_parameters.regularization.wf_dropout,
+
+								self.training_parameters.regularization.aa_scale,
+								self.training_parameters.regularization.mask_id,
 							)
 
 		self.model.to(self.gpu)
@@ -157,16 +148,6 @@ class TrainingRun():
 		if self.training_parameters.weights.use_model:
 			pretrained_weights = torch.load(self.training_parameters.weights.use_model, map_location=self.gpu, weights_only=True)
 			self.model.load_state_dict(pretrained_weights, strict=False) # allow modifications of the model in between transfer learning
-
-		# first train just on structure, then when it converges, train on sequence w/ frozen structure weights
-		if self.training_parameters.weights.freeze_structure_weights:
-			self.model.freeze_structure_weights()
-		if self.training_parameters.weights.freeze_sequence_weights:
-			self.model.freeze_sequence_weights()
-		if self.training_parameters.weights.freeze_decoder_weights:
-			self.model.freeze_decoder_weights()
-		if self.training_parameters.weights.cp_struct_enc_2_seq_enc:
-			self.model.cp_structEnc_2_seqEnc()
 
 		# get number of parameters for logging
 		self.training_parameters.num_params = sum(p.numel() for p in self.model.parameters())
@@ -279,7 +260,7 @@ class TrainingRun():
 				
 	def training_converged(self):
 
-		losses = self.val_losses_context.matches if self.hyper_parameters.aa.use_aa else self.val_losses.matches
+		losses = self.val_losses_context.matches if self.hyper_parameters.wf.use_aa else self.val_losses.matches
 
 		# val losses are already in avg seq sim format per epoch
 		if self.training_parameters.early_stopping.tolerance+1 > len(losses):
@@ -375,8 +356,10 @@ class TrainingRun():
 				# init batch
 				batch = Batch(  label_batch, coords_batch, chain_mask, chain_idxs, key_padding_mask, 
 								use_amp=False, 
-								mask_predict=self.hyper_parameters.aa.use_aa, # only do mask_predict if using aa modules 
-								temp=self.training_parameters.inference.temperature, num_iters=self.training_parameters.inference.num_iters
+								mask_predict=self.hyper_parameters.wf.use_aa, # only do mask_predict if using aa info 
+								temp=self.training_parameters.inference.temperature, 
+								num_iters=self.training_parameters.inference.num_iters,
+								remask=self.training_parameters.inference.remask
 							)
 
 				# mask all tokens
@@ -435,9 +418,11 @@ class Epoch():
 							use_amp=self.training_run_parent.training_parameters.use_amp, 
 						)
 
-			if self.training_run_parent.hyper_parameters.aa.use_aa:
+			if self.training_run_parent.hyper_parameters.wf.use_aa:
 				# inject MASK tokens for prediction
 				self.training_run_parent.MASK_injection.MASK_tokens(batch)
+			else:
+				self.training_run_parent.MASK_all(batch)
 
 			# add random noise to the coordinates
 			batch.noise_coords(self.training_run_parent.training_parameters.regularization.noise_coords_std)
@@ -454,7 +439,7 @@ class Epoch():
 		self.training_run_parent.output.log_epoch_losses(self, self.training_run_parent.train_losses)
 
 		# run validation
-		if self.training_run_parent.hyper_parameters.aa.use_aa:
+		if self.training_run_parent.hyper_parameters.wf.use_aa:
 			self.training_run_parent.batch_MASK_validation(self) # only run validation w/ context if training w/ aa info
 		self.training_run_parent.all_MASK_validation() 
 
@@ -466,7 +451,7 @@ class Epoch():
 class Batch():
 	def __init__(self, labels, coords, chain_mask, chain_idxs, key_padding_mask, 
 					b_idx=None, epoch=None,
-					use_amp=True, mask_predict=False, temp=0.1, num_iters=10
+					use_amp=True, mask_predict=False, temp=0.1, num_iters=10, remask=False
 				):
 
 		self.labels = labels
@@ -487,6 +472,7 @@ class Batch():
 		self.mask_predict = mask_predict
 		self.temp = temp
 		self.num_iters = num_iters
+		self.remask = remask
 
 		self.outputs = None
 
@@ -609,7 +595,7 @@ class Batch():
 		with torch.no_grad():
 			if self.mask_predict: 
 				mp_output_prediction = model(self.coords, self.predictions, self.chain_idxs, key_padding_mask=self.key_padding_mask, 
-											mask_predict=self.mask_predict, temp=self.temp, num_iters=self.num_iters)
+											mask_predict=self.mask_predict, temp=self.temp, num_iters=self.num_iters, remask=self.remask)
 			else:
 				mp_output_prediction = None
 

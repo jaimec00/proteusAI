@@ -10,15 +10,15 @@ description:	predicts the amino acid sequence of a protein, based on
 
 import torch
 import torch.nn as nn
-import torch.nn.init as init
 import torch.nn.functional as F
 
 from utils.model_utils.esm2.get_esm_weights import get_esm_weights
 from utils.model_utils.wf_embedding.isotropic.cuda.wf_embedding import wf_embedding as wf_embedding_iso
 from utils.model_utils.wf_embedding.anisotropic.cuda.wf_embedding import wf_embedding as wf_embedding_aniso
 from utils.model_utils.geometric_attn.triton.geometric_attn import geometric_attn
+from utils.model_utils.base_modules import MLP, init_orthogonal, init_kaiming, init_xavier
 
-from data.constants import aa_sizes # 21 d tensor containing the size for each label idx (i.e. each AA + mask)
+from data.constants import aa_sizes # 20 d tensor containing the approximate size for each AA
 
 # ----------------------------------------------------------------------------------------------------------------------
 
@@ -27,37 +27,35 @@ class proteusAI(nn.Module):
 	proteusAI.
 	'''
 	
-	def __init__(	self, 
+	def __init__(self, 	d_model=512, # model dimension
 
-					d_model=512, # model dimension
+						learnable_wavelengths=False,
+						wf_mag_type=1, anisotropic_wf=False,
+						min_wl=3.7, max_wl=20, base_wl=20, 
+						d_hidden_wl=1024, hidden_layers_wl=0, 
 
-					learnable_wavelengths=False,
-					wf_mag_type=1, anisotropic_wf=False,
-					min_wl=3.7, max_wl=20, base_wl=20, 
-					d_hidden_wl=1024, hidden_layers_wl=0, 
+						struct_encoder_layers=4,
+						n_head=4,
+						learnable_spreads=False,
+						min_spread=3.7, max_spread=7, base_spreads=20, num_spread=4,
+						min_rbf=0.01, max_rbf=0.99, beta=2.0,
+						d_hidden_attn=1024, hidden_layers_attn=0,
+						
+						dropout=0.00,
+						attn_dropout=0.00,
+						wf_dropout=0.00,
 
-					use_aa=True,
-					d_hidden_aa=1024, hidden_layers_aa=0, 
-					esm2_weights_path="esm2_t12_35M_UR50D", learnable_esm=False,
-
-					struct_encoder_layers=4,
-					seq_encoder_layers=2,
-					decoder_layers=2,
-					n_head=4,
-					learnable_spreads=False,
-					min_spread=3.7, max_spread=7, base_spreads=20, num_spread=4,
-					min_rbf=0.01, max_rbf=0.99, beta=2.0,
-					d_hidden_attn=1024, hidden_layers_attn=0,
-					
-					dropout=0.00,
-					attn_dropout=0.00,
-					wf_dropout=0.00
+						aa_scale = 0.0, # what scale the AA sizes should be, 0.0 means use the original size, other nums >0 make the max size this number
+						mask_id="zero" # whether to treat mask as glycine ("zero") or as the mean of all aas ("mean")
 				):
 
 		super(proteusAI, self).__init__()
 
+		# inject the aa info into beta carbons
+		self.register_buffer("aa_sizes", self.scale_aa_sizes(aa_sizes, aa_scale, mask_id))
+
 		# structure modules
-		self.anisotropic_wf = anisotropic_wf # false means use isotropic version 
+		self.anisotropic_wf = anisotropic_wf # false means use isotropic version, will prob change so that always uses anisotropic
 		self.wf_embedding = WavefunctionEmbedding(	d_model, min_wl, max_wl, base_wl, 
 													d_hidden_wl, hidden_layers_wl, 
 													learnable_wavelengths, wf_mag_type, anisotropic_wf, 
@@ -73,33 +71,11 @@ class proteusAI(nn.Module):
 													for _ in range(struct_encoder_layers)
 												])
 
-		# sequence modules
-		# self.use_aa = use_aa
-		# self.aa_embedding = AminoAcidEmbedding(21, d_model, esm2_weights_path, d_hidden_aa, hidden_layers_aa, learnable_esm, dropout)
-		# self.sequence_encoders = nn.ModuleList([ # sequence encoders (use same config as structure encoder bc just testing for now)
-		# 											Encoder(	d_model, d_hidden_attn, hidden_layers_attn, 
-		# 														n_head, min_spread, max_spread, base_spreads, 
-		# 														num_spread, min_rbf, max_rbf, beta, learnable_spreads, 
-		# 														dropout, attn_dropout
-		# 													) 
-		# 											for _ in range(seq_encoder_layers)
-		# 										])
-
-		# # final decoder that combines sequence and structure representation (also uses same config as structure encoder)
-		# self.decoders = nn.ModuleList([
-		# 								Decoder(	d_model, d_hidden_attn, hidden_layers_attn, 
-		# 											n_head, min_spread, max_spread, base_spreads, 
-		# 											num_spread, min_rbf, max_rbf, beta, learnable_spreads, 
-		# 											dropout, attn_dropout
-		# 										) 
-		# 								for _ in range(decoder_layers)
-		# 							])
-
 		# map to aa prob logits
 		self.out_proj = nn.Linear(d_model, 20)
 		init_xavier(self.out_proj)
 
-	def forward(self, coords, aas, chain_idxs, key_padding_mask=None, mask_predict=False, temp=0.1, num_iters=10):
+	def forward(self, coords, aas, chain_idxs, key_padding_mask=None, mask_predict=False, temp=0.1, num_iters=10, remask=True):
 		"""
 		Forward pass of the model with optional auto-regressive inference
 		
@@ -112,7 +88,7 @@ class proteusAI(nn.Module):
 		coords_alpha, coords_beta = self.get_coords(coords, chain_idxs)
 
 		if mask_predict: # inference
-			return self.mask_predict(coords_alpha, coords_beta, aas, key_padding_mask, temp, num_iters)
+			return self.mask_predict(coords_alpha, coords_beta, aas, key_padding_mask, temp, num_iters, remask)
 
 		# encode the structure via wave function embedding and stack of geometric attention encoders
 		wf = self.encode_structure(coords_alpha, coords_beta, aas, key_padding_mask)
@@ -138,70 +114,13 @@ class proteusAI(nn.Module):
 
 		return wf
 
-	def encode_sequence(self, aas, coords_alpha, key_padding_mask=None):
-
-		# amino acid embedding
-		aas = self.aa_embedding(aas)
-
-		# geometric attention encoders
-		for encoder in self.sequence_encoders:
-			aas = encoder(aas, coords_alpha, key_padding_mask)
-
-		return aas
-
-	def decode_sequence(self, wf, aas, coords_alpha, key_padding_mask=None):
-
-		# amino acid embedding and bidirectional sequence encoders
-		aas = self.encode_sequence(aas, coords_alpha, key_padding_mask)
-
-		# bidirectional geometric attention decoders, see Decoder class for explanation 
-		for decoder in self.decoders:
-			wf, aas = decoder(wf, aas, coords_alpha, key_padding_mask)
-
-		return wf # return the structure representation, as it is more fundamental
-
-	def freeze_structure_weights(self):
-		'''
-		for transfer learning, first train structure modules w/ no sequence info, 
-		then freeze structure weights and learn sequence weights via MLM style training
-		'''
-		for param in self.wf_embedding.parameters():
-			param.requires_grad = False
-		for encoder in self.structure_encoders:
-			for param in encoder.parameters():
-				param.requires_grad = False
-
-	def freeze_sequence_weights(self):
-		'''
-		for transfer learning, first train structur modules w/ no sequence info, 
-		also freezes the decoder weights
-		then freeze structure weights and learn sequence weights via MLM style training
-		'''
-		for param in self.aa_embedding.parameters():
-			param.requires_grad = False
-		for encoder in self.sequence_encoders:
-			for param in encoder.parameters():
-				param.requires_grad = False
-
-	def freeze_decoder_weights(self):
-		for decoder in self.decoders:
-			for param in decoder.parameters():
-				param.requires_grad = False
-
-	def cp_structEnc_2_seqEnc(self):
-		'''
-		copies the weights from structure encoder to seq encoder to give better starting point in transfer learning
-		robust to different number of struct/ seq encoders since using zip, the smallest runs out first
-		'''
-		for struct_encoder, seq_encoder in zip(self.structure_encoders, self.sequence_encoders):
-			seq_encoder.load_state_dict(struct_encoder.state_dict())
-
-	def mask_predict(self, coords_alpha, coords_beta, aas, key_padding_mask=None, temp=0.1, num_iters=10):
+	def mask_predict(self, coords_alpha, coords_beta, aas, key_padding_mask=None, temp=0.1, num_iters=10, remask=True):
 		
 		# new decoding strat of CMLM paper. constant number of iterations. 
 		# predict full seq at each iter, and remask the least confident. 
 		# each iter has a smaller percentage of masked tokens, until get a full prediction
-		# allows for error correction as context increases
+		# allows for error correction as context increases. 
+		# also have the option to do no remasking, just have the model use full output as input each iter
 
 		# setup params
 		batch, N, num_classes = aas.shape
@@ -236,7 +155,7 @@ class proteusAI(nn.Module):
 			sorted_predictions = torch.gather(predictions_idxs, dim=1, index=sorted_entropy_idxs)
 
 			# compute the number of tokens to mask for each sample
-			pct_mask = (num_iters-(i+1)) / num_iters
+			pct_mask = (num_iters-(i+1)) / num_iters if remask else 0.0 # testing whether to do no remasking, just do multiple iterations of denoising
 			num_mask = torch.floor(valid * pct_mask).int()
 
 			# replace low confidence predictions w/ mask tokens
@@ -315,6 +234,7 @@ class proteusAI(nn.Module):
 		batch_idxs = torch.arange(batch).unsqueeze(1).unsqueeze(2) # Z x 1 x 1
 		is_chain = (batch_idxs == batch_idxs_flat) & (seq_idxs >= start_idxs_flat) & (seq_idxs < end_idxs_flat) # Z x num_chains x N
 
+
 		# convert the boolean tensors to Z x N
 		# create boolean tensors defining if each position acts as a logical N, CA, or C, where N[i] is adjacent to CA[i] is adjacent to C[i]
 		# the max works as an OR operation along num chains dim to get Z x N boolean tensor of where each logical backbone atom goes
@@ -363,6 +283,25 @@ class proteusAI(nn.Module):
 
 		return ca, cb
 
+	def scale_aa_sizes(self, aa_sizes, aa_scale, mask_id):
+		
+		# decide whether the mask token scales Cb to 0 or to the mean size of all aas
+		if mask_id == "zero":
+			mask_tok = torch.tensor([0], device=aa_sizes.device) # mask is glycine
+		elif mask_id == "mean":
+			mask_tok = aa_sizes.mean(dim=0, keepdim=True)
+		elif isinstance(mask_id, float):
+			mask_tok = torch.tensor([mask_id], device=aa_sizes.device)
+		else:
+			raise ValueError(f"invalid mask_id option: {mask_id}. options are 'zero' or 'mean', or float value")
+
+		aa_sizes = torch.cat([aa_sizes, mask_tok], dim=0)
+
+		if aa_scale != 0.0:
+			aa_sizes = aa_scale * (aa_sizes / aa_sizes.max(dim=0, keepdim=True).values)
+
+		return aa_sizes
+
 	def inject_aas(self, coords_beta, aas):
 
 		batch, N, num_classes = aas.shape
@@ -376,7 +315,7 @@ class proteusAI(nn.Module):
 		coords_beta_unit = coords_beta / coords_beta_norm # create the unit vector
 
 		# gather the corresponding distances and scale the beta carbon
-		coords_beta_magnitudes = torch.gather(aa_sizes.unsqueeze(0).unsqueeze(0).expand(batch, N, -1), dim=2, index=token_idxs.unsqueeze(2))
+		coords_beta_magnitudes = torch.gather(self.aa_sizes.unsqueeze(0).unsqueeze(0).expand(batch, N, -1), dim=2, index=token_idxs.unsqueeze(2))
 		coords_beta_scaled = coords_beta_unit * coords_beta_magnitudes
 
 		return coords_beta_scaled
@@ -391,7 +330,12 @@ class WavefunctionEmbedding(nn.Module):
 	also includes mlp after the embedding layer
 	actual function implemented in cuda, optimized for h100 (not really, only takes advantage of large shared mem, need a rewrite to use TMA, possibly WGMMA)
 	'''
-	def __init__(self, d_model=512, min_wl=3.7, max_wl=20, base=20, d_hidden=1024, hidden_layers=0, learnable_wavelengths=False, magnitude_type=1, anisotropic_wf=False, dropout=0.0, wf_dropout=0.0):
+	def __init__(self, 	d_model=512, 
+						min_wl=3.7, max_wl=20, base=20, 
+						d_hidden=1024, hidden_layers=0, 
+						learnable_wavelengths=False, magnitude_type=1, anisotropic_wf=False, 
+						dropout=0.0, wf_dropout=0.0
+					):
 		super(WavefunctionEmbedding, self).__init__()
 
 		# compute wavelengths
@@ -447,60 +391,18 @@ class WavefunctionEmbedding(nn.Module):
 
 		return wf
 
-
-class AminoAcidEmbedding(nn.Module):
-
-	def __init__(self, num_aas=21, d_model=512, esm2_weights_path="utils/model_utils/esm2/esm2_t33_650M_UR50D.pt", d_hidden_aa=1024, hidden_layers_aa=0, learnable_esm=False, dropout=0.0):
-		super(AminoAcidEmbedding, self).__init__()
-
-		self.use_esm = esm2_weights_path != ""
-
-		if self.use_esm:
-			if not esm2_weights_path.endswith(".pt"): # download the chosen model
-				esm2_weights = get_esm_weights(esm2_weights_path)
-			else: # load from precomputed file, note that this should be created w/ main func of utils/model_utils/esm2/get_esm_weights.py for proper mapping to proteusAI alphabet
-				try:
-					esm2_weights = torch.load(esm2_weights_path, weights_only=True)
-				except FileNotFoundError as e:
-					raise e(f"could not find ESM2 weights at {esm2_weights_path}")
-
-			# initialize esm2 weights
-			aa_d_model = esm2_weights["esm2_linear_nobias.weight"].size(1)
-			self.aa_linear_nobias = nn.Linear(in_features=num_aas, out_features=aa_d_model, bias=False)
-			self.aa_linear_nobias.weight.data = esm2_weights["esm2_linear_nobias.weight"].T
-
-			self.aa_layernorm = nn.LayerNorm(normalized_shape=aa_d_model)
-			self.aa_layernorm.weight.data = esm2_weights["esm2_layernorm.weight"]
-			self.aa_layernorm.bias.data = esm2_weights["esm2_layernorm.bias"]
-
-			if not learnable_esm:
-				self.esm2_linear_nobias.weight.requires_grad = False
-				self.esm2_layernorm.weight.requires_grad = False
-				self.esm2_layernorm.bias.requires_grad = False
-				
-		else:
-			aa_d_model = d_model
-			self.aa_linear_nobias = nn.Linear(num_aas, aa_d_model, bias=False)
-			self.aa_layernorm = nn.LayerNorm(aa_d_model)
-
-		self.ffn = MLP(aa_d_model, d_model, d_hidden_aa, hidden_layers_aa, dropout)
-		self.dropout = nn.Dropout(dropout)
-		self.norm = nn.LayerNorm(d_model)
-
-	def forward(self, aas):
-
-		aas = self.aa_linear_nobias(aas)
-		aas = self.aa_layernorm(aas)
-		aas = self.norm(self.dropout(self.ffn(aas)))
-
-		return aas
 		
 class Encoder(nn.Module):
 	'''
 	bidirectional encoder
 	'''
 
-	def __init__(self, d_model=512, d_hidden=1024, hidden_layers=0, nhead=8, min_spread=1, max_spread=6, base=20, num_spread=8, min_rbf=0.01, max_rbf=0.99, beta=2.0, learnable_spreads=False, dropout=0.0, attn_dropout=0.0):
+	def __init__(self, 	d_model=512, 
+						d_hidden=1024, hidden_layers=0, 
+						nhead=8, min_spread=1, max_spread=6, base=20, num_spread=8, 
+						min_rbf=0.01, max_rbf=0.99, beta=2.0, learnable_spreads=False, 
+						dropout=0.0, attn_dropout=0.0
+					):
 		super(Encoder, self).__init__()
 
 		# Self-attention layers
@@ -527,76 +429,6 @@ class Encoder(nn.Module):
 
 		return x
 
-
-class Decoder(nn.Module):
-	'''
-	bidirectional decoder
-
-	seq updates itself based on struct info and struct_embeddings
-	ie seq as Q, struct as KV
-	then structure queries sequence, to see how to update itself via struct embeddings
-	i.e. structure is QV, sequence is K
-
-	testing, sequence is the variable portion (lots of different masking combos)
-	so want a way for sequence to act as a soft suggestion on how to update structure
-	also allows the sequence to adapt itself to the structure before acting as the key 
-
-	while not common to use a different modality for K and V (seq and struct), this is minimized
-	by first doing standard cross attention, where seq is Q and struct is KV. this allows the seq
-	to update itself based on the struct, reducing the difference in modalities for the following unorthodox cross attn layer
-	'''
-
-	def __init__(self, d_model=512, d_hidden=1024, hidden_layers=0, nhead=8, min_spread=1, max_spread=6, base=20, num_spread=8, min_rbf=0.01, max_rbf=0.99, beta=2.0, learnable_spreads=False, dropout=0.0, attn_dropout=0.0):
-		super(Decoder, self).__init__()
-
-		# seq cross-attention layers
-		self.seq_attn = GeoAttention(d_model, nhead, min_spread=min_spread, max_spread=max_spread, base=base, num_spread=num_spread, min_rbf=min_rbf, max_rbf=max_rbf, beta=beta, learnable_spreads=learnable_spreads, dropout=attn_dropout)
-		self.seq_attn_norm = nn.LayerNorm(d_model)
-		self.seq_attn_dropout = nn.Dropout(dropout)
-
-		# Feed-forward network
-		self.seq_attn_ffn = MLP(d_model, d_model, d_hidden=d_hidden, hidden_layers=hidden_layers, dropout=dropout)
-		self.seq_attn_ffn_norm = nn.LayerNorm(d_model)
-		self.seq_attn_ffn_dropout = nn.Dropout(dropout)
-
-		# struct cross-attention layers
-		self.struct_attn = GeoAttention(d_model, nhead, min_spread=min_spread, max_spread=max_spread, base=base, num_spread=num_spread, min_rbf=min_rbf, max_rbf=max_rbf, beta=beta, learnable_spreads=learnable_spreads, dropout=attn_dropout)
-		self.struct_attn_norm = nn.LayerNorm(d_model)
-		self.struct_attn_dropout = nn.Dropout(dropout)
-
-		# Feed-forward network
-		self.struct_attn_ffn = MLP(d_model, d_model, d_hidden=d_hidden, hidden_layers=hidden_layers, dropout=dropout)
-		self.struct_attn_ffn_norm = nn.LayerNorm(d_model)
-		self.struct_attn_ffn_dropout = nn.Dropout(dropout)
-
-	def forward(self, wf, aas, coords, key_padding_mask=None):
-
-		# seq queries struct to update itself via struct embeddings
-		aas2 = self.seq_attn(	aas, wf, wf,
-							coords=coords,
-							key_padding_mask=key_padding_mask
-						)
-
-		# residual connection with dropout
-		aas = self.seq_attn_norm(aas + self.seq_attn_dropout(aas2))
-
-		# Feed-forward network for aas
-		aas = self.seq_attn_ffn_norm(aas + self.seq_attn_ffn_dropout(self.seq_attn_ffn(aas)))
-
-		# struct queries seq to update itself, via struct embeddings
-		wf2 = self.struct_attn(	wf, aas, wf,
-							coords=coords,
-							key_padding_mask=key_padding_mask
-						)
-
-		# residual connection with dropout
-		wf = self.struct_attn_norm(wf + self.struct_attn_dropout(wf2))
-
-		# Feed-forward network for wavefunction
-		wf = self.struct_attn_ffn_norm(wf + self.struct_attn_ffn_dropout(self.struct_attn_ffn(wf)))
-
-		return wf, aas
-
 class GeoAttention(nn.Module):
 	'''
 	Geometric Attention (w/ Flash Attention 2 implementation)
@@ -608,7 +440,12 @@ class GeoAttention(nn.Module):
 	this essentially noises the inputs to the geo attention module, rather than directly doing dropout on attention weights
 	'''
 
-	def __init__(self, d_model=512, nhead=8, min_spread=1, max_spread=6, base=20, num_spread=8, min_rbf=0.01, max_rbf=0.99, beta=2.0, learnable_spreads=False, dropout=0.1):
+	def __init__(self, 	d_model=512, 
+						nhead=8, 
+						min_spread=1, max_spread=6, base=20, num_spread=8, 
+						min_rbf=0.01, max_rbf=0.99, beta=2.0, learnable_spreads=False, 
+						dropout=0.1
+					):
 		super(GeoAttention, self).__init__()
 
 		self.nhead = nhead
@@ -640,7 +477,10 @@ class GeoAttention(nn.Module):
 			num_spread = self.nhead
 
 		# define spreads and spread weights matrix so each head's spread is a weighted sum of the allowed spreads
-		self.register_buffer("spreads", min_spread + (max_spread - min_spread) * (torch.logspace(0,1,num_spread, base) - 1) / (base - 1))
+		if base == 1.0: # linear spacing
+			self.register_buffer("spreads", min_spread + (max_spread - min_spread) * torch.linspace(0,1,num_spread))
+		else: # log spacing
+			self.register_buffer("spreads", min_spread + (max_spread - min_spread) * (torch.logspace(0,1,num_spread, base) - 1) / (base - 1))
 
 		self.min_rbf = min_rbf
 		self.max_rbf = max_rbf
@@ -701,56 +541,5 @@ class GeoAttention(nn.Module):
 
 		# return
 		return out # batch x N x d_model
-
-class MLP(nn.Module):
-	'''
-	base mlp class for use by other modules. uses gelu
-	'''
-
-	def __init__(self, d_in=512, d_out=512, d_hidden=1024, hidden_layers=0, dropout=0.1):
-		super(MLP, self).__init__()
-
-		self.in_proj = nn.Linear(d_in, d_hidden)
-		self.hidden_proj = nn.ModuleList([nn.Linear(d_hidden, d_hidden) for layer in range(hidden_layers)])
-		self.out_proj = nn.Linear(d_hidden, d_out)
-
-		self.in_dropout = nn.Dropout(dropout)
-		self.hidden_dropout = nn.ModuleList([nn.Dropout(dropout) for layer in range(hidden_layers)])
-
-		self.init_linears()
-
-	def init_linears(self):
-
-		init_xavier(self.in_proj)  # Xavier for the first layer
-
-		for layer in self.hidden_proj:
-			init_kaiming(layer)  # Kaiming for hidden layers
-
-		init_xavier(self.out_proj)  # Xavier for output layer
-
-	def forward(self, x):
-		x = self.in_dropout(F.gelu(self.in_proj(x)))
-		for hidden, dropout in zip(self.hidden_proj, self.hidden_dropout):
-			x = dropout(F.gelu(hidden(x)))
-		x = self.out_proj(x) # no activation or dropout on output
-
-		return x
-
-# initializations for linear layers
-def init_orthogonal(m):
-	if isinstance(m, nn.Linear):
-		init.orthogonal_(m.weight)
-		if m.bias is not None:
-			init.zeros_(m.bias)
-def init_kaiming(m):
-	if isinstance(m, nn.Linear):
-		init.kaiming_uniform_(m.weight, nonlinearity='relu')
-		if m.bias is not None:
-			init.zeros_(m.bias)
-def init_xavier(m):
-	if isinstance(m, nn.Linear):
-		init.xavier_uniform_(m.weight)
-		if m.bias is not None:
-			init.zeros_(m.bias)
 
 # ----------------------------------------------------------------------------------------------------------------------

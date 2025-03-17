@@ -182,6 +182,7 @@ def _attn_fwd(
 
 	# get pointers for spreads, min and max distances for this head
 	spread_ptr = spreads_ptr + (offs_H*stride_spreads_H)
+	rbf_range = max_rbf - min_rbf
 
 	# load the Qi block first, out of bounds values are 0, stays in SRAM throughout
 	Qi = tl.load(Qi_block_ptr, boundary_check=(0,1), padding_option="zero") # N x d_k (fp16)
@@ -217,7 +218,8 @@ def _attn_fwd(
 		attn_mask = (mask_i[:, None]) & (tl.load(mask_j_ptr, boundary_check=(0,), padding_option="zero").to(tl.int1)[None, :]) & (Rij <= max_rbf) & (Rij >= min_rbf) # N x N
 
 		# scale attention logits by Rij and mask invalid pairs
-		SRij = tl.where(attn_mask, Sij + beta*(2*Rij-1)*tl.abs(Sij), -inf) # N x N (fp32)
+		Rij_norm = ((2*(Rij-min_rbf)/rbf_range) - 1)
+		SRij = tl.where(attn_mask, Sij + beta*Rij_norm*tl.abs(Sij), -inf) # N x N (fp32)
 
 		# max of each row
 		mij = tl.maximum(mi, tl.max(SRij, axis=1)) # N,  (fp32)
@@ -439,6 +441,7 @@ def _attn_bwd(
 
 	# load the spread assigned to this block (based on the head it was assigned), and j coordinates
 	spread = tl.load(spread_ptr)
+	rbf_range = max_rbf - min_rbf
 	coords_j = tl.load(coords_j_ptr, boundary_check=(0,1), padding_option="zero")
 
 	# load mask
@@ -474,7 +477,8 @@ def _attn_bwd(
 		attn_mask = (mask_i[:, None]) & (mask_j[None, :]) & (Rij <= max_rbf) & (Rij >= min_rbf) # N x N
 
 		# scale attention logits by RBFs
-		SRij = tl.where(attn_mask, Sij + beta*(2*Rij - 1)*tl.abs(Sij), -inf) # N x N (fp32)
+		Rij_norm = ((2*(Rij-min_rbf)/rbf_range) - 1)
+		SRij = tl.where(attn_mask, Sij + beta*Rij_norm*tl.abs(Sij), -inf) # N x N (fp32)
 
 		# load log sum exp statistics
 		Li = tl.load(Li_block_ptr, boundary_check=(0, ), padding_option="zero") # (fp32)
@@ -505,10 +509,10 @@ def _attn_bwd(
 		dSRij = Pij * (dPij -  tl.load(Di_block_ptr, boundary_check=(0, ), padding_option="zero")[:, None]) # N x N
 
 		# compute dSij, ie grad wrt Sij. note the direct communication between dSij and Rij
-		dSij = dSRij* (1 + beta*(2*Rij - 1)*tl.where(Sij<0, -1, 1)*(Sij!=0)) # N x N
+		dSij = dSRij* (1 + beta*Rij_norm*tl.where(Sij<0, -1, 1)*(Sij!=0)) # N x N
 
 		# compute gradient wrt rbfs. also direct communication between dRij and Sij
-		dRij = dSRij * tl.abs(Sij) * 2 * beta
+		dRij = dSRij * tl.abs(Sij) * 2 * beta / rbf_range
 
 		# compute the gradient wrt the spread of this head
 		# 		d_rbfs/dspreads  = d/dspreads exp(-(d^2)/(2*sigma^2))

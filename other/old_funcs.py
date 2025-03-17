@@ -2,6 +2,127 @@
 
 import torch
 
+
+
+class AminoAcidEmbedding(nn.Module):
+
+	def __init__(self, num_aas=21, d_model=512, esm2_weights_path="utils/model_utils/esm2/esm2_t33_650M_UR50D.pt", d_hidden_aa=1024, hidden_layers_aa=0, learnable_esm=False, dropout=0.0):
+		super(AminoAcidEmbedding, self).__init__()
+
+		self.use_esm = esm2_weights_path != ""
+
+		if self.use_esm:
+			if not esm2_weights_path.endswith(".pt"): # download the chosen model
+				esm2_weights = get_esm_weights(esm2_weights_path)
+			else: # load from precomputed file, note that this should be created w/ main func of utils/model_utils/esm2/get_esm_weights.py for proper mapping to proteusAI alphabet
+				try:
+					esm2_weights = torch.load(esm2_weights_path, weights_only=True)
+				except FileNotFoundError as e:
+					raise e(f"could not find ESM2 weights at {esm2_weights_path}")
+
+			# initialize esm2 weights
+			aa_d_model = esm2_weights["esm2_linear_nobias.weight"].size(1)
+			self.aa_linear_nobias = nn.Linear(in_features=num_aas, out_features=aa_d_model, bias=False)
+			self.aa_linear_nobias.weight.data = esm2_weights["esm2_linear_nobias.weight"].T
+
+			self.aa_layernorm = nn.LayerNorm(normalized_shape=aa_d_model)
+			self.aa_layernorm.weight.data = esm2_weights["esm2_layernorm.weight"]
+			self.aa_layernorm.bias.data = esm2_weights["esm2_layernorm.bias"]
+
+			if not learnable_esm:
+				self.esm2_linear_nobias.weight.requires_grad = False
+				self.esm2_layernorm.weight.requires_grad = False
+				self.esm2_layernorm.bias.requires_grad = False
+				
+		else:
+			aa_d_model = d_model
+			self.aa_linear_nobias = nn.Linear(num_aas, aa_d_model, bias=False)
+			self.aa_layernorm = nn.LayerNorm(aa_d_model)
+
+		self.ffn = MLP(aa_d_model, d_model, d_hidden_aa, hidden_layers_aa, dropout)
+		self.dropout = nn.Dropout(dropout)
+		self.norm = nn.LayerNorm(d_model)
+
+	def forward(self, aas):
+
+		aas = self.aa_linear_nobias(aas)
+		aas = self.aa_layernorm(aas)
+		aas = self.norm(self.dropout(self.ffn(aas)))
+
+		return aas
+
+
+
+class Decoder(nn.Module):
+	'''
+	bidirectional decoder
+
+	seq updates itself based on struct info and struct_embeddings
+	ie seq as Q, struct as KV
+	then structure queries sequence, to see how to update itself via struct embeddings
+	i.e. structure is QV, sequence is K
+
+	testing, sequence is the variable portion (lots of different masking combos)
+	so want a way for sequence to act as a soft suggestion on how to update structure
+	also allows the sequence to adapt itself to the structure before acting as the key 
+
+	while not common to use a different modality for K and V (seq and struct), this is minimized
+	by first doing standard cross attention, where seq is Q and struct is KV. this allows the seq
+	to update itself based on the struct, reducing the difference in modalities for the following unorthodox cross attn layer
+	'''
+
+	def __init__(self, d_model=512, d_hidden=1024, hidden_layers=0, nhead=8, min_spread=1, max_spread=6, base=20, num_spread=8, min_rbf=0.01, max_rbf=0.99, beta=2.0, learnable_spreads=False, dropout=0.0, attn_dropout=0.0):
+		super(Decoder, self).__init__()
+
+		# seq cross-attention layers
+		self.seq_attn = GeoAttention(d_model, nhead, min_spread=min_spread, max_spread=max_spread, base=base, num_spread=num_spread, min_rbf=min_rbf, max_rbf=max_rbf, beta=beta, learnable_spreads=learnable_spreads, dropout=attn_dropout)
+		self.seq_attn_norm = nn.LayerNorm(d_model)
+		self.seq_attn_dropout = nn.Dropout(dropout)
+
+		# Feed-forward network
+		self.seq_attn_ffn = MLP(d_model, d_model, d_hidden=d_hidden, hidden_layers=hidden_layers, dropout=dropout)
+		self.seq_attn_ffn_norm = nn.LayerNorm(d_model)
+		self.seq_attn_ffn_dropout = nn.Dropout(dropout)
+
+		# struct cross-attention layers
+		self.struct_attn = GeoAttention(d_model, nhead, min_spread=min_spread, max_spread=max_spread, base=base, num_spread=num_spread, min_rbf=min_rbf, max_rbf=max_rbf, beta=beta, learnable_spreads=learnable_spreads, dropout=attn_dropout)
+		self.struct_attn_norm = nn.LayerNorm(d_model)
+		self.struct_attn_dropout = nn.Dropout(dropout)
+
+		# Feed-forward network
+		self.struct_attn_ffn = MLP(d_model, d_model, d_hidden=d_hidden, hidden_layers=hidden_layers, dropout=dropout)
+		self.struct_attn_ffn_norm = nn.LayerNorm(d_model)
+		self.struct_attn_ffn_dropout = nn.Dropout(dropout)
+
+	def forward(self, wf, aas, coords, key_padding_mask=None):
+
+		# seq queries struct to update itself via struct embeddings
+		aas2 = self.seq_attn(	aas, wf, wf,
+							coords=coords,
+							key_padding_mask=key_padding_mask
+						)
+
+		# residual connection with dropout
+		aas = self.seq_attn_norm(aas + self.seq_attn_dropout(aas2))
+
+		# Feed-forward network for aas
+		aas = self.seq_attn_ffn_norm(aas + self.seq_attn_ffn_dropout(self.seq_attn_ffn(aas)))
+
+		# struct queries seq to update itself, via struct embeddings
+		wf2 = self.struct_attn(	wf, aas, wf,
+							coords=coords,
+							key_padding_mask=key_padding_mask
+						)
+
+		# residual connection with dropout
+		wf = self.struct_attn_norm(wf + self.struct_attn_dropout(wf2))
+
+		# Feed-forward network for wavefunction
+		wf = self.struct_attn_ffn_norm(wf + self.struct_attn_ffn_dropout(self.struct_attn_ffn(wf)))
+
+		return wf, aas
+
+		
 class PositionalEncoding(nn.Module):
 	def __init__(self, N, d_model=512):
 		super(PositionalEncoding, self).__init__()
