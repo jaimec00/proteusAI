@@ -8,17 +8,17 @@
 
 // declare the cuda kernel implemented in wf_embedding_kernel.cu
 void wf_embedding_kernel_forward(
-    const float* coordsA, int stride_coordsA_Z, int stride_coordsA_S, int stride_coordsA_N,
-    const float* coordsB, int stride_coordsB_Z, int stride_coordsB_S, int stride_coordsB_N,
-    const int16_t* aa_labels, int stride_aa_labels_Z, int stride_aa_labels_N,
+    float* coordsA, int stride_coordsA_Z, int stride_coordsA_S, int stride_coordsA_N,
+    float* coordsB, int stride_coordsB_Z, int stride_coordsB_S, int stride_coordsB_N,
+    int16_t* aa_labels, int stride_aa_labels_Z, int stride_aa_labels_N,
     const __half* aa_magnitudes, int stride_aa_magnitudes_K, int stride_aa_magnitudes_A,
     const float* wavenumbers, int stride_wavenumbers_K, 
 
-    __half* out, int stride_out_Z, int stride_out_N, int stride_out_D,
-    __half* d_aa, int stride_d_aa_Z, int stride_d_aa_N, int stride_d_aa_D, int stride_d_aa_A,
+    float* out, int stride_out_Z, int stride_out_N, int stride_out_D,
+    float* d_aa, int stride_d_aa_Z, int stride_d_aa_N, int stride_d_aa_D, int stride_d_aa_A,
 
     int tot_Z, int tot_N, int d_model, int tot_AA,
-    int magnitude_type, float dropout_p, uint32_t rng_seed,
+    float dropout_p, uint32_t rng_seed,
     cudaStream_t stream
 );
 
@@ -27,7 +27,7 @@ void wf_embedding_forward(
     torch::Tensor aa_labels, torch::Tensor aa_magnitudes, 
     torch::Tensor wavenumbers, 
     torch::Tensor out, torch::Tensor d_aa,
-    int magnitude_type, float dropout_p, uint32_t rng_seed
+    float dropout_p, uint32_t rng_seed
 ) {
 
 
@@ -45,8 +45,8 @@ void wf_embedding_forward(
     TORCH_CHECK(aa_labels.dtype() == torch::kInt16, "aa_labels must be of type int16");
     TORCH_CHECK(aa_magnitudes.dtype() == torch::kFloat16, "aa_magnitudes must be of type float16");
     TORCH_CHECK(wavenumbers.dtype() == torch::kFloat32, "wavenumbers must be of type float32");
-    TORCH_CHECK(out.dtype() == torch::kFloat16, "out must be of type float16");
-    TORCH_CHECK(d_aa.dtype() == torch::kFloat16, "d_aa must be of type float16");
+    TORCH_CHECK(out.dtype() == torch::kFloat32, "out must be of type float32");
+    TORCH_CHECK(d_aa.dtype() == torch::kFloat32, "d_aa must be of type float32");
 
     // get tensor sizes 
     int tot_Z = coordsA.size(0); // batch size
@@ -62,17 +62,14 @@ void wf_embedding_forward(
     TORCH_CHECK(d_aa.size(1) == tot_N, "d_aa sequence size mismatch");
     TORCH_CHECK(d_aa.size(2) == d_model, "d_aa d_model size mismatch");
 
-    // template const __half* at::TensorBase::data_ptr<__half>() const;
-    // template __half* at::TensorBase::data_ptr<__half>();
-
     // get raw pointers
-    const float* coordsA_ptr = reinterpret_cast<const float*>(coordsA.data_ptr<float>());
-    const float* coordsB_ptr = reinterpret_cast<const float*>(coordsB.data_ptr<float>());
+    float* coordsA_ptr = reinterpret_cast<float*>(coordsA.data_ptr<float>());
+    float* coordsB_ptr = reinterpret_cast<float*>(coordsB.data_ptr<float>());
     const float* wavenumbers_ptr = reinterpret_cast<const float*>(wavenumbers.data_ptr<float>());
-    const int16_t* aa_labels_ptr = aa_labels.data_ptr<int16_t>();
+    int16_t* aa_labels_ptr = aa_labels.data_ptr<int16_t>();
     const __half* aa_magnitudes_ptr = reinterpret_cast<const __half*>(aa_magnitudes.data_ptr<at::Half>());
-    __half* out_ptr = reinterpret_cast<__half*>(out.data_ptr<at::Half>());
-    __half* d_aa_ptr = reinterpret_cast<__half*>(d_aa.data_ptr<at::Half>());
+    float* out_ptr = reinterpret_cast<float*>(out.data_ptr<float>());
+    float* d_aa_ptr = reinterpret_cast<float*>(d_aa.data_ptr<float>());
 
     // launch the cuda kernel
     cudaStream_t stream = at::cuda::getCurrentCUDAStream();  // get pytorch's current cuda stream
@@ -93,7 +90,7 @@ void wf_embedding_forward(
         d_aa_ptr,
         d_aa.stride(0), d_aa.stride(1), d_aa.stride(2), d_aa.stride(3),
         tot_Z, tot_N, d_model, tot_AA,
-        magnitude_type, dropout_p, rng_seed,
+        dropout_p, rng_seed,
         stream
     );
 

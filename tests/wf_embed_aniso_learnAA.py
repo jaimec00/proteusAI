@@ -3,7 +3,7 @@
 import torch
 import math
 from utils.test_utils import calculate_error, profile_func, profile_bwd 
-from utils.model_utils.wf_embedding.anisotropic.cuda.learnable_aa.wf_embedding import wf_embedding 
+from utils.model_utils.wf_embedding.anisotropic.aa_scaling.learnable_aa.cuda.wf_embedding import wf_embedding 
 
 def main():
 
@@ -30,16 +30,15 @@ def main():
 	# assign aa labels and magnitudes, one for each aa, for each wavenumber
 	aa_labels = torch.randint(0,num_classes, (batch, N), dtype=torch.int32, device=device)
 	aa_magnitudes = torch.rand((num_wn, num_classes), dtype=torch.float32, device=device, requires_grad=True)
-	# aa_magnitudes = torch.ones(num_wn, num_classes, dtype=torch.float32, device=device, requires_grad=True)
+
 	# setup wavenumbers
 	wavenumbers = torch.randn((d_model//2,), device=coordsA.device, dtype=torch.float32, requires_grad=True)
-	# wavenumbers = torch.ones(d_model//2, device=coordsA.device, dtype=torch.float32, requires_grad=True)
 
 	# setup mask
 	mask = (torch.rand((batch, N), device=device) > 1)
 
 	# put them all into a list
-	params = [coordsA, coordsB, aa_labels, aa_magnitudes, wavenumbers, mag_type, dropout_p, mask]
+	params = [coordsA, coordsB, aa_labels, aa_magnitudes, wavenumbers, dropout_p, mask]
 
 	# synchronize device
 	torch.cuda.synchronize()  # Ensure no ongoing GPU operations
@@ -97,14 +96,14 @@ def main():
 	# optional debugging prints
 	# print(torch_out)
 	# print(cuda_out)
-	print(torch_out/cuda_out)
+	# print(torch_out/cuda_out)
 	# print(mask)
 	# print(wavenumbers)
 	# print(torch_dk)
 	# print(cuda_dk)
 	# print(torch_dk/cuda_dk)
 
-def wf_embedding_torch(coordsA, coordsB, aa_labels, aa_magnitudes, wavenumbers, mag_type=1, dropout_p=0.0, mask=None):
+def wf_embedding_torch(coordsA, coordsB, aa_labels, aa_magnitudes, wavenumbers, dropout_p=0.0, mask=None):
 
 	# get shape and prepare inputs
 	batch, N, _ = coordsA.shape
@@ -144,14 +143,7 @@ def wf_embedding_torch(coordsA, coordsB, aa_labels, aa_magnitudes, wavenumbers, 
 	mask = mask[:, :, None, None] | mask[:, None, :, None] | (distsA==0) # Z x N x N x 1
 
 	# get the magnitudes of the wavefunctions
-	if mag_type==0:
-		magnitudes = torch.where(mask, torch.zeros_like(distsA), torch.ones_like(distsA))[:, :, :, :]
-	elif mag_type == 1:
-		magnitudes = 1 / torch.where(mask, float("inf"), distsA) # Z x N x N x 1
-	elif mag_type == 2: # log2 of 0 is -inf, so 0 dists evaluate to 1/-inf = -0
-		magnitudes = 1 / torch.log2(distsA)[:, :, :, None] # Z x N x N x 1
-	elif mag_type == 3:
-		magnitudes = 1 / torch.where(mask, float("inf"), torch.sqrt(distsA))[:, :, :, None]
+	magnitudes = 1 / torch.where(mask, float("inf"), distsA) # Z x N x N x 1
 
 	# compute real and imag parts
 	real = magnitudes * torch.cos(phases) # Z x N x N x K
