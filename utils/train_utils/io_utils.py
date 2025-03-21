@@ -18,7 +18,7 @@ import sys
 
 class Output():
 
-	def __init__(self, out_path, loss_plot=Path("loss_plot.png"), seq_plot=Path("seq_sim_plot.png"), weights_path=Path("model_parameters.pth"), model_checkpoints=20):
+	def __init__(self, out_path, loss_plot=Path("loss_plot.png"), seq_plot=Path("seq_sim_plot.png"), weights_path=Path("model_parameters.pth"), model_checkpoints=10):
 
 		self.out_path = Path(out_path)
 		self.out_path.mkdir(parents=True, exist_ok=True)
@@ -27,7 +27,6 @@ class Output():
 		self.weights_path = self.out_path / Path(weights_path)
 		self.log = self.setup_logging(self.out_path / Path("log.txt"))
 		self.model_checkpoints = model_checkpoints
-
 
 	def setup_logging(self, log_file):
 
@@ -50,37 +49,90 @@ class Output():
 		return logger
 
 	def log_hyperparameters(self, training_parameters, hyper_parameters, data):
-
-		wf_types = {0: "none", 1: "inverse", 2: "log2", 3: "sqrt"}
+		'''basically just prints the config file w/ a little more info'''
 
 		log = 	textwrap.dedent(f'''
 
+		wave function embedding parameters: {training_parameters.num_embedding_params:,}
+		wave function diffusion parameters: {training_parameters.num_diffusion_params:,}
+		wave function extraction parameters: {training_parameters.num_extraction_params:,}
+		total parameters: {training_parameters.num_params:,}
+		
 		model hyper-parameters:
-			model parameters: {training_parameters.num_params:,}
-			d_model: {hyper_parameters.d_model}
-			
-			using {"anisotropic" if hyper_parameters.wf.anisotropic_wf else "isotropic"} wave function embedding
-			wave function embedding normalization: {wf_types[hyper_parameters.wf.wf_mag_type]}
-			learnable_wavelengths: {hyper_parameters.wf.learnable_wavelengths}
-			min_wl: {hyper_parameters.wf.min_wl} 
-			max_wl: {hyper_parameters.wf.max_wl} 
-			base_wl: {hyper_parameters.wf.base_wl}
-			d_hidden_we: {hyper_parameters.wf.d_hidden_we}
-			hidden_layers_we: {hyper_parameters.wf.hidden_layers_we}
 
-			number of structure encoders: {hyper_parameters.struct_encoders.layers}
-			number of attention heads: {hyper_parameters.struct_encoders.num_heads}
-			learnable_spreads: {hyper_parameters.struct_encoders.learnable_spreads}
-			min_spread: {hyper_parameters.struct_encoders.min_spread} 
-			max_spread: {hyper_parameters.struct_encoders.max_spread} 
-			base_spread: {hyper_parameters.struct_encoders.base_spread}
-			min_rbf: {hyper_parameters.struct_encoders.min_rbf} 
-			max_rbf: {hyper_parameters.struct_encoders.max_rbf}
-			beta: {hyper_parameters.struct_encoders.beta}
-			d_hidden_attn: {hyper_parameters.struct_encoders.d_hidden_attn}
-			hidden_layers_attn: {hyper_parameters.struct_encoders.hidden_layers_attn}
-			temperature: {training_parameters.inference.temperature}
+			d_model: {hyper_parameters.d_model} 
+			num_aa: {hyper_parameters.num_aa}
 
+			wave function embedding:
+				min_wl: {hyper_parameters.embedding.min_wl}
+				max_wl: {hyper_parameters.embedding.max_wl}
+				base_wl: {hyper_parameters.embedding.base_wl}
+				learnable_aa: {hyper_parameters.embedding.learnable_aa}
+
+			wave function diffusion:
+				scheduler:
+					beta_min: {hyper_parameters.diffusion.scheduler.beta_min} 
+					beta_max: {hyper_parameters.diffusion.scheduler.beta_max}
+					beta_schedule_type: {hyper_parameters.diffusion.scheduler.beta_schedule_type}
+					t_max: {hyper_parameters.diffusion.scheduler.t_max}
+				timestep:
+					min_wl: {hyper_parameters.diffusion.timestep.min_wl}
+					max_wl: {hyper_parameters.diffusion.timestep.max_wl}
+					use_mlp: {hyper_parameters.diffusion.timestep.use_mlp}
+					d_hidden: {hyper_parameters.diffusion.timestep.d_hidden}
+					hidden_layers: {hyper_parameters.diffusion.timestep.hidden_layers} 
+					use_norm: {hyper_parameters.diffusion.timestep.use_norm}
+				wf preprocessing:
+					use_mlp: {hyper_parameters.diffusion.pre_process.use_mlp} 
+					d_hidden: {hyper_parameters.diffusion.pre_process.d_hidden}
+					hidden_layers: {hyper_parameters.diffusion.pre_process.hidden_layers}
+					use_norm: {hyper_parameters.diffusion.pre_process.use_norm}
+				wf post_process:
+					use_mlp: {hyper_parameters.diffusion.post_process.use_mlp}
+					d_hidden: {hyper_parameters.diffusion.post_process.d_hidden}
+					hidden_layers: {hyper_parameters.diffusion.post_process.hidden_layers}
+					use_norm: {hyper_parameters.diffusion.post_process.use_norm}
+				encoders:
+					encoder_layers: {hyper_parameters.diffusion.encoders.layers}
+					heads: {hyper_parameters.diffusion.encoders.heads}
+					learnable_spreads: {hyper_parameters.diffusion.encoders.learnable_spreads}
+					min_spread: {hyper_parameters.diffusion.encoders.min_spread}
+					max_spread: {hyper_parameters.diffusion.encoders.max_spread}
+					base_spreads: {hyper_parameters.diffusion.encoders.base_spreads}
+					num_spread: {hyper_parameters.diffusion.encoders.num_spread}
+					min_rbf: {hyper_parameters.diffusion.encoders.min_rbf}
+					max_rbf: {hyper_parameters.diffusion.encoders.max_rbf}
+					beta: {hyper_parameters.diffusion.encoders.beta}
+					d_hidden_attn: {hyper_parameters.diffusion.encoders.d_hidden_attn}
+					hidden_layers_attn: {hyper_parameters.diffusion.encoders.hidden_layers_attn}
+
+			wave function extraction:
+				wf preprocessing:
+					use_mlp: {hyper_parameters.extraction.pre_process.use_mlp} 
+					d_hidden: {hyper_parameters.extraction.pre_process.d_hidden}
+					hidden_layers: {hyper_parameters.extraction.pre_process.hidden_layers}
+					use_norm: {hyper_parameters.extraction.pre_process.use_norm}
+				wf post_process:
+					use_mlp: {hyper_parameters.extraction.post_process.use_mlp}
+					d_hidden: {hyper_parameters.extraction.post_process.d_hidden}
+					hidden_layers: {hyper_parameters.extraction.post_process.hidden_layers}
+					use_norm: {hyper_parameters.extraction.post_process.use_norm}
+				encoder:
+					encoder_layers: {hyper_parameters.extraction.encoders.layers}
+					heads: {hyper_parameters.extraction.encoders.heads}
+					learnable_spreads: {hyper_parameters.extraction.encoders.learnable_spreads}
+					min_spread: {hyper_parameters.extraction.encoders.min_spread}
+					max_spread: {hyper_parameters.extraction.encoders.max_spread}
+					base_spreads: {hyper_parameters.extraction.encoders.base_spreads}
+					num_spread: {hyper_parameters.extraction.encoders.num_spread}
+					min_rbf: {hyper_parameters.extraction.encoders.min_rbf}
+					max_rbf: {hyper_parameters.extraction.encoders.max_rbf}
+					beta: {hyper_parameters.extraction.encoders.beta}
+					d_hidden_attn: {hyper_parameters.extraction.encoders.d_hidden_attn}
+					hidden_layers_attn: {hyper_parameters.extraction.encoders.hidden_layers_attn}
+
+		data:
+  			data_path: {data.data_path}
 			dataset split ({data.num_train + data.num_val + data.num_test} clusters total): 
 				train clusters: {data.num_train}
 				validation clusters: {data.num_val}
@@ -91,20 +143,39 @@ class Output():
 			max sequence length (tokens): {data.max_seq_size}
 			effective batch size (tokens): {data.batch_tokens * training_parameters.loss.accumulation_steps}
 
+		training-parameters:
+			train_type: {training_parameters.train_type}
 			epochs: {training_parameters.epochs}
-			max learning rate: {training_parameters.lr.lr_step}
-			warmup steps: {training_parameters.lr.warmup_steps}
-			dropout: {training_parameters.regularization.dropout}
-			dropout_attention: {training_parameters.regularization.attn_dropout}
-			label-smoothing: {training_parameters.regularization.label_smoothing}
-			coordinate_noise_stdev: {training_parameters.regularization.noise_coords_std} A
-			
-			min_mask_pct: {training_parameters.regularization.mask_injection.min_mask_pct} 
-			max_mask_pct: {training_parameters.regularization.mask_injection.max_mask_pct} 
-			mean_span: {training_parameters.regularization.mask_injection.mean_span}
-			std_span: {training_parameters.regularization.mask_injection.std_span}
-
-			output directory: {self.out_path}
+			weights:
+				use_model: {training_parameters.weights.use_model}
+				use_embedding_weights: {training_parameters.weights.use_embedding_weights}
+				use_diffusion_weights: {training_parameters.weights.use_diffusion_weights}
+				use_extraction_weights: {training_parameters.weights.use_extraction_weights}
+			inference:
+				temperature: {training_parameters.inference.temperature}
+				cycles: {training_parameters.inference.cycles}
+			early_stopping:
+				thresh: {training_parameters.early_stopping.thresh} 
+				tolerance: {training_parameters.early_stopping.tolerance}
+			adam:
+				beta1: {training_parameters.adam.beta1}
+				beta2: {training_parameters.adam.beta2}
+				epsilon: {training_parameters.adam.epsilon}
+			regularization:
+				dropout: {training_parameters.regularization.dropout}
+				wf_dropout: {training_parameters.regularization.wf_dropout}
+				attn_dropout: {training_parameters.regularization.attn_dropout}
+				label_smoothing: {training_parameters.regularization.label_smoothing}
+				noise_coords_std: {training_parameters.regularization.noise_coords_std}
+				use_chain_mask: {training_parameters.regularization.use_chain_mask}
+			loss:
+				accumulation_steps: {training_parameters.loss.accumulation_steps} 
+				grad_clip_norm: {training_parameters.loss.grad_clip_norm}
+			lr:
+				lr_step: {training_parameters.lr.lr_step}
+				warmup_steps: {training_parameters.lr.warmup_steps}
+		
+		output directory: {self.out_path}
 		''')
 
 		self.log.info(log)
@@ -114,48 +185,66 @@ class Output():
 		self.log.info(textwrap.dedent(f'''
 		
 			{'-'*80}
-			epoch {epoch.epoch}: 
+			epoch {epoch}: 
 			{'-'*80}
 			
 			current learning rate: {current_lr}
 		''')
 		)
 
-	def log_epoch_losses(self, epoch, losses):
+	def log_epoch_losses(self, losses):
+		loss, seq_sim = losses.tmp.get_avg()
+		self.log.info(f"train loss per token: {str(loss.item())}")
+		self.log.info(f"train seq_sim per token: {str(seq_sim.item())}\n")		
+		losses.train.add_losses(loss, seq_sim)
 
-		loss, seq_sim = epoch.losses.get_avg()
-		self.log.info(f"train loss per token: {str(loss)}")
-		self.log.info(f"train seq_sim per token: {str(seq_sim)}\n")		
-		losses.add_losses(loss, seq_sim)
+	def log_val_losses(self, losses):
+		loss, seq_sim = losses.tmp.get_avg()
+		self.log.info(f"validation loss per token: {str(loss.item())}")
+		self.log.info(f"validation seq_sim per token: {str(seq_sim.item())}\n")
+		losses.val.add_losses(loss, seq_sim)
 
-	def log_val_losses(self, losses, all_losses):
-		
-		# compute epoch loss
-		loss, seq_sim = losses.get_avg()
-		self.log.info(f"validation loss per token: {str(loss)}")
-		self.log.info(f"validation seq_sim per token: {str(seq_sim)}\n")
-		all_losses.add_losses(loss, seq_sim)
+	def log_test_losses(self, losses):
+		test_loss, test_seq_sim = losses.tmp.get_avg()
+		self.log.info(f"testing loss per token: {test_loss.item()}")
+		self.log.info(f"test sequence similarity per token: {test_seq_sim.item()}")
+		losses.test.extend_losses(losses.tmp) # include all test losses to make a histogram
 
-	def log_test_losses(self, test_losses, test_mp_losses):
-		test_loss, test_seq_sim = test_losses.get_avg()
-		_, test_mp_seq_sim = test_mp_losses.get_avg()
-		self.log.info(f"testing loss per token: {test_loss}")
-		self.log.info(f"test sequence similarity per token: {test_seq_sim}")
-		self.log.info(f"test mask-predict sequence similarity per token: {test_mp_seq_sim}")
-	
-	def plot_training(self, train_losses, val_losses, val_losses_context):
+	def plot_training(self, losses, training_type):
 
 		# convert to numpy arrays
-		for losses in [train_losses, val_losses, val_losses_context]:
-			if losses is not None:
-				losses.to_numpy()
+		losses.to_numpy()
+
+		if training_type in ["extraction", "extraction_denoised"]:
+			self.plot_extraction(losses)
+		elif training_type == "diffusion":
+			self.plot_diffusion(losses)
+
+	def plot_diffusion(self, losses):
 
 		# Create the plot
-		plt.plot([i + 1 for i in range(len(train_losses.losses))], train_losses.losses, marker='o', color='red', label="Training Output")
-		plt.plot([i + 1 for i in range(len(val_losses.losses))], val_losses.losses, marker='o', color='blue', label="Validation Output (no context)")
-		if val_losses_context is not None:
-			plt.plot([i + 1 for i in range(len(val_losses_context.losses))], val_losses_context.losses, marker='o', color='orange', label="Validation Output (w/ context)")
+		plt.plot([i + 1 for i in range(len(losses.train))], losses.train.losses, marker='o', color='red', label="Training")
+		plt.plot([i + 1 for i in range(len(losses.val))], losses.val.losses, marker='o', color='blue', label="Validation")
+
+		# Adding title and labels
+		plt.title('Mean Squared Error vs. Epochs')
+		plt.xlabel('Epochs')
+		plt.ylabel('Mean Squared Error')
 		
+		# Add a legend to distinguish the line plots
+		plt.legend()
+		
+		# Display the plot
+		plt.grid(True)
+		plt.savefig(self.loss_plot)
+		self.log.info(f"graph of loss vs. epoch saved to {self.loss_plot}")
+
+	def plot_extraction(self, losses):
+
+		# Create the plot
+		plt.plot([i + 1 for i in range(len(losses.train))], losses.train.losses, marker='o', color='red', label="Training")
+		plt.plot([i + 1 for i in range(len(losses.val))], losses.val.losses, marker='o', color='blue', label="Validation")
+
 		# Adding title and labels
 		plt.title('Cross Entropy Loss vs. Epochs')
 		plt.xlabel('Epochs')
@@ -174,15 +263,13 @@ class Output():
 
 		plt.figure()
 
-		plt.plot([i + 1 for i in range(len(train_losses.matches))], train_losses.matches, marker='o', color='red', label="Training Output")
-		plt.plot([i + 1 for i in range(len(val_losses.matches))], val_losses.matches, marker='o', color='blue', label="Validation Output (no context)")
-		if val_losses_context is not None:
-			plt.plot([i + 1 for i in range(len(val_losses_context.matches))], val_losses_context.matches, marker='o', color='orange', label="Validation Output (w/ context)")
+		plt.plot([i + 1 for i in range(len(losses.train))], losses.train.matches, marker='o', color='red', label="Training Output")
+		plt.plot([i + 1 for i in range(len(losses.val))], losses.val.matches, marker='o', color='blue', label="Validation Output (no context)")
 		
 		# Adding title and labels
-		plt.title('Mean Sequence Similarity vs. Epochs')
+		plt.title('Sequence Similarity vs. Epochs')
 		plt.xlabel('Epochs')
-		plt.ylabel('Mean Sequence Similarity (%)')
+		plt.ylabel('Sequence Similarity (%)')
 		
 		# Add a legend to distinguish the line plots
 		plt.legend()
@@ -192,13 +279,22 @@ class Output():
 		plt.savefig(self.seq_plot)
 		self.log.info(f"graph of seq_similarity vs. epoch saved to {self.seq_plot}")
 
-	def save_model(self, model, appended_str=""):
+	def save_model(self, model, train_type="", appended_str=""):
 		if appended_str:
 			weights_path = self.weights_path.parent / Path(f"{'.'.join(self.weights_path.name.split(".")[:-1])}_{appended_str}.{self.weights_path.name.split(".")[-1]}") 
 		else:
 			weights_path = self.weights_path
 		torch.save(model.state_dict(), weights_path)
 		self.log.info(f"weights saved to {weights_path}")
+
+		weights_path = lambda train_type_str: self.weights_path.parent / Path(f"{'.'.join(self.weights_path.name.split(".")[:-1])}_{train_type_str}.{self.weights_path.name.split(".")[-1]}")
+		if train_type == "extraction":
+			model.save_WFEmbedding_weights(weights_path=weights_path("embedding"))
+			model.save_WFExtraction_weights(weights_path=weights_path("extraction"))
+		elif train_type == "diffusion":
+			model.save_WFDiffusion_weights(weights_path=weights_path("diffusion"))
+		elif train_type == "extraction_denoised":
+			model.save_WFExtraction_weights(weights_path=weights_path("extraction"))
 
 	def write_new_clusters(self, cluster_info, val_clusters, test_clusters):
 

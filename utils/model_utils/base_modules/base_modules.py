@@ -37,6 +37,33 @@ class MLP(nn.Module):
 
 		return x
 
+class CrossFeatureNorm(nn.Module):
+	'''
+	normalizes each feature independantly across the sequence. it is independant of batches (not batch norm)
+	this is helpful because each feature for a given token (Ca atom) is the output of that token for the global 
+	superposed wavefunction at a particular wavelength. thus, each feature in a given token is only relevant
+	RELATIVE to the CORRESPONDING features of all other tokens in the sequence. 
+	This essentially normalizes each wavefunction's (psi_k) output to have mean of 0 and std of 1. 
+	Note that this normalizes the real part and the imaginary part independantly 
+	the resulting features are then scaled by 1/sqrt(d_model), so that the variance of the whole wf is 1
+	'''
+	def __init__(self, d_model):
+		super(CrossFeatureNorm, self).__init__()
+
+	def forward(self, x, mask=None):
+
+		batch, N, d_model = x.shape
+
+		mask = mask if mask is not None else torch.ones(batch, N, device=x.device, dtype=torch.bool) # Z x N
+		valid = mask.sum(dim=1, keepdim=True).unsqueeze(2).clamp(min=1) # Z x 1 x 1
+		mean = (x*mask.unsqueeze(2)).sum(dim=1, keepdim=True) / valid # Z x 1 x D
+		x = x - mean # Z x N x D
+		std = torch.sqrt(x.pow(2).sum(dim=1, keepdim=True)/valid) # Z x 1 x D
+		x = x/std # Z x N x D
+		x = x/(d_model**0.5) # Z x N x D
+
+		return x
+
 # initializations for linear layers
 def init_orthogonal(m):
 	if isinstance(m, nn.Linear):

@@ -10,74 +10,119 @@ config: "config/train.yml"
 # hyperparameters
 hyper_parameters:
 
-  d_model: 512 # dimensionality of input embeddings
+  d_model: 512
+  num_aa: 20
 
-  wf:
-    learnable_wavelengths: False # whether to make wavelengths learnable, comparable performance either way, but seems better without
-    wf_mag_type: 1  # 0 mean no magnitude scaling (all sources are fully felt by all observers regardless of distance)
-                    # 1 means scale like in greens func (1/|R|)
-                    # 2 means do log scaling (1/log2(|R|)) so that distant sources have a bigger effect than in regular greens func
-                      # note that layer norm is applied after, so the base you use for type 2 does not matter, 
-                      # as that is equivilant to multiplying all interactions by the same constant (log2(base))
-                    # 3 means do 1/sqrt(|R|) so that distant sources have bigger effect, but not as aggressive as log scaling.
-    anisotropic_wf: True # whether to use anisotropic version that uses Cb info. finally ready (: AND FUCKING WORKING !!!!!!! will prob remove this option since it is better overall than isotropic
-    min_wl: 2.0  # minimum wl to use in wavelength sampling
-    max_wl: 10.0  # maximum wl to use in wavelength sampling
-    base_wl: 25.0  # minimum base to use in wavelength sampling
-    d_hidden_we: 2048 # hidden layer dim in WF embedding MLP
-    hidden_layers_we: 0 # number of hidden layers,
-    use_aa: False # whether to use aa context, only applicable if anisotropic is true. if use_aa is false, all tokens are the mask token 
+  # wf embedding params
+  embedding:
 
-  # note that changing some of these parameters (and others, like d_model) requires triton to recompile the geometric attention kernel, 
-  # so first few iterations may be slow, but will speed up after most of the input shapes have been seen at least once (see dataset configuration section for more details)
-  # the parameters that cause recompilation have two pound signs ##, instead of one # next to them
-  struct_encoders:
+    min_wl: 2.0
+    max_wl: 10.0
+    base_wl: 25.0
+    learnable_aa: True
+  
+  # wf diffusion params
+  diffusion:
 
-    layers: 8 # number of structure encoder layers
-    num_heads: 8  ## number of attention heads to perform the training with
+    scheduler:
+      beta_min: !!float 1e-4
+      beta_max: 0.02
+      beta_schedule_type: "linear" 
+      t_max: 100
 
-    learnable_spreads: True # whether to make the spreads learnable, new version shows small gains when making spreads learnable (set to False if beta is 0.0, see below)
-    
-    # if you want all heads to have the same spread, set min_spread=max_spread. in this case the base used does not matter. otherwise, base must be > 1
-    min_spread: 3 # min spread RBFs in attention
-    max_spread: 15 # max spread
-    base_spread: 1.0 # base to use for logarithmic sampling, set to 1 for linear sampling
-    num_spread: 32 # only matters if spreads are learnable, if not this is automatically set to num_heads
-    
-    # if you want global attention, set min_rbf to 0.0 and max_rbf to 1.0, 0.001 and 0.999 w/ rbf scaling (beta approx. 1) seems to work better.
-    # note, that the max rbf term as 0.999 only excludes distances of 0.0 (unless you choose a huge max spread), so it basically just stops the model from allowing tokens to attend to themselves 
-    # it does worse w/ maxRBF=1, but i think this is because ive only tested with beta>=1, so the attention to itself is overemphasized since rbf term is always 1. will try maxrbf=1 and beta<1 to test if this helps
-    min_rbf: 0.001 ## for masking spatially distant residue pairs in attention computation
-    max_rbf: 0.850 ## for masking spatially close residue pairs, ensures RBF bias doesnt skew the attention logits so that mean is still approx. 0
-    # maxrbf of 0.9 is working, i think because this excludes close pairs that other heads are also processing, i.e. removes redundancy 
+    timestep:
+      min_wl: 0.5
+      max_wl: 100
+      use_mlp: False
+      d_hidden: 2048
+      hidden_layers: 0 
+      use_norm: False
 
-    # if you want no scaling (use raw attention logits), set beta to 0.0, note that masking is still done according to min and max rbf args (above)
-    # note that scaling (beta>0) seems to improve performance
-    beta: 2.0 ## how much to scale the RBF term by, larger values emphasize geometry, lower emphasize raw attention
-    
-    d_hidden_attn: 2048  # hidden dimensions of encoder feed forward layer
-    hidden_layers_attn: 0 # hidden layers for ffn
+    pre_process:
+      use_mlp: True
+      d_hidden: 2048
+      hidden_layers: 0
+      use_norm: True
+
+    post_process:
+      use_mlp: True
+      d_hidden: 2048
+      hidden_layers: 0
+      use_norm: True
+
+    encoders:
+      layers: 8
+      heads: 8
+      learnable_spreads: True
+      min_spread: 3.0
+      max_spread: 15.0
+      base_spreads: 1.0
+      num_spread: 32
+      min_rbf: 0.001
+      max_rbf: 0.850
+      beta: 2.0
+      d_hidden_attn: 2048
+      hidden_layers_attn: 0
+  
+  extraction:
+
+    pre_process:
+      use_mlp: True
+      d_hidden: 2048
+      hidden_layers: 0
+      use_norm: True
+
+    post_process:
+      use_mlp: True
+      d_hidden: 2048
+      hidden_layers: 0
+      use_norm: True
+
+    encoders:
+      layers: 8
+      heads: 8
+      learnable_spreads: True
+      min_spread: 3.0
+      max_spread: 15.0
+      base_spreads: 1.0
+      num_spread: 32
+      min_rbf: 0.001
+      max_rbf: 0.850
+      beta: 2.0
+      d_hidden_attn: 2048
+      hidden_layers_attn: 0
 
 # ------------------------------------------------------------------------------
 
 # training params
 training_parameters:
 
+  train_type: "extraction"  # options are:
+                            #   extraction:
+                            #     train extraction model only. if learnable AA is 
+                            #     true, embedding model learns also. diffusion doesn't participate.
+                            #   diffusion:
+                            #     train diffusion model only, embedding is frozen, extraction doesn't participate.
+                            #   extraction_denoised: (not implemented)
+                            #     train extraction model on outputs of diffusion model. 
+                            #     this requires preprocessing of diffusion model outputs (pretrained w/ frozen weights)
+                            #     not implemented yet, but idea is to generate multiple wf representations for each
+                            #     input (wf representation of protein w/ true labels), but each diffusion output starts at
+                            #     a different timestep. this allows the extraction model to learn how to extract sequence
+                            #     from diffusions output, not just perfect wave function representations
+
   epochs: 100  # number of epochs
-  use_amp: False  # whether to use automatic mixed precision. 
-                  # do NOT set this to true, as get exploding 
-                  # gradients since my custom kernels cast certain tensor
-                  # to fp32, will fix later
 
-  # for transfer learning
+  # for pre-training
   weights:
-    # use_model: "/scratch/hjc2538/projects/proteusAI/models/aniso_w_aa_inject_nomask/model_parameters.pth"
     use_model: ""
+    use_embedding_weights: ""
+    use_diffusion_weights: ""
+    use_extraction_weights: ""
 
-  inference: # uses mask predict algo for inference. only used if hyper_parameters.wf.use_aa is true
-    temperature: !!float 1e-6  # temperature for autoregressive inference (for testing). 
-    num_iters: 10 # number of iterations for mask predict inference
-    remask: False # whether to remask each iteration, or run with the full prediction
+  inference:
+    temperature: !!float 1e-6  
+    cycles: 10 
   
   # convergence criteria
   early_stopping:
@@ -96,22 +141,10 @@ training_parameters:
     label_smoothing: 0.0  # percentage of label smoothing to use for loss calculation
     noise_coords_std: 0.0 # stdev of noise injection into coordinates during training
     use_chain_mask: True # whether to mask all chains except the sequence cluster representative in loss computation, all chains still used for fwd pass as context though
-    mask_id: 10.0 # whether mask token is the mean of all other tokens, or 0. mean seems to work much better, as it still gives the model information about orientation
-    aa_scale: 10.0 # what the max aa size is, all aas scaled relative to this. 0.0 means use the raw aa sizes computed from avg volumes of aas when in the protein core
 
-    # MASK injection
-    mask_injection:
-      mask_type: "noise" # whether to mask random tokens ("rand") or do span masking ("span") or no masking, just injection of noise via replacing true tokens with random tokens ("noise")
-      min_mask_pct: 0.00 # pct masked is clampled to this val
-      max_mask_pct: 1.00 # also clamped
-      mean_span: 10 # mean span length # only applicable if mask type is span
-      std_span: 5 # std span length
-      randAA_pct: 0.0 # what percentage of non-masked tokens to replace with random token. -1 means each sample gets a randAA_pct sampled from uniform distribution from 0 to 1
-  
   loss:
-    accumulation_steps: 32  # grad accumulation; how many batches to process before learning step
-    loss_type: "sum"  # whether to use the 'sum' or the 'mean' for NLL, sum works much better
-    grad_clip_norm: 5.0 # max L2 norm of gradients for gradient clipping. if set to 0, no gradient clipping is applied (not recommended if loss_type is sum)
+    accumulation_steps: 16  # grad accumulation; how many batches to process before learning step
+    grad_clip_norm: 1.0 # max L2 norm of gradients for gradient clipping. if set to 0, no gradient clipping is applied (not recommended if loss_type is sum)
   
   lr:
     lr_step: !!float 1e-3 # max lr, ramps up to this val before decreasing  
@@ -142,7 +175,7 @@ data:
 
 # Output
 output:
-  out_path: "/scratch/hjc2538/projects/proteusAI/models/8enc_8h_32accum"  # path to store output, such as plots and weights file. for uncw hpc
+  out_path: "/scratch/hjc2538/projects/proteusAI/models/new_model_test_learnAA"  # path to store output, such as plots and weights file. for uncw hpc
   loss_plot: "loss_vs_epoch.png"  # path to save plot of loss vs epochs after training
   seq_plot: "seq_sim_vs_epoch.png"  # path to save plot of sequence similarity vs epochs after training
   weights_path: "model_parameters.pth"  # path to save weights after training

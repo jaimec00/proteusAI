@@ -1,6 +1,6 @@
 import torch
 import numpy as np
-from utils.model_utils.wf_embedding.anisotropic.aa_scaling.learnable_aa.cuda import wf_embedding_kernel
+from utils.model_utils.wf_embedding.anisotropic.aa_scaling.static_aa.cuda import wf_embedding_kernel
 
 # for testing and development
 # from torch.utils.cpp_extension import load
@@ -30,7 +30,6 @@ class _wf_embedding(torch.autograd.Function):
 
 		# gather the dtypes so can convert the output to this. coords A is what is used to determine O dtype, and aa_magnitudes dtype for d_aa
 		o_dtype = coordsA.dtype
-		d_aa_dtype = aa_magnitudes.dtype
 
 		# bake the mask into coords w/ arbitrary val. less likely to give NaNs than using inf
 		coordsA = torch.where(mask.unsqueeze(2), 12345, coordsA) # only need to bake the mask into one of the coords tensors
@@ -46,13 +45,10 @@ class _wf_embedding(torch.autograd.Function):
 
 		# aas
 		aa_labels = aa_labels.to(torch.int16).contiguous() # int 16, max idx is 19, so this precision is overkill anyways
-		aa_magnitudes = aa_magnitudes.to(torch.float16).contiguous() # compromise to fp16 for better occupancy
+		aa_magnitudes = aa_magnitudes.to(torch.float32).contiguous() # compromise to fp16 for better occupancy
 
 		# instantiate the output tensor
 		out = torch.zeros(batch, N, d_model, dtype=torch.float32, device=coordsA.device).contiguous()
-
-		# for bwd pass
-		d_aa = torch.zeros(batch, N, d_model, num_aa, dtype=torch.float32, device=aa_magnitudes.device).contiguous()
 
 		rng = np.random.default_rng()  # Create a new random generator
 		rng_seed = rng.integers(0, (2**32)-1, dtype=np.uint32)
@@ -60,23 +56,12 @@ class _wf_embedding(torch.autograd.Function):
 		# call the kernel
 		wf_embedding_kernel.forward(    coordsA, coordsB, 
 										aa_labels, aa_magnitudes,
-										wavenumbers, 
-										out, d_aa,
+										wavenumbers, out,
 										dropout_p, rng_seed
 								)
-
-		# save for the backward, and recast to input dtype
-		ctx.save_for_backward(d_aa.to(d_aa_dtype))
 
 		return out.to(o_dtype)
 
 	@staticmethod
 	def backward(ctx, dO):
-
-		# load saved tensors from bwd
-		d_aa, = ctx.saved_tensors
-
-		d_aa = (dO.unsqueeze(3) * d_aa).sum(dim=(0,1)) # mult w/ dO and sum batch and N dims; Z x N x D x 1 * Z x N x D x A --> D x A
-		d_aa = d_aa[::2, :] + d_aa[1::2, :] # sum real and imag parts; K x A
-
-		return None, None, None, d_aa, None, None, None
+		return None, None, None, None, None, None, None

@@ -377,7 +377,7 @@ class Data():
 			key_padding_masks = labels==-1
 
 			# chain idxs are necessary to properly compute approximate beta carbon coordinates
-			yield labels, coords, chain_masks, chain_idxs, key_padding_masks
+			yield coords, labels, chain_idxs, chain_masks, key_padding_masks
 
 	def __len__(self):
 		return len(self.epoch_biounits)

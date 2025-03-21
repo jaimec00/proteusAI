@@ -141,62 +141,6 @@ class PositionalEncoding(nn.Module):
 		x = x + pe # batch x N x d_model
 		return x
 
-class CrossFeatureNorm(nn.Module):
-	'''
-	normalizes each feature independantly across the sequence. it is independant of batches (not batch norm)
-	this is helpful because each feature for a given token (Ca atom) is the output of that token for the global 
-	superposed wavefunction at a particular k (wavelength). thus, each feature in a given token is only relevant
-	RELATIVE to the CORRESPONDING features of all other tokens in the sequence. 
-	This essentially normalizes each wavefunction's (psi_k) output. Note that this normalizes the real part and 
-	the imaginary part independantly 
-	'''
-	def __init__(self, d_model, eps=1e-5):
-		super(CrossFeatureNorm, self).__init__()
-
-		self.eps = eps
-		self.gamma = nn.Parameter(torch.ones(1,1,d_model))
-		self.beta = nn.Parameter(torch.zeros(1,1,d_model))
-
-	def forward(self, x, key_padding_mask=None):
-
-		if key_padding_mask is not None:
-			# key_padding_mask is of shape (batch, N) - we invert it to use as a valid mask
-			valid_mask = ~key_padding_mask.unsqueeze(-1)  # batch x N --> batch x N x 1
-			
-			# Mask invalid (padded) positions
-			x_masked = x * valid_mask  # Zero out padded positions in x ; batch x N x d_model
-
-			# Compute the mean and variance only for valid positions
-			sum_valid = torch.sum(x_masked, dim=1) # batch x d_model
-			num_valid = valid_mask.sum(dim=1).clamp(min=1)  # Avoid division by zero
-			mean = sum_valid / num_valid  # shape (batch, d_model)
-
-			# Subtract the mean for valid positions
-			mean_expanded = mean.unsqueeze(1)  # shape (batch, 1, d_model)
-			x_centered = (x - mean_expanded) * valid_mask  # Zero out padded positions again after centering
-
-			# Compute variance only for valid positions
-			variance = torch.sum(x_centered ** 2, dim=1) / num_valid  # shape (batch, d_model)
-			variance_expanded = variance.unsqueeze(1)
-			std = torch.sqrt(variance_expanded + self.eps)
-
-			# Normalize the valid positions
-			x_norm = (x_centered / std) * valid_mask 
-
-		else:
-			# compute mean and variance ; batch x N x d_model --> batch x 1 x d_model
-			mean = x.mean(dim=1, keepdim=True)
-			var = x.var(dim=1, keepdim=True, unbiased=False)
-
-			# normalize each feature independently across the sequence ; batch x N x d_model
-			x_norm = (x - mean) / torch.sqrt(var + self.eps)
-
-
-		# apply learnable scaling (gamma) and shifting (beta) to each feature
-		x = self.gamma * x_norm + self.beta
-
-		return x
-
 class StaticLayerNorm(nn.Module):
 	def __init__(self, normalized_shape, eps=1e-5):
 		super(StaticLayerNorm, self).__init__()
