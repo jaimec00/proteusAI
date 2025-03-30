@@ -16,7 +16,7 @@ from utils.model_utils.base_modules.encoder import Encoder
 class WaveFunctionDiffusion(nn.Module):
 	
 	def __init__(self, 	d_model=512,
-						beta_min=1e-4, beta_max=0.02, beta_schedule_type="linear", t_max=100,
+						alpha_bar_min=0.0, beta_schedule_type="cosine", t_max=1000,
 						min_wl=0.001, max_wl=100, # for sinusoidal timesteps
 						mlp_timestep=False, d_hidden_timestep=2048, hidden_layers_timestep=0, norm_timestep=False,
 						mlp_pre=False, d_hidden_pre=2048, hidden_layers_pre=0, norm_pre=False,
@@ -32,9 +32,9 @@ class WaveFunctionDiffusion(nn.Module):
 		super(WaveFunctionDiffusion, self).__init__()
 
 		# compute wavenumbers for sinusoidal embeddings of timesteps
-		self.wavenumbers = 2*torch.pi / (min_wl-1 + torch.logspace(0, -1, d_model//2, max_wl-min_wl+1))
+		self.register_buffer("wavenumbers", 2*torch.pi / (min_wl-1 + torch.logspace(0, -1, d_model//2, max_wl-min_wl+1)))
 
-		self.beta_scheduler = BetaScheduler(beta_min=beta_min, beta_max=beta_max, beta_schedule_type=beta_schedule_type, t_max=t_max)
+		self.beta_scheduler = BetaScheduler(alpha_bar_min=alpha_bar_min, beta_schedule_type=beta_schedule_type, t_max=t_max)
 
 		self.dropout = nn.Dropout(dropout)
 		self.mlp_timestep = MLP(d_in=d_model, d_out=d_model, d_hidden=d_hidden_timestep, hidden_layers=hidden_layers_timestep) if mlp_timestep else None
@@ -69,7 +69,7 @@ class WaveFunctionDiffusion(nn.Module):
 		phase = self.wavenumbers.unsqueeze(0).unsqueeze(1)*t.unsqueeze(1).unsqueeze(2)
 		sine = torch.sin(phase) # Z x 1 x K
 		cosine = torch.cos(phase) # Z x 1 x K
-		t_features = torch.stack(sine, cosine, dim=3).view(batch, 1, d_model) # Z x 1 x d_model
+		t_features = torch.stack([sine, cosine], dim=3).view(batch, 1, d_model) # Z x 1 x d_model
 
 		# mlp on just timestep embeddings, can't imagine this will help much, but just leave the option
 		if self.mlp_timestep is not None:
@@ -80,7 +80,7 @@ class WaveFunctionDiffusion(nn.Module):
 		# simple addition for first stage of testing
 		wf = wf + t_features
 
-        # geometric attention encoders
+		# geometric attention encoders
 		for encoder in self.encoders:
 			wf = encoder(wf, coords_alpha, key_padding_mask)
 
@@ -93,64 +93,73 @@ class WaveFunctionDiffusion(nn.Module):
 		return wf
 
 	def get_random_timesteps(self, batch_size, device):
-		return torch.randint(0, self.beta_scheduler.t_max, batch_size, device=device)
+		return torch.randint(1, self.beta_scheduler.t_max+1, (batch_size,), device=device)
 
 	def noise(self, wf, t):
 
-		t = t.unsqueeze(1).unsqueeze(2)
-		_, _, alpha_bar_t = self.beta_scheduler(t)
+		if isinstance(t, int):
+			t = torch.full((wf.size(0), 1, 1), t, device=wf.device)
+		elif isinstance(t, torch.Tensor):
+			t = t.unsqueeze(1).unsqueeze(2)
+		alpha_bar_t, _ = self.beta_scheduler(t) 
 		noise = torch.randn_like(wf)
 		wf = (alpha_bar_t**0.5)*wf + ((1-alpha_bar_t)**0.5)*noise
 
 		return wf, noise
 
-	def denoise(self, wf, coords_alpha, t_start, key_padding_mask=None):
+	def denoise(self, wf, coords_alpha, t_start, key_padding_mask=None): # meant to operate on same t for all samples in batch during inference
 
+		# convert to tensor
+		t_bwd = torch.full((coords_alpha.size(0), 1, 1), t_start, device=coords_alpha.device)
+			
 		# perform diffusion
-		for t_bwd in range(t_start, 0, -1):
+		while (t_bwd>=1).any():
 
-			# compute beta, alpha, and alpha_bar for t
-			t_bwd = t_bwd.unsqueeze(1).unsqueeze(2)
-			beta_t, alpha_t, alpha_bar_t = self.beta_scheduler(t_bwd) 
-
-			# compute sigma_t and z to maintain stochastic nature in reverse process
-			sigma_t = beta_t**0.5
-			z = torch.randn_like(wf) * (t_bwd!=1) # set to 0 on final step
-
+			# compute alpha_bar for t and t-1
+			alpha_bar_t, alpha_bar_tminus1 = self.beta_scheduler(t_bwd) 
+			
 			# predict the noise
 			noise_pred = self.forward(wf, coords_alpha, t_bwd.squeeze(1,2), key_padding_mask)
 
-			# update wf
-			wf = (1/(alpha_t**0.5)) * (wf - (beta_t / ((1-alpha_bar_t)**0.5))*noise_pred) + sigma_t*z
+			# update wf, use ode flow to deterministically move the wf towards high prob denisty manifold. non-markovian denoising
+			pred_wf_0 = (wf - ((1-alpha_bar_t)**0.5)*noise_pred)/(alpha_bar_t**0.5)
+			pred_wf_grad_t = ((1 - alpha_bar_tminus1)**0.5) * noise_pred
+			wf = (alpha_bar_tminus1**0.5)*pred_wf_0 + pred_wf_grad_t
+
+			# update t
+			t_bwd -= 1
 
 		return wf
 
 
 class BetaScheduler(nn.Module):
-	def __init__(self, beta_min=1e-4, beta_max=0.02, beta_schedule_type="linear", t_max=100):
+	def __init__(self, alpha_bar_min=0.0, beta_schedule_type="cosine", t_max=100):
 		super(BetaScheduler, self).__init__()
 
-		self.beta_min = beta_min
-		self.beta_max = beta_max
-		self.beta_schedule = self.get_scheduler(beta_schedule_type)
+		self.alpha_bar_min = alpha_bar_min # 0.0 is full noise , no signal
+		self.beta_scheduler = self.get_scheduler(beta_schedule_type)
 		self.t_max = t_max
 
-	def forward(self, t: torch.Tensor):
+	def forward(self, t: torch.Tensor): # Z x 1 x 1
 
-		beta_t = self.beta_scheduler(t)
-		alpha_t = 1 - beta_t
-		alpha_bar_t = 1
-		for s in range(1, t+1):
-			alpha_bar_t *= 1 - self.beta_scheduler(s)
+		return self.beta_scheduler(t) # Z x 1 x 1
 
-		return beta_t, alpha_t, alpha_bar_t
+	def cosine_scheduler(self, t: torch.Tensor, s=0.008): # s is approx pixel bin width, no direct equivilant for my data, so just start with this and tune
+		f = lambda t_in: self.alpha_bar_min + (1 - self.alpha_bar_min)*(torch.cos((torch.pi/2)*(t_in/self.t_max + s)/(1 + s))**2)
+		f_t = f(t)
+		f_tminus1 = f(t-1) 
+		f_0 = f(torch.zeros_like(t))
+		alpha_bar_t = f_t / f_0
+		alpha_bar_tminus1 = f_tminus1 / f_0
 
-	def linear_scheduler(self, t: torch.Tensor):
-		beta = self.beta_min + (self.beta_max - self.beta_min)*(t-1)/(self.t_max-1)
-		return beta
+		return alpha_bar_t, alpha_bar_tminus1
 
 	def get_scheduler(self, schedule_type):
-		if schedule_type=="linear":
-			return self.linear_scheduler
-		else:
-			raise NotImplementedError
+
+		schedules = {	
+						"cosine": self.cosine_scheduler
+					}
+		try:
+			return schedules[schedule_type]
+		except KeyValueError as e:
+			e(f"invalid noise scheduler chosen. valid options are {schedules.keys()}")

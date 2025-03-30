@@ -34,13 +34,13 @@ class WaveFunctionExtraction(nn.Module):
 		self.norm_post = nn.LayerNorm(d_model) if norm_post else None
 
 		self.encoders = nn.ModuleList([ 
-                                            Encoder(	d_model=d_model, d_hidden=d_hidden_attn, hidden_layers=hidden_layers_attn, 
+											Encoder(	d_model=d_model, d_hidden=d_hidden_attn, hidden_layers=hidden_layers_attn, 
 														heads=heads, min_spread=min_spread, max_spread=max_spread, base_spread=base_spreads, 
 														num_spread=num_spread, min_rbf=min_rbf, max_rbf=max_rbf, beta=beta, learnable_spreads=learnable_spreads, 
 														dropout=dropout, attn_dropout=attn_dropout
-                                                    ) 
-                                            for _ in range(encoder_layers)
-                                        ])
+													) 
+											for _ in range(encoder_layers)
+										])
 
 		# map to aa prob logits
 		self.out_proj = nn.Linear(d_model, num_aas)
@@ -53,7 +53,7 @@ class WaveFunctionExtraction(nn.Module):
 		if self.norm_pre is not None:
 			wf = self.norm_pre(wf)
 
-        # geometric attention encoders
+		# geometric attention encoders
 		for encoder in self.encoders:
 			wf = encoder(wf, coords_alpha, key_padding_mask)
 
@@ -85,7 +85,7 @@ class WaveFunctionExtraction(nn.Module):
 		aa_logits = self.forward(wf, coords_alpha, key_padding_mask)
 
 		# sample from distribution
-		aas = self.wf_extraction.sample(aa_logits, temp)
+		aas = self.sample(aa_logits, temp)
 
 		return aas
 

@@ -60,9 +60,20 @@ class CrossFeatureNorm(nn.Module):
 		x = x - mean # Z x N x D
 		std = torch.sqrt(x.pow(2).sum(dim=1, keepdim=True)/valid) # Z x 1 x D
 		x = x/std # Z x N x D
-		x = x/(d_model**0.5) # Z x N x D
+		# x = x/(d_model**0.5) # Z x N x D
 
 		return x
+
+class StaticLayerNorm(nn.Module):
+	'''just normalizes each token to have a mean of 0 and var of 1, no scaling and shifting'''
+	def __init__(self, d_model):
+		super(StaticLayerNorm, self).__init__()
+		self.d_model = d_model
+	def forward(self, x):
+		centered = x - x.mean(dim=2, keepdim=True) 
+		std = centered.std(dim=2, keepdim=True)
+		std = std.masked_fill(std==0, 1)
+		return centered / std
 
 # initializations for linear layers
 def init_orthogonal(m):

@@ -4,6 +4,8 @@
 author: 		jaime cardenas
 title:  		wf_embeds.py
 description:	embeds the structure + sequence into single representation via wavefunction embedding
+				WF embedding's job is simply to map the residues to the physical wavefunction space
+				WF encoding maps the wf representation to latent space
 '''
 
 # ----------------------------------------------------------------------------------------------------------------------
@@ -12,7 +14,8 @@ import torch
 import torch.nn as nn
 from utils.model_utils.wf_embedding.anisotropic.aa_scaling.learnable_aa.cuda.wf_embedding import wf_embedding as wf_embedding_learnAA
 from utils.model_utils.wf_embedding.anisotropic.aa_scaling.static_aa.cuda.wf_embedding import wf_embedding as wf_embedding_staticAA
-from utils.model_utils.base_modules.base_modules import CrossFeatureNorm
+from utils.model_utils.base_modules.Cb_utils import get_coords
+from utils.model_utils.base_modules.base_modules import StaticLayerNorm
 
 # ----------------------------------------------------------------------------------------------------------------------
 
@@ -27,13 +30,15 @@ class WaveFunctionEmbedding(nn.Module):
 
 		# compute wavenumbers
 		self.register_buffer("wavenumbers", 2 * torch.pi / (min_wl + (max_wl - min_wl) * (torch.logspace(0,1,d_model//2, base_wl) - 1) / (base_wl - 1)))
-        
+		
 		# initialize aa magnitudes (overwritten by proteusAI if specified)
 		self.aa_magnitudes = nn.Parameter(torch.ones(d_model//2, num_aas), requires_grad=learnable_aa)
 
-        # additional layers
-		self.norm = CrossFeatureNorm(d_model) # normalize each feature across the sequence independantly, s.t. mean is zero and std is 1, then scale by 1/sqrt(dmodel) so whole wf is normed
+		# additional layers
 		self.dropout = dropout # not implemented for learnable rn bc of register pressure, might take the hit and add it though since just for pre-training
+
+		# norm, only want to center data and make var 1, no learning or affine transformation
+		self.norm = StaticLayerNorm(d_model)
 
 	def forward(self, coords_alpha, coords_beta, aa_labels, key_padding_mask=None):
 
@@ -47,5 +52,8 @@ class WaveFunctionEmbedding(nn.Module):
 		wf = self.norm(wf)
 
 		return wf
+
+	def get_CaCb_coords(self, coords, chain_idxs=None):
+		return get_coords(coords, chain_idxs)
 
 # ----------------------------------------------------------------------------------------------------------------------
