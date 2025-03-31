@@ -8,13 +8,13 @@ import numpy as np
 
 class TrainingRunLosses():
 
-	def __init__(self, train_type, d_model, d_latent, num_aa, label_smoothing):
+	def __init__(self, train_type, d_model, d_latent, num_aa, label_smoothing, cel_scaling_factor=1.0):
 		loss_type = ExtractionLosses if train_type=="extraction" else DiffusionLosses
 		self.train = loss_type()
 		self.val = loss_type()
 		self.test = loss_type()
 		self.tmp = loss_type()
-		self.loss_function = ExtractionLossFunction(d_model, d_latent, num_aa, label_smoothing) if train_type=="extraction" else DiffusionLossFunction(d_latent)
+		self.loss_function = ExtractionLossFunction(d_model, d_latent, num_aa, label_smoothing, cel_scaling_factor) if train_type=="extraction" else DiffusionLossFunction(d_latent)
 
 	def clear_tmp_losses(self):
 		self.tmp.clear_losses()
@@ -136,14 +136,15 @@ class DiffusionLosses():
 class ExtractionLossFunction(nn.Module):
 	'''manually implementing the losses instead of torch built ins for more control, 
 	since will want to also include histogram of seq sim and the like for each seq. functionality not included rn, but will add later
-	all losses are scaled per token, so take the average across the dimensions
+	all losses are scaled per token, so take the average across the feature dimensions
 	'''
-	def __init__(self, d_model, d_latent, num_aa, label_smoothing):
+	def __init__(self, d_model, d_latent, num_aa, label_smoothing, cel_scaling_factor=1.0):
 		super(ExtractionLossFunction, self).__init__()
 		self.d_model = d_model
 		self.d_latent = d_latent
 		self.num_aa = num_aa
-		self.cel_raw = CrossEntropyLoss(reduction="none", ignore_index=-1, label_smoothing=label_smoothing) #no reduction so i can tune manually
+		self.cel_raw = CrossEntropyLoss(reduction="sum", ignore_index=-1, label_smoothing=label_smoothing)
+		self.cel_scaling_factor = cel_scaling_factor
 
 
 	def kl_div(self, prior_mean_pred, prior_log_var_pred, mask):
@@ -162,15 +163,15 @@ class ExtractionLossFunction(nn.Module):
 
 		cel = self.cel_raw(seq_pred.view(-1, self.num_aa), seq_true.view(-1)) # Z*N
 		
-		return cel.sum()
+		return cel
 
-	def full_loss(self, kl_div, reconstruction, cel):
-		return kl_div + reconstruction + cel # possibly add scaling factors. also considering infoVAE, depending on if regular elbo works
+	def full_loss(self, kl_div, reconstruction, cel):# cel is typically larger than mse and kldiv, so scale it down so vae focuses on wf reconstruction more
+		return kl_div + reconstruction + (cel * self.cel_scaling_factor)
 
 	def compute_matches(self, seq_pred, seq_true):
 		'''greedy selection, computed seq sim here for simplicity, will do it with other losses later '''
 		
-		prediction_flat = seq_pred.argmax(dim=2).view(-1) # batch*N
+		prediction_flat = seq_pred.softmax(dim=2).argmax(dim=2).view(-1) # batch*N
 		true_flat = seq_true.view(-1) # batch x N --> batch*N,
 		valid_mask = true_flat != -1 # batch*N, 
 		matches = ((prediction_flat == true_flat) & (valid_mask)).sum() # 1, 
@@ -184,7 +185,6 @@ class ExtractionLossFunction(nn.Module):
 		mask = seq_true == -1
 		kl_div = self.kl_div(prior_mean_pred, prior_log_var_pred, mask)
 		reconstruction = self.reconstruction(reconstruct_mean_pred, reconstruct_mean_true, mask)
-		seq_pred = seq_pred.softmax(dim=2)
 		cel = self.cel(seq_pred, seq_true)
 		full_loss = self.full_loss(kl_div, reconstruction, cel)
 		matches = self.compute_matches(seq_pred, seq_true)

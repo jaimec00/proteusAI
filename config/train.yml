@@ -197,6 +197,7 @@ training_parameters:
 
   loss:
     accumulation_steps: 8  # grad accumulation; how many batches to process before learning step
+    cel_scaling_factor: 0.01 # make the cel smaller for VAE so it doesnt overwhelm the loss, want it to primarily focus on WF reconstruction and not "cheat" and have encoder only encode seq info
     grad_clip_norm: 1.0 # max L2 norm of gradients for gradient clipping. if set to 0, no gradient clipping is applied (not recommended if loss_type is sum)
   
   lr:
@@ -228,7 +229,7 @@ data:
 
 # Output
 output:
-  out_path: "/scratch/hjc2538/projects/proteusAI/models/vae_run1"  # path to store output, such as plots and weights file. for uncw hpc
+  out_path: "/scratch/hjc2538/projects/proteusAI/models/vae_run2_1pct_cel"  # path to store output, such as plots and weights file. for uncw hpc
   loss_plot: "loss_vs_epoch.png"  # path to save plot of loss vs epochs after training
   seq_plot: "seq_sim_vs_epoch.png"  # path to save plot of sequence similarity vs epochs after training
   test_plot: "test_seq_sims.png"  # path to save plot of sequence similarity vs epochs after training, not implemented yet

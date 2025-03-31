@@ -334,7 +334,7 @@ class TrainingRun():
 		'''
 
 		self.output.log.info("loading loss function...") 
-		self.losses = TrainingRunLosses(self.training_parameters.train_type, self.hyper_parameters.d_model, self.hyper_parameters.d_latent, self.hyper_parameters.num_aa, self.training_parameters.regularization.label_smoothing)
+		self.losses = TrainingRunLosses(self.training_parameters.train_type, self.hyper_parameters.d_model, self.hyper_parameters.d_latent, self.hyper_parameters.num_aa, self.training_parameters.regularization.label_smoothing, self.training_parameters.loss.cel_scaling_factor)
 
 	def model_checkpoint(self, epoch_idx):
 		if (epoch_idx+1) % self.output.model_checkpoints == 0: # model checkpointing
@@ -343,10 +343,10 @@ class TrainingRun():
 	def training_converged(self, epoch_idx):
 
 		if self.training_parameters.train_type == "extraction":
-			criteria = self.losses.val.matches
-			choose_best = max # choose best
-			best = -float("inf")
-			converged = lambda best, thresh: best < thresh
+			criteria = self.losses.val.all_losses
+			choose_best = min # choose best
+			best = float("inf")
+			converged = lambda best, thresh: best > thresh
 		elif self.training_parameters.train_type == "diffusion":
 			criteria = self.losses.val.squared_errors
 			choose_best = min # choose best

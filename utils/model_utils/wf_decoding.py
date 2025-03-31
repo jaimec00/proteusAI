@@ -22,10 +22,10 @@ class WaveFunctionDecoding(nn.Module):
 		super(WaveFunctionDecoding, self).__init__()
 		
 		self.dropout = nn.Dropout(dropout)
-		self.mlp_pre = MLP(d_in=d_model, d_out=d_model, d_hidden=d_hidden_pre, hidden_layers=hidden_layers_pre) if mlp_pre else None
-		self.norm_pre = nn.LayerNorm(d_model) if norm_pre else None
-		self.mlp_post = MLP(d_in=d_model, d_out=d_model, d_hidden=d_hidden_post, hidden_layers=hidden_layers_post) if mlp_post else None
-		self.norm_post = nn.LayerNorm(d_model) if norm_post else None
+		self.mlp_pre = MLP(d_in=d_latent, d_out=d_latent, d_hidden=d_hidden_pre, hidden_layers=hidden_layers_pre) if mlp_pre else None
+		self.norm_pre = nn.LayerNorm(d_latent) if norm_pre else None
+		self.mlp_post = MLP(d_in=d_latent, d_out=d_latent, d_hidden=d_hidden_post, hidden_layers=hidden_layers_post) if mlp_post else None
+		self.norm_post = nn.LayerNorm(d_latent) if norm_post else None
 
 		self.encoders = nn.ModuleList([ Encoder(	d_model=d_latent, d_hidden=d_hidden_attn, hidden_layers=hidden_layers_attn, 
 													heads=heads, min_spread=min_spread, max_spread=max_spread, base_spread=base_spreads, 
