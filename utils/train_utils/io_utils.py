@@ -224,6 +224,7 @@ class Output():
 				use_chain_mask: {training_parameters.regularization.use_chain_mask}
 			loss:
 				accumulation_steps: {training_parameters.loss.accumulation_steps} 
+				cel_scaling_factor: {training_parameters.loss.cel_scaling_factor}
 				grad_clip_norm: {training_parameters.loss.grad_clip_norm}
 			lr:
 				lr_step: {training_parameters.lr.lr_step}

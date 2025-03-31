@@ -338,7 +338,7 @@ class TrainingRun():
 
 	def model_checkpoint(self, epoch_idx):
 		if (epoch_idx+1) % self.output.model_checkpoints == 0: # model checkpointing
-			self.output.save_model(self.model, appended_str=f"e{epoch_idx}_s{round(self.losses.val.get_last_match().item(),2)}")
+			self.output.save_model(self.model, appended_str=f"e{epoch_idx}_s{round(self.losses.val.get_last_match(),2)}")
 
 	def training_converged(self, epoch_idx):
 
