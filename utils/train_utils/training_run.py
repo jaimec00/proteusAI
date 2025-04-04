@@ -8,7 +8,6 @@ description:	utility classes for training proteusAI
 
 import torch
 import torch.optim.lr_scheduler as lr_scheduler
-from torch.nn import CrossEntropyLoss, MSELoss
 from tqdm import tqdm
 
 from proteusAI import proteusAI
@@ -26,16 +25,15 @@ class TrainingRun():
 	also orchestrates the setup of training, training itself, validation, testing, outputs, etc.
 
 	Attributes:
-		hyper_parameters (Box): store model hyper_parameters
-		training_parameters (Box): stores training parameters
-		data (DataHolder): object to store data (contains object os Data type, inherets from Dataset), splits into train, 
-							val, and test depending on arguments, also capable of loading the Data into DataLoader for 
-							easy integration
-		output (Output): holds information about where to write output to, also contains the logging object. comes with
-						methods to print logs, plot training, and save model parameters
-		losses (TrainingRunLosses):
-		gpu (torch.device): for convenience in moving tensors to GPU
-		cpu (torch.device): for loading Data before moving to GPU
+		hyper_parameters (Box): 	store model hyper_parameters
+		training_parameters (Box): 	stores training parameters
+		data (DataHolder): 			object to store data (contains object of Data type), splits into train, 
+									val, and test depending on arguments, also capable of loading the Data
+		output (Output): 			holds information about where to write output to, also contains the logging object. comes with
+									methods to print logs, plot training, and save model parameters
+		losses (TrainingRunLosses):	stores losses over the training run
+		gpu (torch.device): 		for convenience in moving tensors to GPU
+		cpu (torch.device): 		for loading Data before moving to GPU
 
 	'''
 
@@ -51,11 +49,16 @@ class TrainingRun():
 								args.training_parameters.regularization.use_chain_mask, args.data.max_resolution
 							)
 		
+		self.losses = TrainingRunLosses(	args.training_parameters.train_type, 
+											args.hyper_parameters.d_model, args.hyper_parameters.d_latent, args.hyper_parameters.num_aa, 
+											args.training_parameters.regularization.label_smoothing, args.training_parameters.loss.cel_scaling_factor,
+											args.training_parameters.loss.beta
+										)
+
 		self.output = Output(args.output.out_path, args.output.loss_plot, args.output.seq_plot, args.output.test_plot, args.output.weights_path, args.output.model_checkpoints)
 
 		self.gpu = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 		self.cpu = torch.device("cpu")
-
 		self.debug = args.debug
 
 	def setup_training(self):
@@ -73,9 +76,7 @@ class TrainingRun():
 		self.setup_model()
 		self.setup_optim()
 		self.setup_scheduler()
-		self.setup_loss_function()
-
-		self.output.log_hyperparameters(self.training_parameters, self.hyper_parameters, self.data)
+		self.output.log_trainingrun(self.training_parameters, self.hyper_parameters, self.data)
 
 	def setup_model(self):
 		'''
@@ -112,10 +113,8 @@ class TrainingRun():
 								encoding_norm_pre=self.hyper_parameters.encoding.pre_process.use_norm,
 
 								# wf post_process
-								encoding_mlp_post=self.hyper_parameters.encoding.post_process.use_mlp,
 								encoding_d_hidden_post=self.hyper_parameters.encoding.post_process.d_hidden,
 								encoding_hidden_layers_post=self.hyper_parameters.encoding.post_process.hidden_layers,
-								encoding_norm_post=self.hyper_parameters.encoding.post_process.use_norm,
 
 								# encoder layers
 								encoding_encoder_layers=self.hyper_parameters.encoding.encoders.layers,
@@ -138,13 +137,9 @@ class TrainingRun():
 								diffusion_beta_schedule_type=self.hyper_parameters.diffusion.scheduler.beta_schedule_type, 
 								diffusion_t_max=self.hyper_parameters.diffusion.scheduler.t_max,
 
-								# timestep params
-								diffusion_min_wl=self.hyper_parameters.diffusion.timestep.min_wl,
-								diffusion_max_wl=self.hyper_parameters.diffusion.timestep.max_wl,
-								diffusion_mlp_timestep=self.hyper_parameters.diffusion.timestep.use_mlp,
+								# timestep params for FiLM
 								diffusion_d_hidden_timestep=self.hyper_parameters.diffusion.timestep.d_hidden,
 								diffusion_hidden_layers_timestep=self.hyper_parameters.diffusion.timestep.hidden_layers, 
-								diffusion_norm_timestep=self.hyper_parameters.diffusion.timestep.use_norm,
 
 								# wf preprocessing
 								diffusion_mlp_pre=self.hyper_parameters.diffusion.pre_process.use_mlp, 
@@ -160,6 +155,7 @@ class TrainingRun():
 
 								# encoder layers
 								diffusion_encoder_layers=self.hyper_parameters.diffusion.encoders.layers,
+								diffusion_decoder_layers=self.hyper_parameters.diffusion.encoders.layers,
 								diffusion_heads=self.hyper_parameters.diffusion.encoders.heads,
 								diffusion_learnable_spreads=self.hyper_parameters.diffusion.encoders.learnable_spreads,
 								diffusion_min_spread=self.hyper_parameters.diffusion.encoders.min_spread,
@@ -181,10 +177,8 @@ class TrainingRun():
 								decoding_norm_pre=self.hyper_parameters.decoding.pre_process.use_norm,
 
 								# wf post_process
-								decoding_mlp_post=self.hyper_parameters.decoding.post_process.use_mlp,
 								decoding_d_hidden_post=self.hyper_parameters.decoding.post_process.d_hidden,
 								decoding_hidden_layers_post=self.hyper_parameters.decoding.post_process.hidden_layers,
-								decoding_norm_post=self.hyper_parameters.decoding.post_process.use_norm,
 
 								# encoder layers
 								decoding_encoder_layers=self.hyper_parameters.decoding.encoders.layers,
@@ -321,20 +315,6 @@ class TrainingRun():
 			return scale * min((step+1)**(-0.5), (step+1)*(self.training_parameters.lr.warmup_steps**(-1.5)))
 		
 		self.scheduler = lr_scheduler.LambdaLR(self.optim, attn_lr)
-
-	def setup_loss_function(self):
-		'''
-		initializes the loss function
-
-		Args:
-			None
-
-		Returns: 
-			None
-		'''
-
-		self.output.log.info("loading loss function...") 
-		self.losses = TrainingRunLosses(self.training_parameters.train_type, self.hyper_parameters.d_model, self.hyper_parameters.d_latent, self.hyper_parameters.num_aa, self.training_parameters.regularization.label_smoothing, self.training_parameters.loss.cel_scaling_factor)
 
 	def model_checkpoint(self, epoch_idx):
 		if (epoch_idx+1) % self.output.model_checkpoints == 0: # model checkpointing

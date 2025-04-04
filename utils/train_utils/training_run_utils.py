@@ -179,9 +179,12 @@ class Batch():
 		wf = self.epoch_parent.training_run_parent.model(self.coords_alpha, coords_beta=self.coords_beta, aas=self.aas, key_padding_mask=self.key_padding_mask, embedding=True)
 
 		# make into latent representation
+		# predict mean and log var
 		wf_encoded_mean, wf_encoded_log_var = self.epoch_parent.training_run_parent.model(self.coords_alpha, wf=wf, key_padding_mask=self.key_padding_mask, encoding=True)
-		wf_encoded = wf_encoded_mean + torch.exp(wf_encoded_log_var)*torch.randn_like(wf_encoded_mean)
 
+		# sample from the latent space given the mean and var
+		wf_encoded = self.epoch_parent.training_run_parent.model.wf_encoding.sample(wf_encoded_mean, wf_encoded_log_var)
+		
 		# decode from latent space to wf space, only computes mean to make reconstruction loss a simple squared error
 		wf_decoded = self.epoch_parent.training_run_parent.model(self.coords_alpha, wf=wf_encoded, key_padding_mask=self.key_padding_mask, decoding=True)
 
@@ -199,6 +202,10 @@ class Batch():
 		# encode the wf in latent space
 		wf_encoded = self.epoch_parent.training_run_parent.model.wf_encoding.encode(wf, self.coords_alpha, key_padding_mask=self.key_padding_mask)
 
+		# now get clean wf with no aa info
+		wf_base = self.epoch_parent.training_run_parent.model(self.coords_alpha, coords_beta=self.coords_beta, aas=self.aas, key_padding_mask=self.key_padding_mask, embedding=True, no_aa=True)
+		wf_base_encoded = self.epoch_parent.training_run_parent.model.wf_encoding.encode(wf_base, self.coords_alpha, key_padding_mask=self.key_padding_mask)
+
 		# get timesteps from uniform distribution
 		timesteps = self.epoch_parent.training_run_parent.model.wf_diffusion.get_random_timesteps(wf_encoded.size(0), wf_encoded.device)
 
@@ -206,7 +213,7 @@ class Batch():
 		noised_wf, noise = self.epoch_parent.training_run_parent.model.wf_diffusion.noise(wf_encoded, timesteps)
 
 		# predict noise
-		noise_pred = self.epoch_parent.training_run_parent.model(self.coords_alpha, wf=noised_wf, key_padding_mask=self.key_padding_mask, diffusion=True, t=timesteps)
+		noise_pred = self.epoch_parent.training_run_parent.model(self.coords_alpha, wf=noised_wf, context=wf_base_encoded, key_padding_mask=self.key_padding_mask, diffusion=True, t=timesteps)
 
 		# convert to output object
 		return DiffusionOutput(self, noise_pred, noise)

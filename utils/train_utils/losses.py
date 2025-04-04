@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from torch.nn import KLDivLoss, CrossEntropyLoss, MSELoss
+from torch.nn import CrossEntropyLoss, MSELoss
 import numpy as np
 
 # ----------------------------------------------------------------------------------------------------------------------
@@ -8,13 +8,13 @@ import numpy as np
 
 class TrainingRunLosses():
 
-	def __init__(self, train_type, d_model, d_latent, num_aa, label_smoothing, cel_scaling_factor=1.0):
+	def __init__(self, train_type, d_model, d_latent, num_aa, label_smoothing, cel_scaling_factor=1.0, beta=1.0):
 		loss_type = ExtractionLosses if train_type=="extraction" else DiffusionLosses
 		self.train = loss_type()
 		self.val = loss_type()
 		self.test = loss_type()
 		self.tmp = loss_type()
-		self.loss_function = ExtractionLossFunction(d_model, d_latent, num_aa, label_smoothing, cel_scaling_factor) if train_type=="extraction" else DiffusionLossFunction(d_latent)
+		self.loss_function = ExtractionLossFunction(d_model, d_latent, num_aa, label_smoothing, cel_scaling_factor, beta) if train_type=="extraction" else DiffusionLossFunction(d_latent)
 
 	def clear_tmp_losses(self):
 		self.tmp.clear_losses()
@@ -123,6 +123,9 @@ class DiffusionLosses():
 	def get_last_loss(self):
 		return self.squared_errors[-1]
 
+	def get_last_match(self):
+		return self.get_last_loss()
+
 	def to_numpy(self):
 		'''utility when plotting losses w/ matplotlib'''
 		self.squared_errors = [loss.detach().to("cpu").numpy() if isinstance(loss, torch.Tensor) else np.array([loss]) for loss in self.squared_errors]
@@ -138,22 +141,23 @@ class ExtractionLossFunction(nn.Module):
 	since will want to also include histogram of seq sim and the like for each seq. functionality not included rn, but will add later
 	all losses are scaled per token, so take the average across the feature dimensions
 	'''
-	def __init__(self, d_model, d_latent, num_aa, label_smoothing, cel_scaling_factor=1.0):
+	def __init__(self, d_model, d_latent, num_aa, label_smoothing, cel_scaling_factor=1.0, beta=1.0):
 		super(ExtractionLossFunction, self).__init__()
 		self.d_model = d_model
 		self.d_latent = d_latent
 		self.num_aa = num_aa
 		self.cel_raw = CrossEntropyLoss(reduction="sum", ignore_index=-1, label_smoothing=label_smoothing)
 		self.cel_scaling_factor = cel_scaling_factor
+		self.beta = beta
 
 
 	def kl_div(self, prior_mean_pred, prior_log_var_pred, mask):
 		kl_div = -0.5*torch.sum(1 + prior_log_var_pred - prior_mean_pred.pow(2) - torch.exp(prior_log_var_pred), dim=2) # Z x N
 		
-		return (kl_div*(~mask)).sum() / self.d_latent # will change this later, mask invalid and sum
+		return (kl_div*(~mask)).sum() 
 
 	def reconstruction(self, reconstruct_mean_pred, reconstruct_mean_true, mask):
-		return ((reconstruct_mean_true - reconstruct_mean_pred).pow(2) * (~mask).unsqueeze(2)).sum() / self.d_model
+		return ((reconstruct_mean_true - reconstruct_mean_pred).pow(2) * (~mask).unsqueeze(2)).sum()
 
 	def cel(self, seq_pred, seq_true):
 		'''
@@ -166,7 +170,7 @@ class ExtractionLossFunction(nn.Module):
 		return cel
 
 	def full_loss(self, kl_div, reconstruction, cel):# cel is typically larger than mse and kldiv, so scale it down so vae focuses on wf reconstruction more
-		return kl_div + reconstruction + (cel * self.cel_scaling_factor)
+		return (self.beta * kl_div) + reconstruction + (cel * self.cel_scaling_factor)
 
 	def compute_matches(self, seq_pred, seq_true):
 		'''greedy selection, computed seq sim here for simplicity, will do it with other losses later '''
@@ -197,7 +201,7 @@ class DiffusionLossFunction(nn.Module):
 		self.d_latent = d_latent # to scale the losses on a per feature basis
 	def forward(self, latent_pred, latent_true):
 		'''simple sum of squared errors'''
-		loss = ((latent_true - latent_pred).pow(2)).sum() / self.d_latent
+		loss = ((latent_true - latent_pred).pow(2)).sum()
 		return [loss]
 
 # ----------------------------------------------------------------------------------------------------------------------

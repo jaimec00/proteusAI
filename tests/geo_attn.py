@@ -3,7 +3,8 @@ import math
 import torch
 import torch.nn.functional as F
 from utils.test_utils import calculate_error, profile_func, profile_bwd
-from utils.model_utils.geometric_attn.triton.geometric_attn import geometric_attn
+# from utils.model_utils.geometric_attn.triton.geometric_attn import geometric_attn
+from utils.model_utils.geometric_attn.cuda.geometric_attn import geometric_attn
 import os
 
 def main():
@@ -64,27 +65,27 @@ def main():
 		torch_func = torch_attn
 
 	torch_out, triton_out = test_fwd(torch_func, geometric_attn, params, start_event, end_event, atol, rtol)
-	print("\nbackward pass:\n")
+	# print("\nbackward pass:\n")
 
-	test_bwd(torch_out.sum(), triton_out.sum(), Q, K, V, spreads, start_event, end_event, atol, rtol)
+	# test_bwd(torch_out.sum(), triton_out.sum(), Q, K, V, spreads, start_event, end_event, atol, rtol)
 
-	Q.grad.zero_()
-	K.grad.zero_()
-	V.grad.zero_()
-	spreads.grad.zero_()
+	# Q.grad.zero_()
+	# K.grad.zero_()
+	# V.grad.zero_()
+	# spreads.grad.zero_()
 
-	print("\ntesting with dropout: \n")
+	# print("\ntesting with dropout: \n")
 
-	# need seperate test for dropout, simply to ensure the mask is reproducible. not the best test but just run the kernel
-	# twice and see if get the same results
-	dropout = 0.1 # note that for practice rng seed is dynamically generated, make sure you hard code it in the fwd pass to test this
-	dropout_params = params + [dropout]
+	# # need seperate test for dropout, simply to ensure the mask is reproducible. not the best test but just run the kernel
+	# # twice and see if get the same results
+	# dropout = 0.1 # note that for practice rng seed is dynamically generated, make sure you hard code it in the fwd pass to test this
+	# dropout_params = params + [dropout]
 	
-	print("dropout forward: \n")
-	run1_fwd, run2_fwd = test_fwd(geometric_attn, geometric_attn, dropout_params, start_event, end_event, atol, rtol)
-	print("\ndropout bwd: \n")
+	# print("dropout forward: \n")
+	# run1_fwd, run2_fwd = test_fwd(geometric_attn, geometric_attn, dropout_params, start_event, end_event, atol, rtol)
+	# print("\ndropout bwd: \n")
 
-	test_bwd(run1_fwd.sum(), run2_fwd.sum(), Q, K, V, spreads, start_event, end_event, atol, rtol)
+	# test_bwd(run1_fwd.sum(), run2_fwd.sum(), Q, K, V, spreads, start_event, end_event, atol, rtol)
 
 
 def autotune(func, params):

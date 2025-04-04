@@ -40,14 +40,18 @@ class WaveFunctionEmbedding(nn.Module):
 		# norm, only want to center data and make var 1, no learning or affine transformation
 		self.norm = StaticLayerNorm(d_model)
 
-	def forward(self, coords_alpha, coords_beta, aa_labels, key_padding_mask=None):
+	def forward(self, coords_alpha, coords_beta, aa_labels, key_padding_mask=None, no_aa=False):
 
 		dropout = self.dropout if self.training else 0.0
 
-		if self.aa_magnitudes.requires_grad and torch.is_grad_enabled(): # learnable AA is much slower (4.5x), avoid it if not tracking grads of AAs
-			wf = wf_embedding_learnAA(coords_alpha, coords_beta, aa_labels, self.aa_magnitudes, self.wavenumbers, dropout_p=dropout, mask=key_padding_mask)
+		if no_aa: # compute the anisotropic wavefunction, but using the mean magnitude for each wavenumber so that the aa info is ambiguous. plan to use this as kv in cross attn in diffusion
+			aa_magnitudes = self.aa_magnitudes.mean(dim=1, keepdim=True).expand(self.aa_magnitudes.shape)
+			wf = wf_embedding_staticAA(coords_alpha, coords_beta, aa_labels, aa_magnitudes, self.wavenumbers, dropout_p=dropout, mask=key_padding_mask)
 		else:
-			wf = wf_embedding_staticAA(coords_alpha, coords_beta, aa_labels, self.aa_magnitudes, self.wavenumbers, dropout_p=dropout, mask=key_padding_mask)
+			if self.aa_magnitudes.requires_grad and torch.is_grad_enabled(): # learnable AA is much slower (4.5x), avoid it if not tracking grads of AAs
+				wf = wf_embedding_learnAA(coords_alpha, coords_beta, aa_labels, self.aa_magnitudes, self.wavenumbers, dropout_p=dropout, mask=key_padding_mask)
+			else:
+				wf = wf_embedding_staticAA(coords_alpha, coords_beta, aa_labels, self.aa_magnitudes, self.wavenumbers, dropout_p=dropout, mask=key_padding_mask)
 
 		wf = self.norm(wf)
 

@@ -55,7 +55,7 @@ class WaveFunctionExtraction(nn.Module):
 
 		# geometric attention encoders
 		for encoder in self.encoders:
-			wf = encoder(wf, coords_alpha, key_padding_mask)
+			wf = encoder(wf, coords_alpha, key_padding_mask=key_padding_mask)
 
 		if self.mlp_post is not None:
 			wf = wf + self.dropout(self.mlp_post(wf))

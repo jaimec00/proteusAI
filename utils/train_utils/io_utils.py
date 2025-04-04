@@ -49,7 +49,7 @@ class Output():
 
 		return logger
 
-	def log_hyperparameters(self, training_parameters, hyper_parameters, data):
+	def log_trainingrun(self, training_parameters, hyper_parameters, data):
 		'''basically just prints the config file w/ a little more info'''
 
 		log = 	textwrap.dedent(f'''
@@ -79,10 +79,8 @@ class Output():
 					hidden_layers: {hyper_parameters.encoding.pre_process.hidden_layers}
 					use_norm: {hyper_parameters.encoding.pre_process.use_norm}
 				wf post_process:
-					use_mlp: {hyper_parameters.encoding.post_process.use_mlp}
 					d_hidden: {hyper_parameters.encoding.post_process.d_hidden}
 					hidden_layers: {hyper_parameters.encoding.post_process.hidden_layers}
-					use_norm: {hyper_parameters.encoding.post_process.use_norm}
 				encoders:
 					encoder_layers: {hyper_parameters.encoding.encoders.layers}
 					heads: {hyper_parameters.encoding.encoders.heads}
@@ -103,12 +101,8 @@ class Output():
 					beta_schedule_type: {hyper_parameters.diffusion.scheduler.beta_schedule_type}
 					t_max: {hyper_parameters.diffusion.scheduler.t_max}
 				timestep:
-					min_wl: {hyper_parameters.diffusion.timestep.min_wl}
-					max_wl: {hyper_parameters.diffusion.timestep.max_wl}
-					use_mlp: {hyper_parameters.diffusion.timestep.use_mlp}
 					d_hidden: {hyper_parameters.diffusion.timestep.d_hidden}
 					hidden_layers: {hyper_parameters.diffusion.timestep.hidden_layers} 
-					use_norm: {hyper_parameters.diffusion.timestep.use_norm}
 				wf preprocessing:
 					use_mlp: {hyper_parameters.diffusion.pre_process.use_mlp} 
 					d_hidden: {hyper_parameters.diffusion.pre_process.d_hidden}
@@ -140,10 +134,8 @@ class Output():
 					hidden_layers: {hyper_parameters.decoding.pre_process.hidden_layers}
 					use_norm: {hyper_parameters.decoding.pre_process.use_norm}
 				wf post_process:
-					use_mlp: {hyper_parameters.decoding.post_process.use_mlp}
 					d_hidden: {hyper_parameters.decoding.post_process.d_hidden}
 					hidden_layers: {hyper_parameters.decoding.post_process.hidden_layers}
-					use_norm: {hyper_parameters.decoding.post_process.use_norm}
 				encoders:
 					encoder_layers: {hyper_parameters.decoding.encoders.layers}
 					heads: {hyper_parameters.decoding.encoders.heads}
@@ -255,22 +247,22 @@ class Output():
 			losses.train.add_losses(squared_error)
 		elif train_type == "extraction":
 			kl_div, reconstruction, cel, loss, seq_sim = losses.tmp.get_avg()
-			self.log.info(f"train kl divergence per token per feature: {str(kl_div)}")
-			self.log.info(f"train squared error per token per feature: {str(reconstruction)}")
+			self.log.info(f"train kl divergence per token: {str(kl_div)}")
+			self.log.info(f"train squared error per token: {str(reconstruction)}")
 			self.log.info(f"train cross entropy loss per token: {str(cel)}")
-			self.log.info(f"train full loss per token per feature: {str(loss)}")
+			self.log.info(f"train full loss per token: {str(loss)}")
 			self.log.info(f"train sequence similarity per token: {str(seq_sim)}\n")		
 			losses.train.add_losses(kl_div, reconstruction, cel, loss, seq_sim)
 
 	def log_val_losses(self, losses, train_type):
 		if train_type == "diffusion":
 			squared_error = losses.tmp.get_avg()
-			self.log.info(f"validation squared error per token per feature: {str(squared_error)}")
+			self.log.info(f"validation squared error per token: {str(squared_error)}")
 			losses.val.add_losses(squared_error)
 		elif train_type == "extraction":
 			kl_div, reconstruction, cel, loss, seq_sim = losses.tmp.get_avg()
-			self.log.info(f"validation kl divergence per token per feature: {str(kl_div)}")
-			self.log.info(f"validation squared error per token per feature: {str(reconstruction)}")
+			self.log.info(f"validation kl divergence per token: {str(kl_div)}")
+			self.log.info(f"validation squared error per token: {str(reconstruction)}")
 			self.log.info(f"validation cross entropy loss per token: {str(cel)}")
 			self.log.info(f"validation full loss per token: {str(loss)}")
 			self.log.info(f"validation sequence similarity per token: {str(seq_sim)}\n")
@@ -279,11 +271,11 @@ class Output():
 	def log_test_losses(self, losses, train_type):
 		if train_type == "diffusion":
 			seq_sim = losses.tmp.get_avg(is_inference=True)
-			self.log.info(f"test sequence similarity per token per feature: {str(seq_sim)}")
+			self.log.info(f"test sequence similarity per token: {str(seq_sim)}")
 		elif train_type == "extraction":
 			kl_div, reconstruction, cel, loss, seq_sim = losses.tmp.get_avg()
-			self.log.info(f"test kl divergence per token per feature: {str(kl_div)}")
-			self.log.info(f"test squared error per token per feature: {str(reconstruction)}")
+			self.log.info(f"test kl divergence per token: {str(kl_div)}")
+			self.log.info(f"test squared error per token: {str(reconstruction)}")
 			self.log.info(f"test cross entropy loss per token: {str(cel)}")
 			self.log.info(f"test full loss per token: {str(loss)}")
 			self.log.info(f"test sequence similarity per token: {str(seq_sim)}\n")

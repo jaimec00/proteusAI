@@ -75,6 +75,19 @@ class StaticLayerNorm(nn.Module):
 		std = std.masked_fill(std==0, 1)
 		return centered / std
 
+class FiLM(nn.Module):
+	def __init__(self, d_model=512, d_hidden=1024, hidden_layers=0, dropout=0.1):
+		super(FiLM, self).__init__()
+
+		# single mlp that outputs gamma and beta, manually split in fwd
+		self.gamma_beta = MLP(d_in=d_model, d_out=2*d_model, d_hidden=d_hidden, hidden_layers=hidden_layers, dropout=dropout)
+
+	def forward(self, e_t, x): # assumes e_t is Z x 1 x d_model
+		gamma_beta = self.gamma_beta(e_t)
+		gamma, beta = torch.split(gamma_beta, dim=-1, split_size_or_sections=gamma_beta.shape[-1] // 2)
+		return gamma*x + beta
+
+
 # initializations for linear layers
 def init_orthogonal(m):
 	if isinstance(m, nn.Linear):

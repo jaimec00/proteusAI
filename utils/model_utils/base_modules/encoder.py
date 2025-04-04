@@ -26,14 +26,16 @@ class Encoder(nn.Module):
 		self.ffn_norm = nn.LayerNorm(d_model)
 		self.ffn_dropout = nn.Dropout(dropout)
 
-	def forward(self, x, coords, t=None, key_padding_mask=None): # use x bc applied to structure and seq
+	# optional kwarg to apply film w/ timestep embedding, defined in diffusion module, does not affect others
+	def forward(self, x, coords, key_padding_mask=None, context=None, t=None, film=lambda e_t, val: val):
 
-		x2 = self.attn(	x, x, x,
+		context = x if context is None else context # optionally do cross attention
+		x2 = self.attn(	x, context, context,
 						coords=coords,
 						key_padding_mask=key_padding_mask
 					)
 
-		x = self.attn_norm(x + self.attn_dropout(x2))
+		x = self.attn_norm(x + film(t, self.attn_dropout(x2)))
 
 		# Feed-forward network for wavefunction
 		x = self.ffn_norm(x + self.ffn_dropout(self.ffn(x)))
