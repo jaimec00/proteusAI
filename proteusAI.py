@@ -106,7 +106,7 @@ class proteusAI(nn.Module):
 
 		self.wf_extraction = WaveFunctionExtraction(	d_model=d_model, num_aas=num_aas, 
 														d_hidden_pre=extraction_d_hidden_pre, hidden_layers_pre=extraction_hidden_layers_pre,
-														mlp_post=extraction_mlp_post, d_hidden_post=extraction_d_hidden_post, hidden_layers_post=extraction_hidden_layers_post,
+														d_hidden_post=extraction_d_hidden_post, hidden_layers_post=extraction_hidden_layers_post,
 														encoder_layers=extraction_encoder_layers, heads=extraction_heads, 
 														min_spread=extraction_min_spread, min_rbf=extraction_min_rbf, max_rbf=extraction_max_rbf,
 														d_hidden_attn=extraction_d_hidden_attn, hidden_layers_attn=extraction_hidden_layers_attn,

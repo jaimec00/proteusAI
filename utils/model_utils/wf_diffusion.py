@@ -42,7 +42,7 @@ class WaveFunctionDiffusion(nn.Module):
 									])
 
 		self.out_norm = nn.LayerNorm(d_model)
-		self.noise_proj = nn.Linear(d_model)
+		self.noise_proj = nn.Linear(d_model, d_model)
 		init_xavier(self.noise_proj)
 
 	# wf is the noised wf, context is unnoised, but with no aa info, used as kv in cross attention, defaults to self-attention if context is none

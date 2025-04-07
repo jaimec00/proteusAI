@@ -180,7 +180,6 @@ class Output():
 			regularization:
 				dropout: {training_parameters.regularization.dropout}
 				wf_dropout: {training_parameters.regularization.wf_dropout}
-				attn_dropout: {training_parameters.regularization.attn_dropout}
 				label_smoothing: {training_parameters.regularization.label_smoothing}
 				noise_coords_std: {training_parameters.regularization.noise_coords_std}
 				use_chain_mask: {training_parameters.regularization.use_chain_mask}
@@ -210,7 +209,7 @@ class Output():
 		)
 
 	def log_epoch_losses(self, losses, train_type):
-		elif train_type == "extraction":
+		if train_type == "extraction":
 			cel, seq_sim = losses.tmp.get_avg()
 			self.log.info(f"train cross entropy loss per token: {str(cel)}")
 			self.log.info(f"train sequence similarity per token: {str(seq_sim)}\n")		
@@ -244,7 +243,7 @@ class Output():
 			losses.val.add_losses(squared_error)
 
 	def log_test_losses(self, losses, train_type):
-		elif train_type == "extraction":
+		if train_type == "extraction":
 			cel, seq_sim = losses.tmp.get_avg()
 			self.log.info(f"test cross entropy loss per token: {str(cel)}")
 			self.log.info(f"test sequence similarity per token: {str(seq_sim)}\n")

@@ -6,9 +6,9 @@ from utils.model_utils.base_modules.base_modules import MLP, adaLN
 class Encoder(nn.Module):
 
 	def __init__(self, 	d_model=512, d_hidden=2048, hidden_layers=0, 
-						heads=8, min_spread=3, max_spread=15, base_spread=15, num_spread=8, 
-						min_rbf=0.001, max_rbf=0.85, beta=2.0, learnable_spreads=True,
-						dropout=0.0, attn_dropout=0.0,
+						heads=8, min_spread=3, 
+						min_rbf=0.001, max_rbf=0.85,
+						dropout=0.0,
 						use_adaLN=False, d_in_t=512, d_hidden_t=2048, hidden_layers_t=512
 
 					):
@@ -16,9 +16,7 @@ class Encoder(nn.Module):
 
 		# Self-attention layers
 		self.attn = GeoAttention(	d_model=d_model, heads=heads, 
-									min_spread=min_spread, max_spread=max_spread, base_spread=base_spread, num_spread=num_spread, 
-									min_rbf=min_rbf, max_rbf=max_rbf, beta=beta, learnable_spreads=learnable_spreads, 
-									dropout=attn_dropout
+									min_spread=min_spread, min_rbf=min_rbf, max_rbf=max_rbf,
 								)
 
 		if use_adaLN:
@@ -83,7 +81,6 @@ class GeoAttention(nn.Module):
 						heads=8, 
 						min_spread=2.0,
 						min_rbf=0.01, max_rbf=0.99, 
-						dropout=0.1
 					):
 		super(GeoAttention, self).__init__()
 
@@ -93,10 +90,9 @@ class GeoAttention(nn.Module):
 		if self.d_model % self.heads != 0: raise ValueError(f"number of dimensions ({self.d_model}) must be divisible by number of attention heads ({self.heads})")
 		self.d_k = self.d_model // self.heads
 
-		self.dropout = dropout
-
 		self.spread_weights = nn.Parameter(torch.zeros(heads))
 		self.beta_weights = nn.Parameter(torch.zeros(heads))
+		self.min_spread = min_spread
 		self.min_rbf = min_rbf
 		self.max_rbf = max_rbf
 
@@ -118,7 +114,7 @@ class GeoAttention(nn.Module):
 	def get_spreads(self):
 		return self.min_spread + torch.exp(self.spread_weights)
 
-	def get_betas(self)
+	def get_betas(self):
 		return torch.exp(self.beta_weights)
 
 	def forward(self, q, k, v, coords, key_padding_mask=None):
@@ -136,8 +132,6 @@ class GeoAttention(nn.Module):
 		Q = torch.matmul(q.unsqueeze(1), self.q_proj.unsqueeze(0)) + self.q_bias.unsqueeze(0).unsqueeze(2) # batch x heads x N x d_k
 		K = torch.matmul(k.unsqueeze(1), self.k_proj.unsqueeze(0)) + self.k_bias.unsqueeze(0).unsqueeze(2) # batch x heads x N x d_k
 		V = torch.matmul(v.unsqueeze(1), self.v_proj.unsqueeze(0)) + self.v_bias.unsqueeze(0).unsqueeze(2) # batch x heads x N x d_k
-
-		dropout = self.dropout if self.training else 0.0
 
 		# perform attention
 		out = geometric_attn(Q, K, V, coords, self.get_spreads(), self.get_betas(), mask=key_padding_mask, min_rbf=self.min_rbf, max_rbf=self.max_rbf)  # batch x heads x N x d_k

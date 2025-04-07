@@ -15,6 +15,7 @@ import torch.nn as nn
 from utils.model_utils.wf_embedding.anisotropic.aa_scaling.learnable_aa.cuda.wf_embedding import wf_embedding as wf_embedding_learnAA
 from utils.model_utils.wf_embedding.anisotropic.aa_scaling.static_aa.cuda.wf_embedding import wf_embedding as wf_embedding_staticAA
 from utils.model_utils.base_modules.Cb_utils import get_coords
+from utils.model_utils.base_modules.base_modules import StaticLayerNorm
 
 # ----------------------------------------------------------------------------------------------------------------------
 

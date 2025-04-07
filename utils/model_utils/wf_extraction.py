@@ -31,6 +31,7 @@ class WaveFunctionExtraction(nn.Module):
 		self.mlp_pre = MLP(d_in=d_model, d_out=d_model, d_hidden=d_hidden_pre, hidden_layers=hidden_layers_pre)
 		self.norm_pre = nn.LayerNorm(d_model)
 		self.mlp_post = MLP(d_in=d_model, d_out=d_model, d_hidden=d_hidden_post, hidden_layers=hidden_layers_post)
+		self.norm_post = nn.LayerNorm(d_model)
 
 		self.encoders = nn.ModuleList([ 
 											Encoder(	d_model=d_model, d_hidden=d_hidden_attn, hidden_layers=hidden_layers_attn, 

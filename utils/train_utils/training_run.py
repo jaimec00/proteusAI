@@ -49,11 +49,7 @@ class TrainingRun():
 								args.training_parameters.regularization.use_chain_mask, args.data.max_resolution
 							)
 		
-		self.losses = TrainingRunLosses(	args.training_parameters.train_type, 
-											args.hyper_parameters.d_model, args.hyper_parameters.d_latent, args.hyper_parameters.num_aa, 
-											args.training_parameters.regularization.label_smoothing, args.training_parameters.loss.cel_scaling_factor,
-											args.training_parameters.loss.beta
-										)
+		self.losses = TrainingRunLosses(args.training_parameters.train_type, args.training_parameters.regularization.label_smoothing, args.training_parameters.loss.beta)
 
 		self.output = Output(	args.output.out_path,
 								cel_plot=args.output.cel_plot, seq_plot=args.output.seq_plot, 
@@ -179,7 +175,6 @@ class TrainingRun():
 								extraction_hidden_layers_pre=self.hyper_parameters.extraction.pre_process.hidden_layers,
 
 								# wf post_process
-								extraction_mlp_post=self.hyper_parameters.extraction.post_process.use_mlp,
 								extraction_d_hidden_post=self.hyper_parameters.extraction.post_process.d_hidden,
 								extraction_hidden_layers_post=self.hyper_parameters.extraction.post_process.hidden_layers,
 
@@ -295,20 +290,20 @@ class TrainingRun():
 
 	def model_checkpoint(self, epoch_idx):
 		if (epoch_idx+1) % self.output.model_checkpoints == 0: # model checkpointing
-			self.output.save_model(self.model, appended_str=f"e{epoch_idx}_s{round(self.losses.val.get_last_match(),2)}")
+			self.output.save_model(self.model, appended_str=f"e{epoch_idx}_s{round(self.losses.val.get_last_loss(),2)}")
 
 	def training_converged(self, epoch_idx):
 
 		if self.training_parameters.train_type == "extraction":
+			criteria = self.losses.val.cel
+		if self.training_parameters.train_type == "vae":
 			criteria = self.losses.val.all_losses
-			choose_best = min # choose best
-			best = float("inf")
-			converged = lambda best, thresh: best > thresh
 		elif self.training_parameters.train_type == "diffusion":
 			criteria = self.losses.val.squared_errors
-			choose_best = min # choose best
-			best = float("inf")
-			converged = lambda best, thresh: best > thresh
+
+		choose_best = min # choose best
+		best = float("inf")
+		converged = lambda best, thresh: best > thresh
 
 		# val losses are already in avg seq sim format per epoch
 		if self.training_parameters.early_stopping.tolerance+1 > len(criteria):

@@ -464,7 +464,7 @@ def _attn_bwd(
 
 		# compute gradient wrt rbfs. also direct communication between dRij and Sij
 		dRij = dSRij * 2 * beta / rbf_range
-		d_beta += dSRij * Rij_norm
+		d_beta += tl.sum(dSRij * Rij_norm).to(tl.float32)
 
 		# compute the gradient wrt the spread of this head
 		# 		d_rbfs/dspreads  = d/dspreads exp(-(d^2)/(2*sigma^2))
@@ -633,7 +633,6 @@ class _geometric_attn(torch.autograd.Function):
 							d_spreads, d_spreads.stride(0),
 							d_betas, d_betas.stride(0),
 							mask, mask.stride(0), mask.stride(1),
-							rng_seed,
 							batch, N, nheads, d_k, max(d_k, 16), ctx.softmax_scale,
 							ctx.min_rbf, ctx.max_rbf
 						 )

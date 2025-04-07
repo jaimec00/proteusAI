@@ -12,7 +12,7 @@ class TrainingRunLosses():
 		if train_type == "extraction":
 			loss_type = ExtractionLosses 
 			self.loss_function = ExtractionLossFunction(label_smoothing)
-		elif train_type=="vae" 
+		elif train_type=="vae":
 			loss_type = VAELosses
 			self.loss_function = VAELossFunction(beta) 
 		elif train_type == "diffusion":
@@ -55,7 +55,7 @@ class ExtractionLosses():
 		
 		return avg_cel, avg_seq_sim
 
-	def add_losses(self, kl_div, reconstruction, cel, full_loss, matches, valid=1):
+	def add_losses(self, cel, matches, valid=1):
 		self.cel.append(cel)
 		self.matches.append(matches)
 		self.valid_toks += valid
@@ -190,7 +190,7 @@ class ExtractionLossFunction(nn.Module):
 		seq_true: Z x N (labels, -1 not valid)
 		'''
 
-		cel = self.cel_raw(seq_pred.view(-1, self.num_aa), seq_true.view(-1)) # Z*N
+		cel = self.cel_raw(seq_pred.view(-1, seq_pred.size(-1)), seq_true.view(-1)) # Z*N
 		
 		return cel
 

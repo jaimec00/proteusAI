@@ -10,7 +10,7 @@ class ExtractionOutput():
 		a reconstruction loss
 		a cel loss
 	'''
-	def __init__(self, batch_parent, latent_mean_pred, latent_log_var_pred, wf_mean_pred, wf_mean_true, seq_pred):
+	def __init__(self, batch_parent, seq_pred):
 		
 		# batch parent
 		self.batch_parent = batch_parent 
