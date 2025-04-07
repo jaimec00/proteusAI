@@ -16,8 +16,8 @@ hyper_parameters:
   # ----------------------------------------------------------------------------
 
   # main stuff
-  d_model: 128
-  d_latent: 512
+  d_model: 256
+  d_latent: 128
   num_aa: 20
 
   # ----------------------------------------------------------------------------
@@ -26,9 +26,8 @@ hyper_parameters:
   embedding:
 
     min_wl: 3.5
-    max_wl: 7.5
-    base_wl: 10.0
-    learnable_aa: True
+    max_wl: 12.5
+    base_wl: 14.0
 
   # ----------------------------------------------------------------------------
 
@@ -36,27 +35,21 @@ hyper_parameters:
   encoding:
 
     pre_process:
-      use_mlp: True
       d_hidden: 512
       hidden_layers: 0
-      use_norm: True
 
     post_process:
       d_hidden: 1024
       hidden_layers: 1
 
     encoders:
-      layers: 4
+      layers: 3
       heads: 8
-      learnable_spreads: True
+      learnable_spreads: False
       min_spread: 2.0 
-      max_spread: 8.0
-      base_spreads: 1.0
-      num_spread: 64
-      min_rbf: 0.001
-      max_rbf: 0.850
-      beta: 2.0
-      d_hidden_attn: 1024
+      min_rbf: 0.00
+      max_rbf: 1.00
+      d_hidden_attn: 512
       hidden_layers_attn: 0
 
   # ----------------------------------------------------------------------------
@@ -65,39 +58,29 @@ hyper_parameters:
   diffusion:
 
     scheduler:
-      alpha_bar_min: 0.00 # what percent of signal is present in final timestep 
+      alpha_bar_min: 0.00 # snr ratio in final timestep 
                           # when using cosine scheduler
-      beta_schedule_type: "cosine"
-      t_max: 100
+      noise_schedule_type: "cosine" # only one implemented atm
+      t_max: 1000
 
     timestep:
-      d_hidden: 1024
+      d_in: 256
+      d_hidden: 512
       hidden_layers: 1 
-
-    pre_process:
-      use_mlp: True
-      d_hidden: 1024
-      hidden_layers: 0
-      use_norm: True
 
     post_process:
       use_mlp: True
-      d_hidden: 1024
-      hidden_layers: 0
-      use_norm: True
+      d_hidden: 512
+      hidden_layers: 1
 
     encoders:
       layers: 4
-      heads: 16
+      heads: 8
       learnable_spreads: True
-      min_spread: 2.0 # so that min distance corresponds to something slightly bigger than 3.8 (avg Ca-Ca distance)
-      max_spread: 8.0
-      base_spreads: 1.0
-      num_spread: 32
-      min_rbf: 0.001
-      max_rbf: 0.850
-      beta: 2.0
-      d_hidden_attn: 1024
+      min_spread: 2.0 
+      min_rbf: 0.00 # i think global attention w/ rbf bias might be beneficial for diffusion, lets see. also allows tokens to see themselves in aa ambiguous repre, possibly beneficial
+      max_rbf: 1.00
+      d_hidden_attn: 512
       hidden_layers_attn: 0
 
   # ----------------------------------------------------------------------------
@@ -107,7 +90,7 @@ hyper_parameters:
 
     pre_process:
       use_mlp: True
-      d_hidden: 1024
+      d_hidden: 512
       hidden_layers: 0
       use_norm: True
 
@@ -116,17 +99,13 @@ hyper_parameters:
       hidden_layers: 0
 
     encoders:
-      layers: 6 # increase capacity, maybe this allows encoder to map to more gauss latent space
-      heads: 16
-      learnable_spreads: True
+      layers: 4
+      heads: 8
+      learnable_spreads: False
       min_spread: 2.0 
-      max_spread: 8.0
-      base_spreads: 1.0
-      num_spread: 64
-      min_rbf: 0.001
-      max_rbf: 0.850
-      beta: 2.0
-      d_hidden_attn: 1024
+      min_rbf: 0.00
+      max_rbf: 1.00
+      d_hidden_attn: 512
       hidden_layers_attn: 0
 
   # ----------------------------------------------------------------------------
@@ -144,19 +123,14 @@ hyper_parameters:
       use_mlp: True
       d_hidden: 512
       hidden_layers: 0
-      use_norm: False
 
     encoders:
-      layers: 4
+      layers: 3
       heads: 8
-      learnable_spreads: True
+      learnable_spreads: False
       min_spread: 2.5
-      max_spread: 13.0
-      base_spreads: 1.0
-      num_spread: 64
-      min_rbf: 0.001
-      max_rbf: 0.850
-      beta: 2.0
+      min_rbf: 0.00
+      max_rbf: 1.00
       d_hidden_attn: 512
       hidden_layers_attn: 0
 
@@ -165,7 +139,7 @@ hyper_parameters:
 # training params
 training_parameters:
 
-  train_type: "extraction"  # options are:
+  train_type: "diffusion"  # options are:
                             #   extraction:
                             #     train extraction model only. if learnable AA is 
                             #     true, embedding model learns also. diffusion doesn't participate.
@@ -176,8 +150,7 @@ training_parameters:
 
   # for pre-training
   weights:
-    # use_model: "/scratch/hjc2538/projects/proteusAI/models/vae_no_loss_scaling/model_parameters.pth"
-    use_model: ""
+    use_model: "" 
     use_embedding_weights: ""
     use_encoding_weights: ""
     use_diffusion_weights: ""
@@ -191,7 +164,7 @@ training_parameters:
   # convergence criteria
   early_stopping:
     thresh: 0.00 # delta validation sequence similarity, if below this value, training is stopped. negative values mean the seq sim must decrease before stopping
-    tolerance: 3 # how many epochs to consider when calculating delta seq sim for early stopping. takes the max delta seq sim between current epoch and last n epochs, and decides based on this
+    tolerance: 7 # how many epochs to consider when calculating delta seq sim for early stopping. takes the max delta seq sim between current epoch and last n epochs, and decides based on this
   
   adam:
     beta1: 0.9  # for adam optim 
@@ -201,24 +174,19 @@ training_parameters:
   regularization:
     dropout: 0.1  # percentage of dropout
     wf_dropout: 0.00 # dropout for wf embedding, drops out this pct of sources, diff sources dropped for diff wavenumbers
-    attn_dropout: 0.00  # percentage of dropout for atttention, 0.0 works best, probably bc attention is already sparse
-    label_smoothing: 0.1  # percentage of label smoothing to use for loss calculation
+    label_smoothing: 0.0  # percentage of label smoothing to use for loss calculation
     noise_coords_std: 0.00 # stdev of noise injection into coordinates during training
     use_chain_mask: True # whether to mask all chains except the sequence cluster representative in loss computation, all chains still used for fwd pass as context though
 
   loss:
     # i think grad accum is v important for diffusion, will see if this helps
     accumulation_steps: 8  # grad accumulation; how many batches to process before learning step
-    beta: 0.5 # for beta-VAE
-    cel_scaling_factor: 4.0  # make the cel smaller for VAE so it doesnt 
-                              # overwhelm the loss, want it to primarily focus on WF 
-                              # reconstruction and not "cheat" and have encoder only encode seq info
-                              # cel term is to allow wf embedding to learn the optimal aa scaling factors 
+    beta: 5.0 # for beta-VAE
     grad_clip_norm: 1.0 # max L2 norm of gradients for gradient clipping. if set to 0, no gradient clipping is applied (not recommended loss is a sum)
   
   lr:
-    lr_step: !!float 4e-4 # max lr, ramps up to this val before decreasing  
-    warmup_steps: 1000 # number of warmup steps before decreasing
+    lr_step: !!float 1e-3 # max lr, ramps up to this val before decreasing  
+    warmup_steps: 2000 # number of warmup steps before decreasing
   
 # ------------------------------------------------------------------------------
 
@@ -245,8 +213,11 @@ data:
 
 # Output
 output:
-  out_path: "/scratch/hjc2538/projects/proteusAI/models/vae_no_loss_scaling_lblsmooth10pct"  # path to store output, such as plots and weights file. for uncw hpc
-  loss_plot: "loss_vs_epoch.png"  # path to save plot of loss vs epochs after training
+  out_path: "/scratch/hjc2538/projects/proteusAI/models/pain"  # path to store output, such as plots and weights file. for uncw hpc
+  cel_plot: "cel_vs_epoch.png"  # path to save plot of loss vs epochs after training
+  mse_plot: "mse_vs_epoch.png"  # path to save plot of loss vs epochs after training
+  kldiv_plot: "kldiv_vs_epoch.png"  # path to save plot of loss vs epochs after training
+  vae_plot: "vae_plot.png"
   seq_plot: "seq_sim_vs_epoch.png"  # path to save plot of sequence similarity vs epochs after training
   test_plot: "test_seq_sims.png"  # path to save plot of sequence similarity vs epochs after training, not implemented yet
   weights_path: "model_parameters.pth"  # path to save weights after training

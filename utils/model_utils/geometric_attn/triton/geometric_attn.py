@@ -64,15 +64,14 @@ def _attn_fwd(
 	V_ptr, stride_V_Z, stride_V_H, stride_V_N, stride_V_D,
 	coords_ptr, stride_coords_Z, stride_coords_N, stride_coords_S,
 	spreads_ptr, stride_spreads_H,
+	betas_ptr, stride_betas_H,
 	L_ptr, stride_L_Z, stride_L_H, stride_L_N,
 	mask_ptr, stride_mask_Z, stride_mask_N,
-	rng_seed_ptr,
 
 	tot_N: tl.constexpr, tot_Z: tl.constexpr, nheads: tl.constexpr,
 	d_k: tl.constexpr, min_d_k: tl.constexpr,
-	softmax_scale: tl.constexpr, beta: tl.constexpr,
+	softmax_scale: tl.constexpr, 
 	min_rbf: tl.constexpr, max_rbf: tl.constexpr,
-	dropout_p: tl.constexpr,
 
 	BLOCK_I: tl.constexpr, # block sizes
 	BLOCK_J: tl.constexpr,
@@ -159,29 +158,9 @@ def _attn_fwd(
 		order=(0, )
 	)
 
-	# create a dropout block for rand num generation. 
-	# takes 16 MSB of Z, H, I, and J idxs
-	# creates 2 32 bit ints and xors them, like, (I|Z) ^ (H|J), then does more
-	# bitwise ops to get better hash
-	# this decouples I and J bits (I on 16LSB of hash, J on 16MSB), avoiding symmetry issues, so that hash(Z,H,I,J)!=hash(Z,H,J,I)
-
-	rng_seed = tl.load(rng_seed_ptr)
-
-	# compute ZI bytes for the hash
-	I_bytes = offs_I + tl.arange(0, BLOCK_I)[:, None]
-	I_bytes = (I_bytes & 0xFFFF).to(tl.uint32) << 16
-	Z_bytes = tl.full([BLOCK_I, 1], offs_Z, dtype=tl.uint32) & 0xFFFF
-	IZ_bytes = I_bytes | Z_bytes # first 16 are I, next 16 are Z
-
-	# prepare H bytes for the hash
-	H_bytes = (tl.full([1, BLOCK_J], offs_H, dtype=tl.uint32) & 0xFFFF) << 16
-
-	# init J_idxs, which will be incremented in the loop to compute the J bytes and used for hash
-	J_idxs = tl.arange(0, BLOCK_J)[None, :].to(tl.uint32)
-	J_inc = tl.full([1,BLOCK_J], BLOCK_J, dtype=tl.uint32)
-
 	# get pointers for spreads, min and max distances for this head
 	spread_ptr = spreads_ptr + (offs_H*stride_spreads_H)
+	beta_ptr = betas_ptr + (offs_H*stride_betas_H)
 	rbf_range = max_rbf - min_rbf
 
 	# load the Qi block first, out of bounds values are 0, stays in SRAM throughout
@@ -195,6 +174,7 @@ def _attn_fwd(
 
 	# load spreads, min and max dist, and coords for rbf computation (fp32)
 	spread = tl.load(spread_ptr)
+	beta = tl.load(beta_ptr)
 
 	coords_I = tl.load(coords_I_ptr, boundary_check=(0,1), padding_option="zero") # N x 4
 
@@ -219,7 +199,7 @@ def _attn_fwd(
 
 		# scale attention logits by Rij and mask invalid pairs
 		Rij_norm = ((2*(Rij-min_rbf)/rbf_range) - 1)
-		SRij = tl.where(attn_mask, Sij + beta*Rij_norm*tl.abs(Sij), -inf) # N x N (fp32)
+		SRij = tl.where(attn_mask, Sij + beta*Rij_norm, -inf) # N x N (fp32)
 
 		# max of each row
 		mij = tl.maximum(mi, tl.max(SRij, axis=1)) # N,  (fp32)
@@ -233,16 +213,6 @@ def _attn_fwd(
 		# update li
 		li = alpha*li + tl.sum(Pij, axis=1) # N, (fp32)
 
-		# apply dropout mask
-		HJ_bytes = (J_idxs & 0xFFFF) | H_bytes 
-		hash_vals = IZ_bytes ^ HJ_bytes # combine to get unique int
-		hash_vals = hash_vals ^ (hash_vals << 4)
-		hash_vals = hash_vals ^ (hash_vals >> 4)
-		dropout_mask = (tl.rand(rng_seed, hash_vals) >= dropout_p).to(tl.int1) # N x N
-
-		# apply dropout
-		Pij = tl.where(dropout_mask, Pij / (1-dropout_p), 0.0)
-
 		# load Vj compute output. convert Pij to fp16, Vj is already in fp16. output is in fp32
 		Oi = tl.dot(Pij.to(tl.float16), tl.load(Vj_block_ptr, boundary_check=(0,1), padding_option="zero"), acc=(Oi*alpha[:, None])) # N x d_k
 
@@ -254,9 +224,6 @@ def _attn_fwd(
 		Vj_block_ptr = tl.advance(Vj_block_ptr, (BLOCK_J, 0))
 		coords_J_ptr = tl.advance(coords_J_ptr, (BLOCK_J, 0))
 		mask_j_ptr = tl.advance(mask_j_ptr, (BLOCK_J, ))
-
-		# increment J_idxs for the hash compuation of the next iteration
-		J_idxs += J_inc
 
 	# epilogue
 
@@ -306,14 +273,14 @@ def _attn_bwd(
 	L_ptr, stride_L_Z, stride_L_H, stride_L_N,
 	coords_ptr, stride_coords_Z, stride_coords_N, stride_coords_S,
 	spreads_ptr, stride_spreads_H,
+	betas_ptr, stride_betas_H,
 	d_spreads_ptr, stride_d_spreads_H,
+	d_betas_ptr, stride_d_betas_H,
 	mask_ptr, stride_mask_Z, stride_mask_N,
-	rng_seed_ptr,
 	
 	tot_Z: tl.constexpr, tot_N: tl.constexpr, nheads: tl.constexpr, 
-	d_k: tl.constexpr, min_d_k: tl.constexpr, softmax_scale: tl.constexpr, beta: tl.constexpr,
+	d_k: tl.constexpr, min_d_k: tl.constexpr, softmax_scale: tl.constexpr,
 	min_rbf: tl.constexpr, max_rbf: tl.constexpr,
-	dropout_p: tl.constexpr, 
 
 	BLOCK_I: tl.constexpr, BLOCK_J: tl.constexpr
 ):
@@ -357,6 +324,7 @@ def _attn_bwd(
 
 	# spread and dist pointers
 	spread_ptr = spreads_ptr + (offs_H*stride_spreads_H)
+	beta_ptr = betas_ptr + (offs_H*stride_betas_H)
 
 	# initialize mask pointer for j columns 
 	mask_j_ptr = tl.make_block_ptr( # N 
@@ -428,19 +396,9 @@ def _attn_bwd(
 		order=(0, )
 	)
 
-	rng_seed = tl.load(rng_seed_ptr)
-
-	# prepare bytes for dropout
-	H_bytes = (tl.full([1, BLOCK_J], offs_H, dtype=tl.uint32) & 0xFFFF) << 16
-	J_bytes = offs_J + tl.arange(0, BLOCK_J)[None, :]
-	HJ_bytes = (J_bytes & 0xFFFF).to(tl.uint32) | H_bytes
-
-	Z_bytes = tl.full([BLOCK_I, 1], offs_Z, dtype=tl.uint32) & 0xFFFF
-	I_idxs = tl.arange(0, BLOCK_I)[:, None].to(tl.uint32)
-	I_inc = tl.full([BLOCK_I, 1], BLOCK_I, dtype=tl.uint32)
-
 	# load the spread assigned to this block (based on the head it was assigned), and j coordinates
 	spread = tl.load(spread_ptr)
+	beta = tl.load(beta_ptr)
 	rbf_range = max_rbf - min_rbf
 	coords_j = tl.load(coords_j_ptr, boundary_check=(0,1), padding_option="zero")
 
@@ -451,6 +409,7 @@ def _attn_bwd(
 	dKj = tl.zeros((BLOCK_J, min_d_k), dtype=tl.float32)
 	dVj = tl.zeros((BLOCK_J, min_d_k), dtype=tl.float32)
 	d_spread = 0.0
+	d_beta = 0.0
 
 	# load KjT and Vj (load as fp16 for matmul)
 	KjT = tl.load(KjT_ptr, boundary_check=(0, 1), padding_option="zero")
@@ -478,7 +437,7 @@ def _attn_bwd(
 
 		# scale attention logits by RBFs
 		Rij_norm = ((2*(Rij-min_rbf)/rbf_range) - 1)
-		SRij = tl.where(attn_mask, Sij + beta*Rij_norm*tl.abs(Sij), -inf) # N x N (fp32)
+		SRij = tl.where(attn_mask, Sij + beta*Rij_norm, -inf) # N x N (fp32)
 
 		# load log sum exp statistics
 		Li = tl.load(Li_block_ptr, boundary_check=(0, ), padding_option="zero") # (fp32)
@@ -487,14 +446,6 @@ def _attn_bwd(
 		# = exp(Sij - mi) / li
 		# mi is max for the row pre-softmax (for safe softmax), li is the normalizing term (sum of exponentials for that row)
 		Pij = tl.exp(tl.where(attn_mask, SRij - Li[:, None], -inf)) # N x N (fp32)
-
-		# apply dropout mask
-		IZ_bytes = ((I_idxs & 0xFFFF) << 16) | Z_bytes 
-		hash_vals = IZ_bytes ^ HJ_bytes
-		hash_vals = hash_vals ^ (hash_vals << 4)
-		hash_vals = hash_vals ^ (hash_vals >> 4)
-		dropout_mask = tl.rand(rng_seed, hash_vals) >= dropout_p # N x N
-		Pij = tl.where(dropout_mask, Pij / (1-dropout_p), 0.0)
 
 		# load gradient w.r.t output (fp16)
 		dOi = tl.load(dOi_block_ptr, boundary_check=(0, 1), padding_option="zero") # N x d_k
@@ -508,11 +459,12 @@ def _attn_bwd(
 		# load Di = rowsum(O*dO) to compute gradient wrt SRij (grad of loss wrt Sij*rbf)
 		dSRij = Pij * (dPij -  tl.load(Di_block_ptr, boundary_check=(0, ), padding_option="zero")[:, None]) # N x N
 
-		# compute dSij, ie grad wrt Sij. note the direct communication between dSij and Rij
-		dSij = dSRij* (1 + beta*Rij_norm*tl.where(Sij<0, -1, 1)*(Sij!=0)) # N x N
+		# compute dSij, ie grad wrt Sij. 
+		dSij = dSRij # N x N
 
 		# compute gradient wrt rbfs. also direct communication between dRij and Sij
-		dRij = dSRij * tl.abs(Sij) * 2 * beta / rbf_range
+		dRij = dSRij * 2 * beta / rbf_range
+		d_beta += dSRij * Rij_norm
 
 		# compute the gradient wrt the spread of this head
 		# 		d_rbfs/dspreads  = d/dspreads exp(-(d^2)/(2*sigma^2))
@@ -541,8 +493,6 @@ def _attn_bwd(
 		coords_i_ptr = tl.advance(coords_i_ptr, (BLOCK_I, 0))
 		mask_i_ptr = tl.advance(mask_i_ptr, (BLOCK_I, ))
 
-		# modify dropout idxs for nect iter
-		I_idxs += I_inc
 
 	# initialize dK and dV pointers to write output
 	dKj_block_ptr = tl.make_block_ptr( # N x d_k
@@ -569,17 +519,19 @@ def _attn_bwd(
 
 	# store the grad wrt to spread for this head
 	d_spread_ptr = d_spreads_ptr + (offs_H*stride_d_spreads_H)
+	d_betas_ptr = d_betas_ptr + (offs_H*stride_d_betas_H)
 	tl.atomic_add(d_spread_ptr, d_spread)
+	tl.atomic_add(d_betas_ptr, d_beta)
 
-def geometric_attn(Q, K, V, coords, spreads, min_rbf=0.01, max_rbf=0.99, beta=2.0, mask=None, dropout=0.0):
+def geometric_attn(Q, K, V, coords, spreads, betas, mask=None, min_rbf=0.00, max_rbf=1.00):
 	'''wrapper for attn so can call it with kwargs'''
 
-	return _geometric_attn.apply(Q, K, V, coords, spreads, mask, min_rbf, max_rbf, beta, dropout)
+	return _geometric_attn.apply(Q, K, V, coords, spreads, betas, mask, min_rbf, max_rbf)
 
 class _geometric_attn(torch.autograd.Function):
 
 	@staticmethod
-	def forward(ctx, Q, K, V, coords, spreads, mask=None, min_rbf=0.01, max_rbf=0.99, beta=2.0, dropout=0.0):
+	def forward(ctx, Q, K, V, coords, spreads, betas, mask=None, min_rbf=0.01, max_rbf=0.99):
 		
 		# checks
 		assert Q.shape == K.shape == V.shape, f"Q, K, and V projection shapes must match, but got {Q.shape=}, {K.shape=}, {V.shape=}"
@@ -600,6 +552,7 @@ class _geometric_attn(torch.autograd.Function):
 		# rbfs in fp32 and make sure everything is contiguous
 		coords = coords.to(torch.float32).contiguous()
 		spreads = spreads.to(torch.float32).contiguous() # this is now Z x H, need to update everything (forward and back)
+		betas = betas.to(torch.float32).contiguous() 
 
 		# initialize mask, output, and logsumexp tensors
 		mask = (torch.ones(batch, N, dtype=torch.bool, device=Q.device) if mask is None else ~mask).contiguous() # batch x N		
@@ -612,10 +565,6 @@ class _geometric_attn(torch.autograd.Function):
 								1
 							)
 
-		# generate a rng seed for each batch and head
-		rng_seed = torch.randint(0, 2**16-1, (1,), device=Q.device)
-		#rng_seed = torch.tensor([0], device=Q.device) # hard code for debugging
-		
 		# run the kernel
 		_attn_fwd[grid](  	out, out.stride(0), out.stride(1), out.stride(2), out.stride(3), # batch x nheads x N x d_k
 							Q, Q.stride(0), Q.stride(1), Q.stride(2), Q.stride(3), # batch x nhead x N x d_k
@@ -623,18 +572,16 @@ class _geometric_attn(torch.autograd.Function):
 							V, V.stride(0), V.stride(1), V.stride(2), V.stride(3), # batch x nhead x N x d_k
 							coords, coords.stride(0), coords.stride(1), coords.stride(2), # batch x N x 3
 							spreads, spreads.stride(0), # nhead,
+							betas, betas.stride(0), # nhead,
 							L, L.stride(0), L.stride(1), L.stride(2), # batch x nhead x N
 							mask, mask.stride(0), mask.stride(1), # batch x N
-							rng_seed,
-							N, batch, nheads, d_k, max(d_k, 16), softmax_scale, beta,
-							min_rbf, max_rbf, dropout
+							N, batch, nheads, d_k, max(d_k, 16), softmax_scale,
+							min_rbf, max_rbf
 						)
 
 		# for backwards pass
-		ctx.save_for_backward(Q, K, V, out, L, coords, spreads, mask, rng_seed)
+		ctx.save_for_backward(Q, K, V, out, L, coords, spreads, betas, mask)
 		ctx.softmax_scale = softmax_scale
-		ctx.beta = beta
-		ctx.dropout = dropout
 		ctx.min_rbf = min_rbf
 		ctx.max_rbf = max_rbf
 
@@ -644,7 +591,7 @@ class _geometric_attn(torch.autograd.Function):
 	def backward(ctx, dO):
 
 		# load saved tensors (should all be float32, expect masks). also should all be contiguous from fwd
-		Q, K, V, O, L, coords, spreads, mask, rng_seed = ctx.saved_tensors
+		Q, K, V, O, L, coords, spreads, betas, mask = ctx.saved_tensors
 
 		# compute D for dSR calculation
 		D = torch.sum(O*dO, dim=3).to(torch.float16) # Z x H x N x D -> Z x H x N
@@ -661,6 +608,7 @@ class _geometric_attn(torch.autograd.Function):
 		dK = torch.zeros_like(K).to(torch.float32).contiguous()
 		dV = torch.zeros_like(V).to(torch.float32).contiguous()
 		d_spreads = torch.zeros_like(spreads).to(torch.float32).contiguous()
+		d_betas = torch.zeros_like(betas).to(torch.float32).contiguous()
 
 		# define the grid
 		grid = lambda args: (
@@ -681,17 +629,14 @@ class _geometric_attn(torch.autograd.Function):
 							L, L.stride(0), L.stride(1), L.stride(2),
 							coords, coords.stride(0), coords.stride(1), coords.stride(2),
 							spreads, spreads.stride(0),
+							betas, betas.stride(0),
 							d_spreads, d_spreads.stride(0),
+							d_betas, d_betas.stride(0),
 							mask, mask.stride(0), mask.stride(1),
 							rng_seed,
-							batch, N, nheads, d_k, max(d_k, 16), ctx.softmax_scale, ctx.beta,
-							ctx.min_rbf, ctx.max_rbf, ctx.dropout
+							batch, N, nheads, d_k, max(d_k, 16), ctx.softmax_scale,
+							ctx.min_rbf, ctx.max_rbf
 						 )
 
-		dQ = dQ
-		dK = dK
-		dV = dV
-		d_spreads = d_spreads
-
 		# return the gradients
-		return dQ, dK, dV, None, d_spreads, None, None, None, None, None
+		return dQ, dK, dV, None, d_spreads, d_betas, None, None, None

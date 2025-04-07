@@ -16,6 +16,26 @@ class ExtractionOutput():
 		self.batch_parent = batch_parent 
 
 		# predictions
+		self.seq_pred = seq_pred # seq pred from wf output
+
+		# valid tokens for averaging
+		self.valid_toks = (batch_parent.labels!=-1).sum()
+
+	def compute_losses(self):
+		return self.batch_parent.epoch_parent.training_run_parent.losses.loss_function(self.seq_pred, self.batch_parent.labels)
+
+class VAEOutput():
+	'''need to edit so have 
+		a kl div loss
+		a reconstruction loss
+		a cel loss
+	'''
+	def __init__(self, batch_parent, latent_mean_pred, latent_log_var_pred, wf_mean_pred, wf_mean_true):
+		
+		# batch parent
+		self.batch_parent = batch_parent 
+
+		# predictions
 		# encoder outputs, loss is computed by comparing to gaussian, so dont need a true
 		self.latent_mean_pred = latent_mean_pred # gaussian prior mean
 		self.latent_log_var_pred = latent_log_var_pred # gaussian prior log var
@@ -24,16 +44,12 @@ class ExtractionOutput():
 		self.wf_mean_pred = wf_mean_pred # wf prediction mean
 		self.wf_mean_true = wf_mean_true # true
 
-		# extractor outputs
-		self.seq_pred = seq_pred # seq pred from wf output
-
 		# valid tokens for averaging
 		self.valid_toks = (batch_parent.labels!=-1).sum()
 
 	def compute_losses(self):
 		return self.batch_parent.epoch_parent.training_run_parent.losses.loss_function(	self.latent_mean_pred, self.latent_log_var_pred, 
-																						self.wf_mean_pred, self.wf_mean_true, 
-																						self.seq_pred, self.batch_parent.labels
+																						self.wf_mean_pred, self.wf_mean_true
 																					)
 
 class DiffusionOutput():

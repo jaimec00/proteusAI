@@ -2,7 +2,7 @@
 
 import torch
 from tqdm import tqdm
-from utils.train_utils.model_outputs import ExtractionOutput, DiffusionOutput, InferenceOutput, ModelOutputs
+from utils.train_utils.model_outputs import ExtractionOutput, VAEOutput, DiffusionOutput, InferenceOutput, ModelOutputs
 
 # ----------------------------------------------------------------------------------------------------------------------
 
@@ -165,6 +165,9 @@ class Batch():
 			case "extraction":
 				output = self.run_extraction_training()
 
+			case "vae":
+				output = self.run_vae_training()
+
 			case "diffusion":
 				if self.inference:
 					output = self.run_full_inference()
@@ -174,6 +177,17 @@ class Batch():
 		return ModelOutputs(output)
 
 	def run_extraction_training(self):
+
+		# get wf
+		wf = self.epoch_parent.training_run_parent.model(self.coords_alpha, coords_beta=self.coords_beta, aas=self.aas, key_padding_mask=self.key_padding_mask, embedding=True)
+
+		# extract sequence
+		seq_pred = self.epoch_parent.training_run_parent.model(self.coords_alpha, wf=wf, key_padding_mask=self.key_padding_mask, extraction=True)
+
+		# convert to output object
+		return ExtractionOutput(self, seq_pred)
+
+	def run_vae_training(self):
 		
 		# get wf
 		wf = self.epoch_parent.training_run_parent.model(self.coords_alpha, coords_beta=self.coords_beta, aas=self.aas, key_padding_mask=self.key_padding_mask, embedding=True)
@@ -188,11 +202,8 @@ class Batch():
 		# decode from latent space to wf space, only computes mean to make reconstruction loss a simple squared error
 		wf_decoded = self.epoch_parent.training_run_parent.model(self.coords_alpha, wf=wf_encoded, key_padding_mask=self.key_padding_mask, decoding=True)
 
-		# predict sequence, outputs logits
-		seq_pred = self.epoch_parent.training_run_parent.model(self.coords_alpha, wf=wf_decoded, key_padding_mask=self.key_padding_mask, extraction=True)
-	
 		# convert to output object
-		return ExtractionOutput(self, wf_encoded_mean, wf_encoded_log_var, wf_decoded, wf, seq_pred)
+		return VAEOutput(self, wf_encoded_mean, wf_encoded_log_var, wf_decoded, wf)
 
 	def run_diffusion_training(self):
 		
@@ -202,10 +213,6 @@ class Batch():
 		# encode the wf in latent space
 		wf_encoded = self.epoch_parent.training_run_parent.model.wf_encoding.encode(wf, self.coords_alpha, key_padding_mask=self.key_padding_mask)
 
-		# now get clean wf with no aa info
-		wf_base = self.epoch_parent.training_run_parent.model(self.coords_alpha, coords_beta=self.coords_beta, aas=self.aas, key_padding_mask=self.key_padding_mask, embedding=True, no_aa=True)
-		wf_base_encoded = self.epoch_parent.training_run_parent.model.wf_encoding.encode(wf_base, self.coords_alpha, key_padding_mask=self.key_padding_mask)
-
 		# get timesteps from uniform distribution
 		timesteps = self.epoch_parent.training_run_parent.model.wf_diffusion.get_random_timesteps(wf_encoded.size(0), wf_encoded.device)
 
@@ -213,7 +220,7 @@ class Batch():
 		noised_wf, noise = self.epoch_parent.training_run_parent.model.wf_diffusion.noise(wf_encoded, timesteps)
 
 		# predict noise
-		noise_pred = self.epoch_parent.training_run_parent.model(self.coords_alpha, wf=noised_wf, context=wf_base_encoded, key_padding_mask=self.key_padding_mask, diffusion=True, t=timesteps)
+		noise_pred = self.epoch_parent.training_run_parent.model(self.coords_alpha, wf=noised_wf, key_padding_mask=self.key_padding_mask, diffusion=True, t=timesteps)
 
 		# convert to output object
 		return DiffusionOutput(self, noise_pred, noise)

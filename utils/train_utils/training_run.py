@@ -55,7 +55,13 @@ class TrainingRun():
 											args.training_parameters.loss.beta
 										)
 
-		self.output = Output(args.output.out_path, args.output.loss_plot, args.output.seq_plot, args.output.test_plot, args.output.weights_path, args.output.model_checkpoints)
+		self.output = Output(	args.output.out_path,
+								cel_plot=args.output.cel_plot, seq_plot=args.output.seq_plot, 
+								mse_plot=args.output.mse_plot, kldiv_plot=args.output.kldiv_plot, 
+								vae_plot=args.output.vae_plot,
+								test_plot=args.output.test_plot, 
+								weights_path=args.output.weights_path, model_checkpoints=args.output.model_checkpoints
+							)
 
 		self.gpu = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 		self.cpu = torch.device("cpu")
@@ -102,15 +108,12 @@ class TrainingRun():
 								embedding_min_wl=self.hyper_parameters.embedding.min_wl,
 								embedding_max_wl=self.hyper_parameters.embedding.max_wl,
 								embedding_base_wl=self.hyper_parameters.embedding.base_wl,
-								embedding_learnable_aa=self.hyper_parameters.embedding.learnable_aa,		
 
 								# wf encoding params
 
 								# wf preprocessing
-								encoding_mlp_pre=self.hyper_parameters.encoding.pre_process.use_mlp, 
 								encoding_d_hidden_pre=self.hyper_parameters.encoding.pre_process.d_hidden,
 								encoding_hidden_layers_pre=self.hyper_parameters.encoding.pre_process.hidden_layers,
-								encoding_norm_pre=self.hyper_parameters.encoding.pre_process.use_norm,
 
 								# wf post_process
 								encoding_d_hidden_post=self.hyper_parameters.encoding.post_process.d_hidden,
@@ -119,14 +122,9 @@ class TrainingRun():
 								# encoder layers
 								encoding_encoder_layers=self.hyper_parameters.encoding.encoders.layers,
 								encoding_heads=self.hyper_parameters.encoding.encoders.heads,
-								encoding_learnable_spreads=self.hyper_parameters.encoding.encoders.learnable_spreads,
 								encoding_min_spread=self.hyper_parameters.encoding.encoders.min_spread,
-								encoding_max_spread=self.hyper_parameters.encoding.encoders.max_spread,
-								encoding_base_spreads=self.hyper_parameters.encoding.encoders.base_spreads,
-								encoding_num_spread=self.hyper_parameters.encoding.encoders.num_spread,
 								encoding_min_rbf=self.hyper_parameters.encoding.encoders.min_rbf,
 								encoding_max_rbf=self.hyper_parameters.encoding.encoders.max_rbf,
-								encoding_beta=self.hyper_parameters.encoding.encoders.beta,
 								encoding_d_hidden_attn=self.hyper_parameters.encoding.encoders.d_hidden_attn,
 								encoding_hidden_layers_attn=self.hyper_parameters.encoding.encoders.hidden_layers_attn,
 
@@ -134,47 +132,32 @@ class TrainingRun():
 
 								# beta scheduler
 								diffusion_alpha_bar_min=self.hyper_parameters.diffusion.scheduler.alpha_bar_min,
-								diffusion_beta_schedule_type=self.hyper_parameters.diffusion.scheduler.beta_schedule_type, 
+								diffusion_noise_schedule_type=self.hyper_parameters.diffusion.scheduler.noise_schedule_type, 
 								diffusion_t_max=self.hyper_parameters.diffusion.scheduler.t_max,
 
 								# timestep params for FiLM
+								diffusion_d_in_timestep=self.hyper_parameters.diffusion.timestep.d_in,
 								diffusion_d_hidden_timestep=self.hyper_parameters.diffusion.timestep.d_hidden,
 								diffusion_hidden_layers_timestep=self.hyper_parameters.diffusion.timestep.hidden_layers, 
 
-								# wf preprocessing
-								diffusion_mlp_pre=self.hyper_parameters.diffusion.pre_process.use_mlp, 
-								diffusion_d_hidden_pre=self.hyper_parameters.diffusion.pre_process.d_hidden,
-								diffusion_hidden_layers_pre=self.hyper_parameters.diffusion.pre_process.hidden_layers,
-								diffusion_norm_pre=self.hyper_parameters.diffusion.pre_process.use_norm,
-
 								# wf post_process
-								diffusion_mlp_post=self.hyper_parameters.diffusion.post_process.use_mlp,
 								diffusion_d_hidden_post=self.hyper_parameters.diffusion.post_process.d_hidden,
 								diffusion_hidden_layers_post=self.hyper_parameters.diffusion.post_process.hidden_layers,
-								diffusion_norm_post=self.hyper_parameters.diffusion.post_process.use_norm,
 
 								# encoder layers
 								diffusion_encoder_layers=self.hyper_parameters.diffusion.encoders.layers,
-								diffusion_decoder_layers=self.hyper_parameters.diffusion.encoders.layers,
 								diffusion_heads=self.hyper_parameters.diffusion.encoders.heads,
-								diffusion_learnable_spreads=self.hyper_parameters.diffusion.encoders.learnable_spreads,
 								diffusion_min_spread=self.hyper_parameters.diffusion.encoders.min_spread,
-								diffusion_max_spread=self.hyper_parameters.diffusion.encoders.max_spread,
-								diffusion_base_spreads=self.hyper_parameters.diffusion.encoders.base_spreads,
-								diffusion_num_spread=self.hyper_parameters.diffusion.encoders.num_spread,
 								diffusion_min_rbf=self.hyper_parameters.diffusion.encoders.min_rbf,
 								diffusion_max_rbf=self.hyper_parameters.diffusion.encoders.max_rbf,
-								diffusion_beta=self.hyper_parameters.diffusion.encoders.beta,
 								diffusion_d_hidden_attn=self.hyper_parameters.diffusion.encoders.d_hidden_attn,
 								diffusion_hidden_layers_attn=self.hyper_parameters.diffusion.encoders.hidden_layers_attn,
 
 								# wf decoding params
 
 								# wf preprocessing
-								decoding_mlp_pre=self.hyper_parameters.decoding.pre_process.use_mlp, 
 								decoding_d_hidden_pre=self.hyper_parameters.decoding.pre_process.d_hidden,
 								decoding_hidden_layers_pre=self.hyper_parameters.decoding.pre_process.hidden_layers,
-								decoding_norm_pre=self.hyper_parameters.decoding.pre_process.use_norm,
 
 								# wf post_process
 								decoding_d_hidden_post=self.hyper_parameters.decoding.post_process.d_hidden,
@@ -183,49 +166,35 @@ class TrainingRun():
 								# encoder layers
 								decoding_encoder_layers=self.hyper_parameters.decoding.encoders.layers,
 								decoding_heads=self.hyper_parameters.decoding.encoders.heads,
-								decoding_learnable_spreads=self.hyper_parameters.decoding.encoders.learnable_spreads,
 								decoding_min_spread=self.hyper_parameters.decoding.encoders.min_spread,
-								decoding_max_spread=self.hyper_parameters.decoding.encoders.max_spread,
-								decoding_base_spreads=self.hyper_parameters.decoding.encoders.base_spreads,
-								decoding_num_spread=self.hyper_parameters.decoding.encoders.num_spread,
 								decoding_min_rbf=self.hyper_parameters.decoding.encoders.min_rbf,
 								decoding_max_rbf=self.hyper_parameters.decoding.encoders.max_rbf,
-								decoding_beta=self.hyper_parameters.decoding.encoders.beta,
 								decoding_d_hidden_attn=self.hyper_parameters.decoding.encoders.d_hidden_attn,
 								decoding_hidden_layers_attn=self.hyper_parameters.decoding.encoders.hidden_layers_attn,
 
 								# wf extraction params
 
 								# wf preprocessing
-								extraction_mlp_pre=self.hyper_parameters.extraction.pre_process.use_mlp, 
 								extraction_d_hidden_pre=self.hyper_parameters.extraction.pre_process.d_hidden,
 								extraction_hidden_layers_pre=self.hyper_parameters.extraction.pre_process.hidden_layers,
-								extraction_norm_pre=self.hyper_parameters.extraction.pre_process.use_norm,
 
 								# wf post_process
 								extraction_mlp_post=self.hyper_parameters.extraction.post_process.use_mlp,
 								extraction_d_hidden_post=self.hyper_parameters.extraction.post_process.d_hidden,
 								extraction_hidden_layers_post=self.hyper_parameters.extraction.post_process.hidden_layers,
-								extraction_norm_post=self.hyper_parameters.extraction.post_process.use_norm,
 
 								# encoder layers
 								extraction_encoder_layers=self.hyper_parameters.extraction.encoders.layers,
 								extraction_heads=self.hyper_parameters.extraction.encoders.heads,
-								extraction_learnable_spreads=self.hyper_parameters.extraction.encoders.learnable_spreads,
 								extraction_min_spread=self.hyper_parameters.extraction.encoders.min_spread,
-								extraction_max_spread=self.hyper_parameters.extraction.encoders.max_spread,
-								extraction_base_spreads=self.hyper_parameters.extraction.encoders.base_spreads,
-								extraction_num_spread=self.hyper_parameters.extraction.encoders.num_spread,
 								extraction_min_rbf=self.hyper_parameters.extraction.encoders.min_rbf,
 								extraction_max_rbf=self.hyper_parameters.extraction.encoders.max_rbf,
-								extraction_beta=self.hyper_parameters.extraction.encoders.beta,
 								extraction_d_hidden_attn=self.hyper_parameters.extraction.encoders.d_hidden_attn,
 								extraction_hidden_layers_attn=self.hyper_parameters.extraction.encoders.hidden_layers_attn,
 
 								# dropout
 								dropout=self.training_parameters.regularization.dropout,
 								wf_dropout=self.training_parameters.regularization.wf_dropout,
-								attn_dropout=self.training_parameters.regularization.attn_dropout,
 							)
 
 		self.model.to(self.gpu)
@@ -247,7 +216,15 @@ class TrainingRun():
 		
 		# what weights should be frozen depending on training type (see config file for explanation)
 		if self.training_parameters.train_type == "extraction":
+			self.model.freeze_WFEncoding_weights()
 			self.model.freeze_WFDiffusion_weights()
+			self.model.freeze_WFDecoding_weights()
+
+		if self.training_parameters.train_type == "vae":
+			self.model.freeze_WFEmbedding_weights()
+			self.model.freeze_WFDiffusion_weights()
+			self.model.freeze_WFExtraction_weights()
+
 		if self.training_parameters.train_type == "diffusion":
 			self.model.freeze_WFEmbedding_weights()
 			self.model.freeze_WFEncoding_weights()

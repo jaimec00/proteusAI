@@ -18,12 +18,22 @@ import sys
 
 class Output():
 
-	def __init__(self, out_path, loss_plot=Path("loss_plot.png"), seq_plot=Path("seq_sim_plot.png"), test_plot=Path("test_plot.png"), weights_path=Path("model_parameters.pth"), model_checkpoints=10):
+	def __init__(self, 	out_path, 
+						cel_plot="cel_plot.png", seq_plot="seq_sim_plot.png", 
+						mse_plot="mse_plot.png", kldiv_plot="kldiv_plot.png", 
+						vae_plot="vae_plot.png",
+						test_plot="test_plot.png", 
+						weights_path=Path("model_parameters.pth"), model_checkpoints=10
+					):
 
 		self.out_path = Path(out_path)
 		self.out_path.mkdir(parents=True, exist_ok=True)
-		self.loss_plot = self.out_path / Path(loss_plot)
+
+		self.cel_plot = self.out_path / Path(cel_plot)
+		self.mse_plot = self.out_path / Path(mse_plot)
+		self.kldiv_plot = self.out_path / Path(kldiv_plot)
 		self.seq_plot = self.out_path / Path(seq_plot)
+		self.vae_plot = self.out_path / Path(vae_plot)
 		self.test_plot = self.out_path / Path(test_plot)
 		self.weights_path = self.out_path / Path(weights_path)
 		self.log = self.setup_logging(self.out_path / Path("log.txt"))
@@ -62,116 +72,76 @@ class Output():
 		total parameters: {training_parameters.num_params:,}
 		
 		model hyper-parameters:
-
 			d_model: {hyper_parameters.d_model} 
+			d_latent: {hyper_parameters.d_latent} 
 			num_aa: {hyper_parameters.num_aa}
-
 			wave function embedding:
 				min_wl: {hyper_parameters.embedding.min_wl}
 				max_wl: {hyper_parameters.embedding.max_wl}
 				base_wl: {hyper_parameters.embedding.base_wl}
-				learnable_aa: {hyper_parameters.embedding.learnable_aa}
-
 			wave function encoding:
 				wf preprocessing:
-					use_mlp: {hyper_parameters.encoding.pre_process.use_mlp} 
 					d_hidden: {hyper_parameters.encoding.pre_process.d_hidden}
 					hidden_layers: {hyper_parameters.encoding.pre_process.hidden_layers}
-					use_norm: {hyper_parameters.encoding.pre_process.use_norm}
 				wf post_process:
 					d_hidden: {hyper_parameters.encoding.post_process.d_hidden}
 					hidden_layers: {hyper_parameters.encoding.post_process.hidden_layers}
 				encoders:
 					encoder_layers: {hyper_parameters.encoding.encoders.layers}
 					heads: {hyper_parameters.encoding.encoders.heads}
-					learnable_spreads: {hyper_parameters.encoding.encoders.learnable_spreads}
 					min_spread: {hyper_parameters.encoding.encoders.min_spread}
-					max_spread: {hyper_parameters.encoding.encoders.max_spread}
-					base_spreads: {hyper_parameters.encoding.encoders.base_spreads}
-					num_spread: {hyper_parameters.encoding.encoders.num_spread}
 					min_rbf: {hyper_parameters.encoding.encoders.min_rbf}
 					max_rbf: {hyper_parameters.encoding.encoders.max_rbf}
-					beta: {hyper_parameters.encoding.encoders.beta}
 					d_hidden_attn: {hyper_parameters.encoding.encoders.d_hidden_attn}
 					hidden_layers_attn: {hyper_parameters.encoding.encoders.hidden_layers_attn}
-
 			wave function diffusion:
 				scheduler:
 					alpha_bar_min: {hyper_parameters.diffusion.scheduler.alpha_bar_min}
-					beta_schedule_type: {hyper_parameters.diffusion.scheduler.beta_schedule_type}
+					noise_schedule_type: {hyper_parameters.diffusion.scheduler.noise_schedule_type}
 					t_max: {hyper_parameters.diffusion.scheduler.t_max}
 				timestep:
+					d_in: {hyper_parameters.diffusion.timestep.d_in}
 					d_hidden: {hyper_parameters.diffusion.timestep.d_hidden}
 					hidden_layers: {hyper_parameters.diffusion.timestep.hidden_layers} 
-				wf preprocessing:
-					use_mlp: {hyper_parameters.diffusion.pre_process.use_mlp} 
-					d_hidden: {hyper_parameters.diffusion.pre_process.d_hidden}
-					hidden_layers: {hyper_parameters.diffusion.pre_process.hidden_layers}
-					use_norm: {hyper_parameters.diffusion.pre_process.use_norm}
 				wf post_process:
-					use_mlp: {hyper_parameters.diffusion.post_process.use_mlp}
 					d_hidden: {hyper_parameters.diffusion.post_process.d_hidden}
 					hidden_layers: {hyper_parameters.diffusion.post_process.hidden_layers}
-					use_norm: {hyper_parameters.diffusion.post_process.use_norm}
 				encoders:
 					encoder_layers: {hyper_parameters.diffusion.encoders.layers}
 					heads: {hyper_parameters.diffusion.encoders.heads}
-					learnable_spreads: {hyper_parameters.diffusion.encoders.learnable_spreads}
 					min_spread: {hyper_parameters.diffusion.encoders.min_spread}
-					max_spread: {hyper_parameters.diffusion.encoders.max_spread}
-					base_spreads: {hyper_parameters.diffusion.encoders.base_spreads}
-					num_spread: {hyper_parameters.diffusion.encoders.num_spread}
 					min_rbf: {hyper_parameters.diffusion.encoders.min_rbf}
 					max_rbf: {hyper_parameters.diffusion.encoders.max_rbf}
-					beta: {hyper_parameters.diffusion.encoders.beta}
 					d_hidden_attn: {hyper_parameters.diffusion.encoders.d_hidden_attn}
 					hidden_layers_attn: {hyper_parameters.diffusion.encoders.hidden_layers_attn}
-
 			wave function decoding:
 				wf preprocessing:
-					use_mlp: {hyper_parameters.decoding.pre_process.use_mlp} 
 					d_hidden: {hyper_parameters.decoding.pre_process.d_hidden}
 					hidden_layers: {hyper_parameters.decoding.pre_process.hidden_layers}
-					use_norm: {hyper_parameters.decoding.pre_process.use_norm}
 				wf post_process:
 					d_hidden: {hyper_parameters.decoding.post_process.d_hidden}
 					hidden_layers: {hyper_parameters.decoding.post_process.hidden_layers}
 				encoders:
 					encoder_layers: {hyper_parameters.decoding.encoders.layers}
 					heads: {hyper_parameters.decoding.encoders.heads}
-					learnable_spreads: {hyper_parameters.decoding.encoders.learnable_spreads}
 					min_spread: {hyper_parameters.decoding.encoders.min_spread}
-					max_spread: {hyper_parameters.decoding.encoders.max_spread}
-					base_spreads: {hyper_parameters.decoding.encoders.base_spreads}
-					num_spread: {hyper_parameters.decoding.encoders.num_spread}
 					min_rbf: {hyper_parameters.decoding.encoders.min_rbf}
 					max_rbf: {hyper_parameters.decoding.encoders.max_rbf}
-					beta: {hyper_parameters.decoding.encoders.beta}
 					d_hidden_attn: {hyper_parameters.decoding.encoders.d_hidden_attn}
 					hidden_layers_attn: {hyper_parameters.decoding.encoders.hidden_layers_attn}
-
 			wave function extraction:
 				wf preprocessing:
-					use_mlp: {hyper_parameters.extraction.pre_process.use_mlp} 
 					d_hidden: {hyper_parameters.extraction.pre_process.d_hidden}
 					hidden_layers: {hyper_parameters.extraction.pre_process.hidden_layers}
-					use_norm: {hyper_parameters.extraction.pre_process.use_norm}
 				wf post_process:
-					use_mlp: {hyper_parameters.extraction.post_process.use_mlp}
 					d_hidden: {hyper_parameters.extraction.post_process.d_hidden}
 					hidden_layers: {hyper_parameters.extraction.post_process.hidden_layers}
-					use_norm: {hyper_parameters.extraction.post_process.use_norm}
 				encoder:
 					encoder_layers: {hyper_parameters.extraction.encoders.layers}
 					heads: {hyper_parameters.extraction.encoders.heads}
-					learnable_spreads: {hyper_parameters.extraction.encoders.learnable_spreads}
 					min_spread: {hyper_parameters.extraction.encoders.min_spread}
-					max_spread: {hyper_parameters.extraction.encoders.max_spread}
-					base_spreads: {hyper_parameters.extraction.encoders.base_spreads}
-					num_spread: {hyper_parameters.extraction.encoders.num_spread}
 					min_rbf: {hyper_parameters.extraction.encoders.min_rbf}
 					max_rbf: {hyper_parameters.extraction.encoders.max_rbf}
-					beta: {hyper_parameters.extraction.encoders.beta}
 					d_hidden_attn: {hyper_parameters.extraction.encoders.d_hidden_attn}
 					hidden_layers_attn: {hyper_parameters.extraction.encoders.hidden_layers_attn}
 
@@ -216,7 +186,7 @@ class Output():
 				use_chain_mask: {training_parameters.regularization.use_chain_mask}
 			loss:
 				accumulation_steps: {training_parameters.loss.accumulation_steps} 
-				cel_scaling_factor: {training_parameters.loss.cel_scaling_factor}
+				kl_div_beta: {training_parameters.loss.beta}
 				grad_clip_norm: {training_parameters.loss.grad_clip_norm}
 			lr:
 				lr_step: {training_parameters.lr.lr_step}
@@ -240,45 +210,52 @@ class Output():
 		)
 
 	def log_epoch_losses(self, losses, train_type):
-
-		if train_type == "diffusion":
+		elif train_type == "extraction":
+			cel, seq_sim = losses.tmp.get_avg()
+			self.log.info(f"train cross entropy loss per token: {str(cel)}")
+			self.log.info(f"train sequence similarity per token: {str(seq_sim)}\n")		
+			losses.train.add_losses(cel, seq_sim)
+		elif train_type == "vae":
+			kl_div, reconstruction, loss = losses.tmp.get_avg()
+			self.log.info(f"train kl divergence per token: {str(kl_div)}")
+			self.log.info(f"train squared error per token: {str(reconstruction)}")
+			self.log.info(f"train full loss per token: {str(loss)}")
+			losses.train.add_losses(kl_div, reconstruction, loss)
+		elif train_type == "diffusion":
 			squared_error = losses.tmp.get_avg()
 			self.log.info(f"train squared error per token per feature: {str(squared_error)}")
 			losses.train.add_losses(squared_error)
-		elif train_type == "extraction":
-			kl_div, reconstruction, cel, loss, seq_sim = losses.tmp.get_avg()
-			self.log.info(f"train kl divergence per token: {str(kl_div)}")
-			self.log.info(f"train squared error per token: {str(reconstruction)}")
-			self.log.info(f"train cross entropy loss per token: {str(cel)}")
-			self.log.info(f"train full loss per token: {str(loss)}")
-			self.log.info(f"train sequence similarity per token: {str(seq_sim)}\n")		
-			losses.train.add_losses(kl_div, reconstruction, cel, loss, seq_sim)
 
 	def log_val_losses(self, losses, train_type):
-		if train_type == "diffusion":
+		if train_type == "extraction":
+			cel, seq_sim = losses.tmp.get_avg()
+			self.log.info(f"validation cross entropy loss per token: {str(cel)}")
+			self.log.info(f"validation sequence similarity per token: {str(seq_sim)}\n")
+			losses.val.add_losses(cel, seq_sim)
+		elif train_type == "vae":
+			kl_div, reconstruction, loss = losses.tmp.get_avg()
+			self.log.info(f"validation kl divergence per token: {str(kl_div)}")
+			self.log.info(f"validation squared error per token: {str(reconstruction)}")
+			self.log.info(f"validation full loss per token: {str(loss)}")
+			losses.val.add_losses(kl_div, reconstruction, loss)
+		elif train_type == "diffusion":
 			squared_error = losses.tmp.get_avg()
 			self.log.info(f"validation squared error per token: {str(squared_error)}")
 			losses.val.add_losses(squared_error)
-		elif train_type == "extraction":
-			kl_div, reconstruction, cel, loss, seq_sim = losses.tmp.get_avg()
-			self.log.info(f"validation kl divergence per token: {str(kl_div)}")
-			self.log.info(f"validation squared error per token: {str(reconstruction)}")
-			self.log.info(f"validation cross entropy loss per token: {str(cel)}")
-			self.log.info(f"validation full loss per token: {str(loss)}")
-			self.log.info(f"validation sequence similarity per token: {str(seq_sim)}\n")
-			losses.val.add_losses(kl_div, reconstruction, cel, loss, seq_sim)
 
 	def log_test_losses(self, losses, train_type):
-		if train_type == "diffusion":
-			seq_sim = losses.tmp.get_avg(is_inference=True)
-			self.log.info(f"test sequence similarity per token: {str(seq_sim)}")
 		elif train_type == "extraction":
-			kl_div, reconstruction, cel, loss, seq_sim = losses.tmp.get_avg()
+			cel, seq_sim = losses.tmp.get_avg()
+			self.log.info(f"test cross entropy loss per token: {str(cel)}")
+			self.log.info(f"test sequence similarity per token: {str(seq_sim)}\n")
+		elif train_type == "vae":
+			kl_div, reconstruction, loss = losses.tmp.get_avg()
 			self.log.info(f"test kl divergence per token: {str(kl_div)}")
 			self.log.info(f"test squared error per token: {str(reconstruction)}")
-			self.log.info(f"test cross entropy loss per token: {str(cel)}")
 			self.log.info(f"test full loss per token: {str(loss)}")
-			self.log.info(f"test sequence similarity per token: {str(seq_sim)}\n")
+		elif train_type == "diffusion":
+			seq_sim = losses.tmp.get_avg(is_inference=True)
+			self.log.info(f"test sequence similarity per token: {str(seq_sim)}")
 		losses.test.extend_losses(losses.tmp) # include all test losses to make a histogram (per batch seq sims), not implemented
 
 	def plot_training(self, losses, training_type):
@@ -289,8 +266,121 @@ class Output():
 		epochs = [i + 1 for i in range(len(losses.train))]
 		if training_type == "extraction":
 			self.plot_extraction(losses, epochs)
+		elif training_type == "vae":
+			self.plot_vae(losses, epochs)
 		elif training_type == "diffusion":
 			self.plot_diffusion(losses, epochs)
+
+	def plot_extraction(self, losses, epochs):
+
+		# Create the plot, only plotting final loss, will add functionality to plot kldiv, cel, and mse seperately later
+		plt.plot(epochs, losses.train.cel, marker='o', color='red', label="Training")
+		plt.plot(epochs, losses.val.cel, marker='o', color='blue', label="Validation")
+
+		# Adding title and labels
+		plt.title('Loss vs. Epochs')
+		plt.xlabel('Epochs')
+		plt.ylabel('Cross Entropy Loss')
+		
+		# Add a legend to distinguish the line plots
+		plt.legend()
+		
+		# Display the plot
+		plt.grid(True)
+		plt.savefig(self.cel_plot)
+		self.log.info(f"graph of loss vs. epoch saved to {self.cel_plot}")
+
+		plt.figure()
+
+		plt.plot(epochs, losses.train.matches, marker='o', color='red', label="Training")
+		plt.plot(epochs, losses.val.matches, marker='o', color='blue', label="Validation")
+		
+		# Adding title and labels
+		plt.title('Sequence Similarity vs. Epochs')
+		plt.xlabel('Epochs')
+		plt.ylabel('Sequence Similarity (%)')
+		
+		# Add a legend to distinguish the line plots
+		plt.legend()
+		
+		# Display the plot
+		plt.grid(True)
+		plt.savefig(self.seq_plot)
+		self.log.info(f"graph of seq_similarity vs. epoch saved to {self.seq_plot}")
+
+	def plot_vae(self, losses, epochs):
+
+		# Create the plot, only plotting final loss, will add functionality to plot kldiv, cel, and mse seperately later
+		plt.plot(epochs, losses.train.all_losses, marker='o', color='red', label="Training")
+		plt.plot(epochs, losses.val.all_losses, marker='o', color='blue', label="Validation")
+
+		# Adding title and labels
+		plt.title('Loss vs. Epochs')
+		plt.xlabel('Epochs')
+		plt.ylabel('Loss')
+		
+		# Add a legend to distinguish the line plots
+		plt.legend()
+		
+		# Display the plot
+		plt.grid(True)
+		plt.savefig(self.vae_plot)
+		self.log.info(f"graph of loss vs. epoch saved to {self.vae_plot}")
+
+		plt.figure()
+
+		plt.plot(epochs, losses.train.reconstruction, marker='o', color='red', label="Training")
+		plt.plot(epochs, losses.val.reconstruction, marker='o', color='blue', label="Validation")
+		
+		# Adding title and labels
+		plt.title('MSE vs. Epochs')
+		plt.xlabel('Epochs')
+		plt.ylabel('MSE')
+		
+		# Add a legend to distinguish the line plots
+		plt.legend()
+		
+		# Display the plot
+		plt.grid(True)
+		plt.savefig(self.mse_plot)
+		self.log.info(f"graph of mse vs. epoch saved to {self.mse_plot}")
+
+		plt.figure()
+
+		plt.plot(epochs, losses.train.kl_div, marker='o', color='red', label="Training")
+		plt.plot(epochs, losses.val.kl_div, marker='o', color='blue', label="Validation")
+		
+		# Adding title and labels
+		plt.title('KLDiv vs. Epochs')
+		plt.xlabel('Epochs')
+		plt.ylabel('KLDiv')
+		
+		# Add a legend to distinguish the line plots
+		plt.legend()
+		
+		# Display the plot
+		plt.grid(True)
+		plt.savefig(self.kldiv_plot)
+		self.log.info(f"graph of kldiv vs. epoch saved to {self.kldiv_plot}")
+
+	def plot_diffusion(self, losses, epochs):
+
+		# Create the plot
+		plt.plot(epochs, losses.train.squared_errors, marker='o', color='red', label="Training")
+		plt.plot(epochs, losses.val.squared_errors, marker='o', color='blue', label="Validation")
+
+		# Adding title and labels
+		plt.title('MSE vs. Epochs')
+		plt.xlabel('Epochs')
+		plt.ylabel('MSE')
+		
+		# Add a legend to distinguish the line plots
+		plt.legend()
+		
+		# Display the plot
+		plt.grid(True)
+		plt.savefig(self.mse_plot)
+		self.log.info(f"graph of mse vs. epoch saved to {self.mse_plot}")
 
 	def plot_testing(self, losses): # not implemented
 
@@ -309,62 +399,6 @@ class Output():
 		plt.savefig(self.test_plot)
 		self.log.info(f"histogram of test seq_sims saved to {self.test_plot}")
 
-	def plot_diffusion(self, losses, epochs):
-
-		# Create the plot
-		plt.plot(epochs, losses.train.squared_errors, marker='o', color='red', label="Training")
-		plt.plot(epochs, losses.val.squared_errors, marker='o', color='blue', label="Validation")
-
-		# Adding title and labels
-		plt.title('Mean Squared Error vs. Epochs')
-		plt.xlabel('Epochs')
-		plt.ylabel('Mean Squared Error')
-		
-		# Add a legend to distinguish the line plots
-		plt.legend()
-		
-		# Display the plot
-		plt.grid(True)
-		plt.savefig(self.loss_plot)
-		self.log.info(f"graph of loss vs. epoch saved to {self.loss_plot}")
-
-	def plot_extraction(self, losses, epochs):
-
-		# Create the plot, only plotting final loss, will add functionality to plot kldiv, cel, and mse seperately later
-		plt.plot(epochs, losses.train.all_losses, marker='o', color='red', label="Training")
-		plt.plot(epochs, losses.val.all_losses, marker='x', color='blue', label="Validation")
-
-		# Adding title and labels
-		plt.title('Loss vs. Epochs')
-		plt.xlabel('Epochs')
-		plt.ylabel('Cross Entropy Loss')
-		
-		# Add a legend to distinguish the line plots
-		plt.legend()
-		
-		# Display the plot
-		plt.grid(True)
-		plt.savefig(self.loss_plot)
-		self.log.info(f"graph of loss vs. epoch saved to {self.loss_plot}")
-
-		plt.figure()
-
-		plt.plot(epochs, losses.train.matches, marker='o', color='red', label="Training Output")
-		plt.plot(epochs, losses.val.matches, marker='o', color='blue', label="Validation Output (no context)")
-		
-		# Adding title and labels
-		plt.title('Sequence Similarity vs. Epochs')
-		plt.xlabel('Epochs')
-		plt.ylabel('Sequence Similarity (%)')
-		
-		# Add a legend to distinguish the line plots
-		plt.legend()
-		
-		# Display the plot
-		plt.grid(True)
-		plt.savefig(self.seq_plot)
-		self.log.info(f"graph of seq_similarity vs. epoch saved to {self.seq_plot}")
-
 	def save_model(self, model, train_type="", appended_str=""):
 		if appended_str:
 			weights_path = self.weights_path.parent / Path(f"{'.'.join(self.weights_path.name.split(".")[:-1])}_{appended_str}.{self.weights_path.name.split(".")[-1]}") 
@@ -376,9 +410,10 @@ class Output():
 		weights_path = lambda train_type_str: self.weights_path.parent / Path(f"{'.'.join(self.weights_path.name.split(".")[:-1])}_{train_type_str}.{self.weights_path.name.split(".")[-1]}")
 		if train_type == "extraction":
 			model.save_WFEmbedding_weights(weights_path=weights_path("embedding"))
+			model.save_WFExtraction_weights(weights_path=weights_path("extraction"))
+		elif train_type == "vae":
 			model.save_WFEncoding_weights(weights_path=weights_path("encoding"))
 			model.save_WFDecoding_weights(weights_path=weights_path("decoding"))
-			model.save_WFExtraction_weights(weights_path=weights_path("extraction"))
 		elif train_type == "diffusion":
 			model.save_WFDiffusion_weights(weights_path=weights_path("diffusion"))
 

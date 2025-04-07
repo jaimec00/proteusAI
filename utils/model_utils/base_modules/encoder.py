@@ -1,14 +1,16 @@
 import torch
 import torch.nn as nn
 from utils.model_utils.geometric_attn.triton.geometric_attn import geometric_attn
-from utils.model_utils.base_modules.base_modules import MLP
+from utils.model_utils.base_modules.base_modules import MLP, adaLN
 
 class Encoder(nn.Module):
 
 	def __init__(self, 	d_model=512, d_hidden=2048, hidden_layers=0, 
 						heads=8, min_spread=3, max_spread=15, base_spread=15, num_spread=8, 
 						min_rbf=0.001, max_rbf=0.85, beta=2.0, learnable_spreads=True,
-						dropout=0.0, attn_dropout=0.0
+						dropout=0.0, attn_dropout=0.0,
+						use_adaLN=False, d_in_t=512, d_hidden_t=2048, hidden_layers_t=512
+
 					):
 		super(Encoder, self).__init__()
 
@@ -18,27 +20,51 @@ class Encoder(nn.Module):
 									min_rbf=min_rbf, max_rbf=max_rbf, beta=beta, learnable_spreads=learnable_spreads, 
 									dropout=attn_dropout
 								)
+
+		if use_adaLN:
+			self.attn_adaLN = adaLN(d_in=d_in_t, d_model=d_model, d_hidden=d_hidden_t, hidden_layers=hidden_layers_t)
+			self.ffn_adaLN = adaLN(d_in=d_in_t,  d_model=d_model, d_hidden=d_hidden_t, hidden_layers=hidden_layers_t)
+			
 		self.attn_norm = nn.LayerNorm(d_model)
+		self.ffn_norm = nn.LayerNorm(d_model)
+		
 		self.attn_dropout = nn.Dropout(dropout)
 
 		# Feed-forward network
 		self.ffn = MLP(d_in=d_model, d_out=d_model, d_hidden=d_hidden, hidden_layers=hidden_layers, dropout=dropout)
-		self.ffn_norm = nn.LayerNorm(d_model)
 		self.ffn_dropout = nn.Dropout(dropout)
 
-	# optional kwarg to apply film w/ timestep embedding, defined in diffusion module, does not affect others
-	def forward(self, x, coords, key_padding_mask=None, context=None, t=None, film=lambda e_t, val: val):
+	# optional kwarg to apply adaLN w/ timestep embedding, defined in diffusion module, does not affect others
+	def forward(self, x, coords, key_padding_mask=None, t=None):
 
-		context = x if context is None else context # optionally do cross attention
-		x2 = self.attn(	x, context, context,
-						coords=coords,
-						key_padding_mask=key_padding_mask
-					)
+		if t is not None: # ada ln
+		
+			gamma1, beta1, alpha1 = self.attn_adaLN(t)
+			gamma2, beta2, alpha2 = self.ffn_adaLN(t)
 
-		x = self.attn_norm(x + film(t, self.attn_dropout(x2)))
+			x = gamma1*self.attn_norm(x) + beta1
 
-		# Feed-forward network for wavefunction
-		x = self.ffn_norm(x + self.ffn_dropout(self.ffn(x)))
+			x2 = self.attn(	x, x, x,
+					coords=coords,
+					key_padding_mask=key_padding_mask
+				)
+
+			x = x + self.attn_dropout(x2)*alpha1
+
+			x = gamma2*self.ffn_norm(x) + beta2
+
+			x = x + self.ffn_dropout(self.ffn(x))*alpha2
+
+			return x
+
+		else: # regular layer norm
+
+			x2 = self.attn(	x, x, x,
+					coords=coords,
+					key_padding_mask=key_padding_mask
+				)
+			x = self.attn_norm(x + self.attn_dropout(x2))
+			x = self.ffn_norm(x + self.ffn_dropout(self.ffn(x)))
 
 		return x
 
@@ -55,8 +81,8 @@ class GeoAttention(nn.Module):
 
 	def __init__(self, 	d_model=512, 
 						heads=8, 
-						min_spread=1, max_spread=6, base_spread=20, num_spread=8, 
-						min_rbf=0.01, max_rbf=0.99, beta=2.0, learnable_spreads=False, 
+						min_spread=2.0,
+						min_rbf=0.01, max_rbf=0.99, 
 						dropout=0.1
 					):
 		super(GeoAttention, self).__init__()
@@ -69,35 +95,10 @@ class GeoAttention(nn.Module):
 
 		self.dropout = dropout
 
-		self.learnable_spreads = learnable_spreads
-		if self.learnable_spreads:
-			# see the comments in wavefunction embedding, same method
-			idxs = torch.arange(0, heads) 
-			diag_idx = idxs.unsqueeze(1).expand(-1, heads) 
-			col_idx = idxs.unsqueeze(0).expand(heads, -1)
-			dist = (diag_idx - col_idx).abs() 
-			dist_pct = dist / heads
-			inv_dist_pct = 1 - (dist_pct**(1/(2*heads))) 
-			log_inv = torch.log(inv_dist_pct) 
-
-			# this is for when there are more spreads than heads, i.e. the learnable weights is not a square matrix. 
-			# most weight goes to num_spreads//heads first spreads 
-			# (i.e. first 4 idxs if num_spreads is 4 times bigger), etc.
-			init_spread_weights = log_inv.unsqueeze(2).expand(-1, -1, num_spread//heads).reshape(heads, num_spread)
-			self.spread_weights = nn.Parameter(init_spread_weights) # initialize the learnable weight matrix
-		else:
-			# make sure dont have more spreads than heads if it is not learnable
-			num_spread = self.heads
-
-		# define spreads and spread weights matrix so each head's spread is a weighted sum of the allowed spreads
-		if base_spread == 1.0: # linear spacing
-			self.register_buffer("spreads", min_spread + (max_spread - min_spread) * torch.linspace(0,1,num_spread))
-		else: # log spacing
-			self.register_buffer("spreads", min_spread + (max_spread - min_spread) * (torch.logspace(0,1,num_spread, base_spread) - 1) / (base_spread - 1))
-
+		self.spread_weights = nn.Parameter(torch.zeros(heads))
+		self.beta_weights = nn.Parameter(torch.zeros(heads))
 		self.min_rbf = min_rbf
 		self.max_rbf = max_rbf
-		self.beta = beta
 
 		# QKV projection weight and bias matrices
 
@@ -115,14 +116,10 @@ class GeoAttention(nn.Module):
 		self.out_proj = nn.Linear(d_model, d_model, bias=False)
 
 	def get_spreads(self):
-		if self.learnable_spreads:
-			# get spread for each head, which is a learnable weighted sum of the allowed spreads
-			spread_weights = torch.softmax(self.spread_weights, dim=1)
-			spreads = torch.matmul(spread_weights, self.spreads.unsqueeze(1)).squeeze(1) # heads x nspread @ nspread x 1 -> heads
-		else:
-			spreads = self.spreads
+		return self.min_spread + torch.exp(self.spread_weights)
 
-		return spreads
+	def get_betas(self)
+		return torch.exp(self.beta_weights)
 
 	def forward(self, q, k, v, coords, key_padding_mask=None):
 		'''
@@ -143,8 +140,8 @@ class GeoAttention(nn.Module):
 		dropout = self.dropout if self.training else 0.0
 
 		# perform attention
-		out = geometric_attn(Q, K, V, coords, self.get_spreads(), mask=key_padding_mask, min_rbf=self.min_rbf, max_rbf=self.max_rbf, beta=self.beta, dropout=dropout)  # batch x heads x N x d_k
-
+		out = geometric_attn(Q, K, V, coords, self.get_spreads(), self.get_betas(), mask=key_padding_mask, min_rbf=self.min_rbf, max_rbf=self.max_rbf)  # batch x heads x N x d_k
+			
 		# cat heads
 		out = out.permute(0,2,3,1) # batch x N x d_k x heads
 		out = out.reshape(batch, N, self.d_model) # batch x N x d_k x heads --> batch x N x d_model

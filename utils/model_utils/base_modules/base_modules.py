@@ -8,7 +8,7 @@ class MLP(nn.Module):
 	base mlp class for use by other modules. uses gelu
 	'''
 
-	def __init__(self, d_in=512, d_out=512, d_hidden=1024, hidden_layers=0, dropout=0.1):
+	def __init__(self, d_in=512, d_out=512, d_hidden=1024, hidden_layers=0, dropout=0.1, act="gelu"):
 		super(MLP, self).__init__()
 
 		self.in_proj = nn.Linear(d_in, d_hidden)
@@ -17,6 +17,15 @@ class MLP(nn.Module):
 
 		self.in_dropout = nn.Dropout(dropout)
 		self.hidden_dropout = nn.ModuleList([nn.Dropout(dropout) for layer in range(hidden_layers)])
+
+		if act == "gelu":
+			self.act = F.gelu 
+		elif act == "silu":
+			self.act = F.silu
+		elif act == "relu":
+			self.act = F.relu
+		else:
+			self.act = lambda x: x # no activation if none of the above 
 
 		self.init_linears()
 
@@ -32,7 +41,7 @@ class MLP(nn.Module):
 	def forward(self, x):
 		x = self.in_dropout(F.gelu(self.in_proj(x)))
 		for hidden, dropout in zip(self.hidden_proj, self.hidden_dropout):
-			x = dropout(F.gelu(hidden(x)))
+			x = dropout(self.act(hidden(x)))
 		x = self.out_proj(x) # no activation or dropout on output
 
 		return x
@@ -87,6 +96,17 @@ class FiLM(nn.Module):
 		gamma, beta = torch.split(gamma_beta, dim=-1, split_size_or_sections=gamma_beta.shape[-1] // 2)
 		return gamma*x + beta
 
+class adaLN(nn.Module):
+	'''adaptive layer norm to perform affine transformation conditioned on timestep'''
+	def __init__(self, d_in=512, d_model=512, d_hidden=1024, hidden_layers=0, dropout=0.0):
+		super(adaLN, self).__init__()
+		self.gamma_beta_alpha = MLP(d_in=d_in, d_out=3*d_model, d_hidden=d_hidden, hidden_layers=hidden_layers, dropout=dropout, act="silu")
+
+	def forward(self, e_t):
+
+		gamma_beta_alpha = self.gamma_beta_alpha(e_t)
+		gamma, beta, alpha = torch.chunk(gamma_beta_alpha, chunks=3, dim=-1)
+		return gamma, beta, alpha
 
 # initializations for linear layers
 def init_orthogonal(m):
