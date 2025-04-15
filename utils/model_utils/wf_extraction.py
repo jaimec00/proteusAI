@@ -18,9 +18,8 @@ class WaveFunctionExtraction(nn.Module):
 	def __init__(self, 	d_model=512, num_aas=20, # model dimension
 						mlp_pre=False, d_hidden_pre=2048, hidden_layers_pre=0, norm_pre=False,
 						mlp_post=False, d_hidden_post=2048, hidden_layers_post=0,
-						encoder_layers=8, heads=8, learnable_spreads=True,
-						min_spread=3.0, max_spread=15.0, base_spreads=1.0, num_spread=32,
-						min_rbf=0.001, max_rbf=0.85, beta=2.0,
+						encoder_layers=8, heads=8, 
+						use_bias=False, min_spread=3.0, min_rbf=0.001, max_rbf=0.85, 
 						d_hidden_attn=2048, hidden_layers_attn=0,
 						dropout=0.10, attn_dropout=0.00,
 				):
@@ -28,34 +27,34 @@ class WaveFunctionExtraction(nn.Module):
 		super(WaveFunctionExtraction, self).__init__()
 
 		self.dropout = nn.Dropout(dropout)
+		self.space_enc = MLP(d_in=d_model, d_out=d_model, d_hidden=d_hidden_pre, hidden_layers=hidden_layers_pre)
 		self.mlp_pre = MLP(d_in=d_model, d_out=d_model, d_hidden=d_hidden_pre, hidden_layers=hidden_layers_pre)
 		self.norm_pre = nn.LayerNorm(d_model)
 		self.mlp_post = MLP(d_in=d_model, d_out=d_model, d_hidden=d_hidden_post, hidden_layers=hidden_layers_post)
 		self.norm_post = nn.LayerNorm(d_model)
 
-		self.encoders = nn.ModuleList([ 
-											Encoder(	d_model=d_model, d_hidden=d_hidden_attn, hidden_layers=hidden_layers_attn, 
-														heads=heads, min_spread=min_spread, min_rbf=min_rbf, max_rbf=max_rbf,
-														dropout=dropout
-													) 
-											for _ in range(encoder_layers)
-										])
+		self.encoders = nn.ModuleList([ Encoder(	d_model=d_model, heads=heads, d_hidden=d_hidden_attn, hidden_layers=hidden_layers_attn, 
+													use_bias=use_bias, min_spread=min_spread, min_rbf=min_rbf, max_rbf=max_rbf, # for geo attn, if needed
+													dropout=dropout
+												) 
+										for _ in range(encoder_layers)
+									])
 
 		# map to aa prob logits
 		self.out_proj = nn.Linear(d_model, num_aas)
 		init_xavier(self.out_proj)
 
-	def forward(self, wf, coords_alpha, key_padding_mask=None):
+	def forward(self, wf, coords_alpha, key_padding_mask=None, wf_no_aa=None,):
 
-		wf = wf + self.dropout(self.mlp_pre(wf))
-		wf = self.norm_pre(wf)
+		space_enc = wf + self.dropout(self.space_enc(wf_no_aa)) # using the raw wf, i think wf_no_aa just confuses the model
+		wf = wf + self.dropout(self.mlp_pre(wf)) # using the raw wf, i think wf_no_aa just confuses the model
+		wf = self.norm_pre(wf + space_enc)
 
 		# geometric attention encoders
 		for encoder in self.encoders:
 			wf = encoder(wf, coords_alpha, key_padding_mask=key_padding_mask)
 
 		wf = wf + self.dropout(self.mlp_post(wf))
-
 		wf = self.norm_post(wf)
 
 		# map to probability logits
@@ -75,10 +74,10 @@ class WaveFunctionExtraction(nn.Module):
 
 		return aa_labels
 
-	def extract(self, wf, coords_alpha, key_padding_mask=None, temp=1e-6):
+	def extract(self, wf, coords_alpha, key_padding_mask=None, wf_no_aa=None, temp=1e-6):
 
 		# perform extraction
-		aa_logits = self.forward(wf, coords_alpha, key_padding_mask)
+		aa_logits = self.forward(wf, coords_alpha, key_padding_mask=key_padding_mask, wf_no_aa=wf_no_aa)
 
 		# sample from distribution
 		aas = self.sample(aa_logits, temp)

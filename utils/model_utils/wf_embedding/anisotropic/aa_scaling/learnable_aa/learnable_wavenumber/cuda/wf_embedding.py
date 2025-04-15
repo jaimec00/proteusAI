@@ -1,8 +1,8 @@
 import torch
 import numpy as np
-from utils.model_utils.wf_embedding.anisotropic.aa_scaling.learnable_aa.cuda import wf_embedding_kernel
+from utils.model_utils.wf_embedding.anisotropic.aa_scaling.learnable_aa.learnable_wavenumber.cuda import wf_embedding_kernel
 
-# for testing and development
+# # for testing and development
 # from torch.utils.cpp_extension import load
 # import os
 # base_dir = os.path.dirname(os.path.abspath(__file__))
@@ -13,13 +13,13 @@ from utils.model_utils.wf_embedding.anisotropic.aa_scaling.learnable_aa.cuda imp
 # 	verbose=True  # Verbose output for debugging
 # )
 
-def wf_embedding(coordsA, coordsB, aa_labels, aa_magnitudes, wavenumbers, dropout_p=0.0, mask=None):
-	return _wf_embedding.apply(coordsA, coordsB, aa_labels, aa_magnitudes, wavenumbers, dropout_p, mask)
+def wf_embedding(coordsA, coordsB, aa_labels, aa_magnitudes, wavenumbers, mask=None):
+	return _wf_embedding.apply(coordsA, coordsB, aa_labels, aa_magnitudes, wavenumbers, mask)
 
 class _wf_embedding(torch.autograd.Function):
 
 	@staticmethod
-	def forward(ctx, coordsA, coordsB, aa_labels, aa_magnitudes, wavenumbers, dropout_p, mask):
+	def forward(ctx, coordsA, coordsB, aa_labels, aa_magnitudes, wavenumbers, mask):
 
 		# get tensor sizes
 		batch, N, space = coordsA.shape
@@ -31,6 +31,7 @@ class _wf_embedding(torch.autograd.Function):
 		# gather the dtypes so can convert the output to this. coords A is what is used to determine O dtype, and aa_magnitudes dtype for d_aa
 		o_dtype = coordsA.dtype
 		d_aa_dtype = aa_magnitudes.dtype
+		d_k_dtype = wavenumbers.dtype
 
 		# bake the mask into coords w/ arbitrary val. less likely to give NaNs than using inf
 		coordsA = torch.where(mask.unsqueeze(2), 12345, coordsA) # only need to bake the mask into one of the coords tensors
@@ -53,20 +54,17 @@ class _wf_embedding(torch.autograd.Function):
 
 		# for bwd pass
 		d_aa = torch.zeros(batch, N, d_model, num_aa, dtype=torch.float32, device=aa_magnitudes.device).contiguous()
-
-		rng = np.random.default_rng()  # Create a new random generator
-		rng_seed = rng.integers(0, (2**32)-1, dtype=np.uint32)
+		d_k = torch.zeros(batch, N, d_model, dtype=torch.float32, device=wavenumbers.device).contiguous()
 
 		# call the kernel
 		wf_embedding_kernel.forward(    coordsA, coordsB, 
 										aa_labels, aa_magnitudes,
 										wavenumbers, 
-										out, d_aa,
-										dropout_p, rng_seed
-								)
+										out, d_aa, d_k
+									)
 
 		# save for the backward, and recast to input dtype
-		ctx.save_for_backward(d_aa.to(d_aa_dtype))
+		ctx.save_for_backward(d_aa.to(d_aa_dtype), d_k.to(d_k_dtype))
 
 		return out.to(o_dtype)
 
@@ -74,9 +72,12 @@ class _wf_embedding(torch.autograd.Function):
 	def backward(ctx, dO):
 
 		# load saved tensors from bwd
-		d_aa, = ctx.saved_tensors
+		d_aa, d_k = ctx.saved_tensors
 
 		d_aa = (dO.unsqueeze(3) * d_aa).sum(dim=(0,1)) # mult w/ dO and sum batch and N dims; Z x N x D x 1 * Z x N x D x A --> D x A
 		d_aa = d_aa[::2, :] + d_aa[1::2, :] # sum real and imag parts; K x A
 
-		return None, None, None, d_aa, None, None, None
+		d_k = (dO*d_k).sum(dim=(0,1)) # Z x N x D * Z x N x D --> D
+		d_k = d_k[::2] + d_k[1::2] # sum the real and imag parts; K
+
+		return None, None, None, d_aa, d_k, None

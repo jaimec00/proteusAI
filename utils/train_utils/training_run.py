@@ -18,6 +18,9 @@ from utils.train_utils.losses import TrainingRunLosses
 
 # ----------------------------------------------------------------------------------------------------------------------
 
+# detect anomolies in training, particularly nans when training the VAE
+torch.autograd.set_detect_anomaly(True, check_nan=True) # throws error when nan encountered
+
 class TrainingRun():
 	'''
 	the main class for training. holds all of the configuration arguments, and organnizes them into hyper-parameters, 
@@ -49,7 +52,18 @@ class TrainingRun():
 								args.training_parameters.regularization.use_chain_mask, args.data.max_resolution
 							)
 		
-		self.losses = TrainingRunLosses(args.training_parameters.train_type, args.training_parameters.regularization.label_smoothing, args.training_parameters.loss.beta)
+		self.losses = TrainingRunLosses(	# general
+											args.training_parameters.train_type, 
+											# for extraction
+											args.training_parameters.loss.cel.label_smoothing, 
+											# for kl annealing
+											args.training_parameters.loss.kl.beta, 
+											args.training_parameters.loss.kl.kappa, 
+											args.training_parameters.loss.kl.midpoint, 
+											args.training_parameters.loss.kl.annealing, 
+											# for diffusion nll
+											args.training_parameters.loss.nll.gamma
+										)
 
 		self.output = Output(	args.output.out_path,
 								cel_plot=args.output.cel_plot, seq_plot=args.output.seq_plot, 
@@ -99,11 +113,9 @@ class TrainingRun():
 								d_model=self.hyper_parameters.d_model, 
 								d_latent=self.hyper_parameters.d_latent, # same as dmodel for preliminary tests 
 								num_aas=self.hyper_parameters.num_aa,
+								old=self.training_parameters.train_type == "old",
 
-								# wf embedding params
-								embedding_min_wl=self.hyper_parameters.embedding.min_wl,
-								embedding_max_wl=self.hyper_parameters.embedding.max_wl,
-								embedding_base_wl=self.hyper_parameters.embedding.base_wl,
+								# wf embedding params (everything is learnable, so no configs)
 
 								# wf encoding params
 
@@ -118,6 +130,7 @@ class TrainingRun():
 								# encoder layers
 								encoding_encoder_layers=self.hyper_parameters.encoding.encoders.layers,
 								encoding_heads=self.hyper_parameters.encoding.encoders.heads,
+								encoding_use_bias=self.hyper_parameters.encoding.encoders.use_bias,
 								encoding_min_spread=self.hyper_parameters.encoding.encoders.min_spread,
 								encoding_min_rbf=self.hyper_parameters.encoding.encoders.min_rbf,
 								encoding_max_rbf=self.hyper_parameters.encoding.encoders.max_rbf,
@@ -128,6 +141,8 @@ class TrainingRun():
 
 								# beta scheduler
 								diffusion_alpha_bar_min=self.hyper_parameters.diffusion.scheduler.alpha_bar_min,
+								diffusion_beta_min=self.hyper_parameters.diffusion.scheduler.beta_min,
+								diffusion_beta_max=self.hyper_parameters.diffusion.scheduler.beta_max,
 								diffusion_noise_schedule_type=self.hyper_parameters.diffusion.scheduler.noise_schedule_type, 
 								diffusion_t_max=self.hyper_parameters.diffusion.scheduler.t_max,
 
@@ -143,6 +158,7 @@ class TrainingRun():
 								# encoder layers
 								diffusion_encoder_layers=self.hyper_parameters.diffusion.encoders.layers,
 								diffusion_heads=self.hyper_parameters.diffusion.encoders.heads,
+								diffusion_use_bias=self.hyper_parameters.diffusion.encoders.use_bias,
 								diffusion_min_spread=self.hyper_parameters.diffusion.encoders.min_spread,
 								diffusion_min_rbf=self.hyper_parameters.diffusion.encoders.min_rbf,
 								diffusion_max_rbf=self.hyper_parameters.diffusion.encoders.max_rbf,
@@ -162,6 +178,7 @@ class TrainingRun():
 								# encoder layers
 								decoding_encoder_layers=self.hyper_parameters.decoding.encoders.layers,
 								decoding_heads=self.hyper_parameters.decoding.encoders.heads,
+								decoding_use_bias=self.hyper_parameters.decoding.encoders.use_bias,
 								decoding_min_spread=self.hyper_parameters.decoding.encoders.min_spread,
 								decoding_min_rbf=self.hyper_parameters.decoding.encoders.min_rbf,
 								decoding_max_rbf=self.hyper_parameters.decoding.encoders.max_rbf,
@@ -181,6 +198,7 @@ class TrainingRun():
 								# encoder layers
 								extraction_encoder_layers=self.hyper_parameters.extraction.encoders.layers,
 								extraction_heads=self.hyper_parameters.extraction.encoders.heads,
+								extraction_use_bias=self.hyper_parameters.extraction.encoders.use_bias,
 								extraction_min_spread=self.hyper_parameters.extraction.encoders.min_spread,
 								extraction_min_rbf=self.hyper_parameters.extraction.encoders.min_rbf,
 								extraction_max_rbf=self.hyper_parameters.extraction.encoders.max_rbf,
@@ -209,22 +227,36 @@ class TrainingRun():
 		if self.training_parameters.weights.use_extraction_weights:
 			self.model.load_WFExtraction_weights(self.training_parameters.weights.use_extraction_weights, self.gpu)
 		
-		# what weights should be frozen depending on training type (see config file for explanation)
-		if self.training_parameters.train_type == "extraction":
+		# what weights should be frozen depending on training type 
+		if self.training_parameters.train_type == "extraction": # train embedding and extraction only
 			self.model.freeze_WFEncoding_weights()
 			self.model.freeze_WFDiffusion_weights()
 			self.model.freeze_WFDecoding_weights()
 
-		if self.training_parameters.train_type == "vae":
+		elif self.training_parameters.train_type == "vae": # train encoder and decoder using trained (and frozen) embedding
 			self.model.freeze_WFEmbedding_weights()
 			self.model.freeze_WFDiffusion_weights()
 			self.model.freeze_WFExtraction_weights()
+		
+		elif self.training_parameters.train_type == "extraction_finetune": # finetune extractor on decoder outputs, only extractor is not frozen
+			self.model.freeze_WFEmbedding_weights()
+			self.model.freeze_WFEncoding_weights()
+			self.model.freeze_WFDiffusion_weights()
+			self.model.freeze_WFDecoding_weights()
 
-		if self.training_parameters.train_type == "diffusion":
+		elif self.training_parameters.train_type == "diffusion": # train diffusion on encoder outputs, diffusion is the only one not frozen
 			self.model.freeze_WFEmbedding_weights()
 			self.model.freeze_WFEncoding_weights()
 			self.model.freeze_WFDecoding_weights()
 			self.model.freeze_WFExtraction_weights()
+
+		elif self.training_parameters.train_type == "old":
+			self.model.freeze_WFEncoding_weights()
+			self.model.freeze_WFDiffusion_weights()
+			self.model.freeze_WFDecoding_weights()
+
+		else:
+			raise ValueError(f"invalid train_type selected, {self.training_parameters.train_type=}. options are ['extraction', 'vae', 'extraction_finetune', 'diffusion']") 
 
 		# get number of parameters for logging
 		self.training_parameters.num_embedding_params = sum(p.numel() for p in self.model.wf_embedding.parameters())
@@ -233,6 +265,9 @@ class TrainingRun():
 		self.training_parameters.num_decoding_params = sum(p.numel() for p in self.model.wf_decoding.parameters())
 		self.training_parameters.num_extraction_params = sum(p.numel() for p in self.model.wf_extraction.parameters())
 		self.training_parameters.num_params = self.training_parameters.num_embedding_params + self.training_parameters.num_encoding_params + self.training_parameters.num_diffusion_params + self.training_parameters.num_decoding_params +  self.training_parameters.num_extraction_params 
+
+		# compile the model (more precisely the computational graph). doesnt seem to work, no time to debug anyways
+		# self.model = torch.compile(self.model)
 
 		# print gradients at each step if in debugging mode
 		if self.debug.debug_grad:
@@ -276,17 +311,28 @@ class TrainingRun():
 
 		self.output.log.info("loading scheduler...")
 
-		# compute the scale
-		if self.training_parameters.lr.lr_step == 0.0:
-			scale = self.hyper_parameters.d_model**(-0.5)
+		if self.training_parameters.lr.lr_type == "attn":
+
+			# compute the scale
+			if self.training_parameters.lr.lr_step == 0.0:
+				scale = self.hyper_parameters.d_model**(-0.5)
+			else:
+				scale = self.training_parameters.lr.warmup_steps**(0.5) * self.training_parameters.lr.lr_step # scale needed so max lr is what was specified
+			
+			def attn(step):
+				'''lr scheduler from attn paper'''
+				return scale * min((step+1)**(-0.5), (step+1)*(self.training_parameters.lr.warmup_steps**(-1.5)))
+
+			self.scheduler = lr_scheduler.LambdaLR(self.optim, attn)
+
+		elif self.training_parameters.lr.lr_type == "static":
+			def static(step):
+				return self.training_parameters.lr.lr_step
+			self.scheduler = lr_scheduler.LambdaLR(self.optim, static)
+			
 		else:
-			scale = self.training_parameters.lr.warmup_steps**(0.5) * self.training_parameters.lr.lr_step # scale needed so max lr is what was specified
-		
-		def attn_lr(step):
-			'''lr scheduler from attn paper'''
-			return scale * min((step+1)**(-0.5), (step+1)*(self.training_parameters.lr.warmup_steps**(-1.5)))
-		
-		self.scheduler = lr_scheduler.LambdaLR(self.optim, attn_lr)
+			raise ValueError(f"invalid lr_type: {self.training_parameters.lr.lr_type}. options are ['attn', 'static']")
+
 
 	def model_checkpoint(self, epoch_idx):
 		if (epoch_idx+1) % self.output.model_checkpoints == 0: # model checkpointing
@@ -294,7 +340,7 @@ class TrainingRun():
 
 	def training_converged(self, epoch_idx):
 
-		if self.training_parameters.train_type == "extraction":
+		if self.training_parameters.train_type in ["extraction", "extraction_finetune", "old"]:
 			criteria = self.losses.val.cel
 		if self.training_parameters.train_type == "vae":
 			criteria = self.losses.val.all_losses

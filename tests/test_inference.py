@@ -8,35 +8,8 @@ def main():
     device = torch.device("cuda")
 
     # setup model
-    model = proteusAI(
-                        d_model=512, num_aas=20, 
-
-						# wf embedding params
-						embedding_min_wl=2, embedding_max_wl=10, embedding_base_wl=25, embedding_learnable_aa=False,
-
-						# wf diffusion params
-						diffusion_beta_min=1e-4, diffusion_beta_max=0.02, diffusion_beta_schedule_type="linear", diffusion_t_max=100,
-						diffusion_min_wl=0.001, diffusion_max_wl=100, # for sinusoidal timestep embedding
-						diffusion_mlp_timestep=False, diffusion_d_hidden_timestep=2048, diffusion_hidden_layers_timestep=0, diffusion_norm_timestep=True,
-						diffusion_mlp_pre=True, diffusion_d_hidden_pre=2048, diffusion_hidden_layers_pre=0, diffusion_norm_pre=True,
-						diffusion_mlp_post=True, diffusion_d_hidden_post=2048, diffusion_hidden_layers_post=0, diffusion_norm_post=True,
-						diffusion_encoder_layers=8, diffusion_heads=8, diffusion_learnable_spreads=True,
-						diffusion_min_spread=1.5, diffusion_max_spread=8.0, diffusion_base_spreads=1.0, diffusion_num_spread=32,
-						diffusion_min_rbf=0.001, diffusion_max_rbf=0.85, diffusion_beta=2.0,
-						diffusion_d_hidden_attn=2048, diffusion_hidden_layers_attn=0,
-
-						# wf extraction params
-						extraction_mlp_pre=True, extraction_d_hidden_pre=2048, extraction_hidden_layers_pre=0, extraction_norm_pre=True,
-						extraction_mlp_post=True, extraction_d_hidden_post=2048, extraction_hidden_layers_post=0, extraction_norm_post=True,
-						extraction_encoder_layers=8, extraction_heads=8, extraction_learnable_spreads=True,
-						extraction_min_spread=3.0, extraction_max_spread=15.0, extraction_base_spreads=1.0, extraction_num_spread=32,
-						extraction_min_rbf=0.001, extraction_max_rbf=0.85, extraction_beta=2.0,
-						extraction_d_hidden_attn=2048, extraction_hidden_layers_attn=0,
-
-						# dropout params
-						dropout=0.10, attn_dropout=0.00, wf_dropout=0.00,
-    )
-    model_path = "/scratch/hjc2538/projects/proteusAI/models/diffusion_debugged/model_parameters_e9_s0.0.pth"
+    model = proteusAI(diffusion_encoder_layers=1, diffusion_use_bias=True)
+    model_path = "/scratch/hjc2538/projects/proteusAI/models/DIFFUSION_biasedattn_noadaln/model_parameters.pth"
     model_weights = torch.load(model_path, map_location=device, weights_only=True)
     model.load_state_dict(model_weights)
     model = model.to(device)
@@ -57,8 +30,6 @@ def main():
 
     outputs, labels, coords, chain_idxs_all = [],[],[], []
 
-    norm = CrossFeatureNorm(d_model=512)
-
     with torch.no_grad():
 
         pbar = tqdm(total=len(data.test_data), desc="epoch_progress", unit="step")
@@ -71,19 +42,48 @@ def main():
             chain_mask = chain_mask.to(device)
             key_padding_mask = key_padding_mask.to(device)
 
-            coords_alpha, coords_beta = model.get_CaCb_coords(coords_batch, chain_idxs)
+            coords_alpha, coords_beta = model.wf_embedding.get_CaCb_coords(coords_batch, chain_idxs)
 
             # first predict with the true seq as input
             # prediction_batch = torch.nn.functional.one_hot(torch.where(label_batch==-1, 20, label_batch), num_classes=21)
-            # aas = label_batch # first see if can actually denoise and reconstruct seq
-            aas = -torch.ones_like(label_batch)
+            aas = label_batch # first see if can actually denoise and reconstruct seq
+            # aas = -torch.ones_like(label_batch)
+            # aas = torch.full_like(label_batch, 5)
 
-            true = model.wf_embedding(coords_alpha, coords_beta, aas, key_padding_mask)
+            # wf = model.wf_embedding(coords_alpha, coords_beta, aas, key_padding_mask)
+            wf_no_aa = model.wf_embedding(coords_alpha, coords_beta, aas, key_padding_mask, no_aa=True)
+            wf = wf_no_aa
 
-            # t = 100
-            t = torch.full((1,1,1), 100)
+            latent_wf = model.wf_encoding.encode(wf, coords_alpha, key_padding_mask=key_padding_mask, wf_no_aa=wf_no_aa)
+            print(latent_wf)
 
+            decode_wf_nonoise = model.wf_decoding(latent_wf, coords_alpha, key_padding_mask=key_padding_mask, wf_no_aa=wf_no_aa)
+            output_nonoise = model.wf_extraction.extract(decode_wf_nonoise, coords_alpha, key_padding_mask, wf_no_aa=wf_no_aa)
+            seq_sim_nonoise, matches, valid = get_seq_sim(output_nonoise, label_batch, key_padding_mask)
             
+            t = 5
+
+            t_tensor = torch.tensor([t], device=wf.device).unsqueeze(0).unsqueeze(1).expand(wf.size(0), 1, 1)
+            abar, _ = model.wf_diffusion.noise_scheduler(t_tensor)
+
+            latent_noise, noise = model.wf_diffusion.noise(latent_wf, t)
+            noise_pred = model.wf_diffusion(latent_noise, coords_alpha, t_tensor, key_padding_mask=key_padding_mask)
+            # print((noise_pred-noise)**2)
+            latent_wf = model.wf_diffusion.denoise(latent_noise, coords_alpha, t, key_padding_mask=key_padding_mask, wf_no_aa=wf_no_aa)
+
+            decode_wf = model.wf_decoding(latent_wf, coords_alpha, key_padding_mask=key_padding_mask, wf_no_aa=wf_no_aa)
+            output = model.wf_extraction.extract(decode_wf, coords_alpha, key_padding_mask, wf_no_aa=wf_no_aa)
+
+            wf = model.wf_embedding(coords_alpha, coords_beta, output, key_padding_mask)
+            latent_wf = model.wf_encoding.encode(wf, coords_alpha, key_padding_mask=key_padding_mask, wf_no_aa=wf_no_aa)
+
+            seq_sim, matches, valid = get_seq_sim(output, label_batch, key_padding_mask)
+
+            print(seq_sim, seq_sim_nonoise, abar.mean().item())
+
+
+
+
             # noised_wf, noise = model.wf_diffusion.noise(true, t=t)
 
             # pred_wf = model.wf_diffusion.denoise(noised_wf, coords_alpha, t_start=t, key_padding_mask=key_padding_mask)
@@ -103,25 +103,25 @@ def main():
 
             # output = model.wf_extraction.extract(pred_wf, coords_alpha, key_padding_mask, temp=1e-6)
 
-            # run the model
-            output = model(coords_batch, aas=aas, chain_idxs=chain_idxs, key_padding_mask=key_padding_mask,
-                            inference=True,
-                            cycles=100, 
-                            temp=1e-6
-                            )
+            # # run the model
+            # output = model(coords_alpha=coords_alpha, coords_beta=coords_beta, aas=aas, key_padding_mask=key_padding_mask,
+            #                 inference=True, t=t,
+            #                 cycles=1, 
+            #                 temp=1e-6
+            #                 )
 
             # compute seq sims
-            seq_sim, matches, valid = get_seq_sim(output, label_batch, key_padding_mask)
-            seq_sims.append(seq_sim)
-            all_matches += matches
-            all_valid += valid
-            outputs.append(output)
-            labels.append(label_batch)
-            coords.append(coords_batch)
-            chain_idxs_all.append(chain_idxs)
-            pbar.update(1)
 
-            break
+            # seq_sims.append(seq_sim)
+            # all_matches += matches
+            # all_valid += valid
+            # outputs.append(output)
+            # labels.append(label_batch)
+            # coords.append(coords_batch)
+            # chain_idxs_all.append(chain_idxs)
+            # pbar.update(1)
+
+            # break
 
     
     seq_sims = torch.tensor(seq_sims)

@@ -344,7 +344,7 @@ class Data():
 			chain_idxs = []
 
 			# chain_idxs is a list of lists of lists. outermost is of samples, next is chains in the sample, like [startidx, stopidx]
-			# don't need to be tensors, since number of chains in the samples is very variable
+			# don't need to be tensors, since number of chains in the samples is very variable. tensorized and flattened in get_coords function to compute cb
 
 			for idx, _ in batch:
 

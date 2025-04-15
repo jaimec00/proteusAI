@@ -49,17 +49,22 @@ class VAEOutput():
 
 	def compute_losses(self):
 		return self.batch_parent.epoch_parent.training_run_parent.losses.loss_function(	self.latent_mean_pred, self.latent_log_var_pred, 
-																						self.wf_mean_pred, self.wf_mean_true
+																						self.wf_mean_pred, self.wf_mean_true, self.batch_parent.labels==-1, 
 																					)
 
 class DiffusionOutput():
-	def __init__(self, batch_parent, noise_pred, true_noise):
+	def __init__(self, batch_parent, noise_pred, true_noise, noised_latent, latent_mean, latent_logvar, abars):
 		self.batch_parent = batch_parent
-		self.valid_toks = (batch_parent.labels!=-1).sum()
-		self.noise_pred = noise_pred.masked_fill(batch_parent.labels.unsqueeze(2)==-1, 0) # set both to 0 for invalid positions so sum of squared errors is not affected
-		self.true_noise = true_noise.masked_fill(batch_parent.labels.unsqueeze(2)==-1, 0)
+		self.noise_pred = noise_pred
+		self.true_noise = true_noise
+		self.latent_mean = latent_mean
+		self.latent_logvar = latent_logvar
+		self.noised_latent = noised_latent
+		self.mask = batch_parent.labels.unsqueeze(2)==-1
+		self.valid_toks = (~self.mask).sum()
+		self.abars = abars
 	def compute_losses(self):
-		return self.batch_parent.epoch_parent.training_run_parent.losses.loss_function(self.noise_pred, self.true_noise)
+		return self.batch_parent.epoch_parent.training_run_parent.losses.loss_function(self.noise_pred, self.true_noise, self.noised_latent, self.latent_mean, self.latent_logvar, self.abars, self.mask)
 
 class InferenceOutput():
 	def __init__(self, batch_parent, seq_pred):

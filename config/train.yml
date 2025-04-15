@@ -23,10 +23,7 @@ hyper_parameters:
   # ----------------------------------------------------------------------------
   
   # wf embedding params
-  embedding:
-    min_wl: 3.5
-    max_wl: 15.0
-    base_wl: 20.0
+  # no params now, everything is learnable, including wavenumbers and cb/aa scaling factors per wavenumber
 
   # ----------------------------------------------------------------------------
 
@@ -41,6 +38,7 @@ hyper_parameters:
     encoders:
       layers: 4
       heads: 8
+      use_bias: False # spreads and rbf params are ignored if this is False, looks like spatial encoding works, so will prob remove geo attn
       min_spread: 2.0 
       min_rbf: 0.00
       max_rbf: 1.00
@@ -52,19 +50,22 @@ hyper_parameters:
   # wf diffusion params
   diffusion:
     scheduler:
-      alpha_bar_min: 0.30 # snr ratio in final timestep 
-      noise_schedule_type: "cosine" # only one implemented atm
+      alpha_bar_min: 0.01 # snr ratio in final timestep most of signal preserved, since this is refinement
+      beta_min: 0.02 # betas not used, linear is a linear abar scheduler
+      beta_max: 0.04
+      noise_schedule_type: "linear" # only one implemented atm
       t_max: 100
     timestep:
       d_in: 256
       d_hidden: 1024
-      hidden_layers: 1 
+      hidden_layers: 1
     post_process:
       d_hidden: 1024
-      hidden_layers: 1
+      hidden_layers: 0
     encoders:
-      layers: 4
-      heads: 8
+      layers: 2
+      heads: 4
+      use_bias: False
       min_spread: 2.0 
       min_rbf: 0.00 
       max_rbf: 1.00
@@ -84,6 +85,7 @@ hyper_parameters:
     encoders:
       layers: 4
       heads: 8
+      use_bias: False
       min_spread: 2.0 
       min_rbf: 0.00
       max_rbf: 1.00
@@ -103,6 +105,7 @@ hyper_parameters:
     encoders:
       layers: 4
       heads: 8
+      use_bias: False # testing if attention works with no rbf bias. 
       min_spread: 2.0
       min_rbf: 0.00
       max_rbf: 1.00
@@ -114,24 +117,28 @@ hyper_parameters:
 # training params
 training_parameters:
 
-  train_type: "extraction"  # options are:
+  train_type: "diffusion"  # options are:
                             #   extraction:
-                            #     train extraction model only. if learnable AA is 
-                            #     true, embedding model learns also. diffusion doesn't participate.
+                            #     train embedding and extraction together, defines the wf space. everything else is frozen
+                            #   vae:
+                            #     train encoder and decoder on embedding outputs. defines the latent space. embedding, extraction, and diffusion are frozen
+                            #   extraction_finetune:
+                            #     train extraction on reconstructed wf (decoder output). allows extractor to learn to predict seq from noisy wf. only extractor is not frozen
                             #   diffusion:
-                            #     train diffusion model only, embedding is frozen, extraction doesn't participate.
+                            #     train diffusion on encoder output (latent wf). only diffusion is not frozen
+                            #   old:
+                            #     old vanilla model, consists of embedder and extractor only, but embedder only encodes struct info, no aa specific scaling factors
 
   epochs: 100  # number of epochs
 
   # for pre-training
   weights:
-    use_model: "" 
-    use_embedding_weights: ""
-    use_encoding_weights: ""
+    use_model: ""
+    use_embedding_weights: "/scratch/hjc2538/projects/proteusAI/models/extraction_5_w_normed_wf/model_parameters_embedding.pth"
+    use_encoding_weights: "/scratch/hjc2538/projects/proteusAI/models/vae_w_spaceEnc/tmp/model_parameters_encoding.pth" 
     use_diffusion_weights: ""
-    use_decoding_weights: ""
-    use_extraction_weights: ""
-
+    use_decoding_weights: "/scratch/hjc2538/projects/proteusAI/models/vae_w_spaceEnc/tmp/model_parameters_decoding.pth"
+    use_extraction_weights: "/scratch/hjc2538/projects/proteusAI/models/ext_finetune_w_spaceEnc/tmp/model_parameters_extraction.pth"
   inference:
     temperature: !!float 1e-6
     cycles: 10
@@ -139,7 +146,7 @@ training_parameters:
   # convergence criteria
   early_stopping:
     thresh: 0.00 # delta validation sequence similarity, if below this value, training is stopped. negative values mean the seq sim must decrease before stopping
-    tolerance: 5 # how many epochs to consider when calculating delta seq sim for early stopping. takes the max delta seq sim between current epoch and last n epochs, and decides based on this
+    tolerance: 15 # how many epochs to consider when calculating delta seq sim for early stopping. takes the max delta seq sim between current epoch and last n epochs, and decides based on this
   
   adam:
     beta1: 0.9  # for adam optim 
@@ -147,20 +154,28 @@ training_parameters:
     epsilon: !!float 10e-9  # for adam optim (!!float lets PyYAML know this is a float, not str)
   
   regularization:
-    dropout: 0.1  # percentage of dropout
+    dropout: 0.15  # percentage of dropout
     wf_dropout: 0.00 # dropout for wf embedding, drops out this pct of sources, diff sources dropped for diff wavenumbers
-    label_smoothing: 0.0  # percentage of label smoothing to use for loss calculation
     noise_coords_std: 0.00 # stdev of noise injection into coordinates during training
     use_chain_mask: True # whether to mask all chains except the sequence cluster representative in loss computation, all chains still used for fwd pass as context though
 
   loss:
     # i think grad accum is v important for diffusion, will see if this helps
-    accumulation_steps: 8  # grad accumulation; how many batches to process before learning step
-    beta: 5.0 # for beta-VAE
-    grad_clip_norm: 1.0 # max L2 norm of gradients for gradient clipping. if set to 0, no gradient clipping is applied (not recommended loss is a sum)
+    accumulation_steps: 4  # grad accumulation; how many batches to process before learning step
+    cel:
+      label_smoothing: 0.0
+    kl:
+      annealing: False # only beta used if this is false
+      beta: 0.1 # for beta-VAE, this serves as the max beta in kl annealing
+      kappa: 0.001 # controls the steepness of the transition for kl annealing
+      midpoint: 8000 # number of steps to pass the midpoint in sigmoidal kl annealing
+    nll:
+      gamma: 0.0 # for diffusion NLL auxiliary loss, 0 means no nll, just used for logging
+    grad_clip_norm: 1.0 # max L2 norm of gradients for gradient clipping. if set to 0, no gradient clipping is applied (not recommended since the loss is a sum)
   
   lr:
-    lr_step: !!float 1e-3 # max lr, ramps up to this val before decreasing  
+    lr_type: "static"
+    lr_step: !!float 1e-4 # max lr, ramps up to this val before decreasing  
     warmup_steps: 4000 # number of warmup steps before decreasing
   
 # ------------------------------------------------------------------------------
@@ -175,7 +190,7 @@ data:
   num_test: -1  # number of test samples to use; -1 means all available
 
   # want as few batch_size/seq_length combinations as possible to speed up triton, since it 
-  # recompiles the geometric attention kernel for each shape
+  # recompiles the attention kernel for each shape
   # DataHolder class sorts samples by sequence length and splits into max_batch_size batches one time to reduce masking (avoid small seqs being grouped with large seqs), 
   # then recursively randomizes order of samples within batch, splits into two, and continues until batches are <= batch_tokens
   max_batch_size: 256  # maximum samples per batch
@@ -188,7 +203,7 @@ data:
 
 # Output
 output:
-  out_path: "/scratch/hjc2538/projects/proteusAI/models/extraction_1"  # path to store output, such as plots and weights file. for uncw hpc
+  out_path: "/scratch/hjc2538/projects/proteusAI/models/DIFFUSION_2dit_4HEAD_15t"  # path to store output, such as plots and weights file. for uncw hpc
   cel_plot: "cel_vs_epoch.png"  # path to save plot of loss vs epochs after training
   mse_plot: "mse_vs_epoch.png"  # path to save plot of loss vs epochs after training
   kldiv_plot: "kldiv_vs_epoch.png"  # path to save plot of loss vs epochs after training
@@ -203,6 +218,6 @@ output:
 debug:
   # prints each layers gradients after each step so can check for exploding/vanishing gradients
   # note that it is printed before grad clipping
-  debug_grad: False
+  debug_grad: False # something is wrong with vae and i have no idea what, see what autograd anomoly detector finds
 
 # ------------------------------------------------------------------------------

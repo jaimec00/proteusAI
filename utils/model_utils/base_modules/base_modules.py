@@ -8,7 +8,7 @@ class MLP(nn.Module):
 	base mlp class for use by other modules. uses gelu
 	'''
 
-	def __init__(self, d_in=512, d_out=512, d_hidden=1024, hidden_layers=0, dropout=0.1, act="gelu"):
+	def __init__(self, d_in=512, d_out=512, d_hidden=1024, hidden_layers=0, dropout=0.1, act="gelu", zeros=False):
 		super(MLP, self).__init__()
 
 		self.in_proj = nn.Linear(d_in, d_hidden)
@@ -24,10 +24,25 @@ class MLP(nn.Module):
 			self.act = F.silu
 		elif act == "relu":
 			self.act = F.relu
+		elif act == "sigmoid":
+			self.act = F.sigmoid
 		else:
 			self.act = lambda x: x # no activation if none of the above 
 
-		self.init_linears()
+		if zeros:
+			self.init_zeros()
+
+		else:
+			self.init_linears()
+
+	def init_zeros(self):
+
+		init_zeros(self.in_proj)  
+
+		for layer in self.hidden_proj:
+			init_zeros(layer)  
+
+		init_zeros(self.out_proj) 
 
 	def init_linears(self):
 
@@ -39,7 +54,7 @@ class MLP(nn.Module):
 		init_xavier(self.out_proj)  # Xavier for output layer
 
 	def forward(self, x):
-		x = self.in_dropout(F.gelu(self.in_proj(x)))
+		x = self.in_dropout(self.act(self.in_proj(x)))
 		for hidden, dropout in zip(self.hidden_proj, self.hidden_dropout):
 			x = dropout(self.act(hidden(x)))
 		x = self.out_proj(x) # no activation or dropout on output
@@ -97,15 +112,17 @@ class FiLM(nn.Module):
 		return gamma*x + beta
 
 class adaLN(nn.Module):
-	'''adaptive layer norm to perform affine transformation conditioned on timestep'''
+	'''adaptive layer norm to perform affine transformation conditioned on timestep. adaLNzero, where initialized to all zeros'''
 	def __init__(self, d_in=512, d_model=512, d_hidden=1024, hidden_layers=0, dropout=0.0):
 		super(adaLN, self).__init__()
-		self.gamma_beta_alpha = MLP(d_in=d_in, d_out=3*d_model, d_hidden=d_hidden, hidden_layers=hidden_layers, dropout=dropout, act="silu")
+		self.gamma_beta = MLP(d_in=d_in, d_out=2*d_model, d_hidden=d_hidden, hidden_layers=hidden_layers, dropout=dropout, act="silu", zeros=False)
+		self.alpha = MLP(d_in=d_in, d_out=d_model, d_hidden=d_hidden, hidden_layers=hidden_layers, dropout=dropout, act="silu", zeros=True)
 
 	def forward(self, e_t):
 
-		gamma_beta_alpha = self.gamma_beta_alpha(e_t)
-		gamma, beta, alpha = torch.chunk(gamma_beta_alpha, chunks=3, dim=-1)
+		gamma_beta = self.gamma_beta(e_t)
+		gamma, beta = torch.chunk(gamma_beta, chunks=2, dim=-1)
+		alpha = self.alpha(e_t)
 		return gamma, beta, alpha
 
 # initializations for linear layers
@@ -122,5 +139,10 @@ def init_kaiming(m):
 def init_xavier(m):
 	if isinstance(m, nn.Linear):
 		init.xavier_uniform_(m.weight)
+		if m.bias is not None:
+			init.zeros_(m.bias)
+def init_zeros(m):
+	if isinstance(m, nn.Linear):
+		init.zeros_(m.weight)
 		if m.bias is not None:
 			init.zeros_(m.bias)

@@ -1,13 +1,15 @@
 import torch
 import torch.nn as nn
-from utils.model_utils.geometric_attn.triton.geometric_attn import geometric_attn
-from utils.model_utils.base_modules.base_modules import MLP, adaLN
+from utils.model_utils.attn.geometric_attn import geometric_attn
+from utils.model_utils.attn.flash_attn import flash_attn
+from utils.model_utils.base_modules.base_modules import MLP, adaLN, StaticLayerNorm
 
 class Encoder(nn.Module):
 
 	def __init__(self, 	d_model=512, d_hidden=2048, hidden_layers=0, 
 						heads=8, min_spread=3, 
 						min_rbf=0.001, max_rbf=0.85,
+						use_bias=False,
 						dropout=0.0,
 						use_adaLN=False, d_in_t=512, d_hidden_t=2048, hidden_layers_t=512
 
@@ -16,15 +18,17 @@ class Encoder(nn.Module):
 
 		# Self-attention layers
 		self.attn = GeoAttention(	d_model=d_model, heads=heads, 
-									min_spread=min_spread, min_rbf=min_rbf, max_rbf=max_rbf,
+									min_spread=min_spread, min_rbf=min_rbf, max_rbf=max_rbf, use_bias=use_bias
 								)
 
 		if use_adaLN:
-			self.attn_adaLN = adaLN(d_in=d_in_t, d_model=d_model, d_hidden=d_hidden_t, hidden_layers=hidden_layers_t)
-			self.ffn_adaLN = adaLN(d_in=d_in_t,  d_model=d_model, d_hidden=d_hidden_t, hidden_layers=hidden_layers_t)
-			
-		self.attn_norm = nn.LayerNorm(d_model)
-		self.ffn_norm = nn.LayerNorm(d_model)
+			self.attn_adaLN = adaLN(d_in=d_in_t, d_model=d_model, d_hidden=d_hidden_t, hidden_layers=hidden_layers_t, dropout=dropout)
+			self.ffn_adaLN = adaLN(d_in=d_in_t,  d_model=d_model, d_hidden=d_hidden_t, hidden_layers=hidden_layers_t, dropout=dropout)
+			self.attn_norm = StaticLayerNorm(d_model)
+			self.ffn_norm = StaticLayerNorm(d_model)
+		else:
+			self.attn_norm = nn.LayerNorm(d_model)
+			self.ffn_norm = nn.LayerNorm(d_model)
 		
 		self.attn_dropout = nn.Dropout(dropout)
 
@@ -35,23 +39,23 @@ class Encoder(nn.Module):
 	# optional kwarg to apply adaLN w/ timestep embedding, defined in diffusion module, does not affect others
 	def forward(self, x, coords, key_padding_mask=None, t=None):
 
-		if t is not None: # ada ln
+		if t is not None: # ada ln, copying DiT architecture
 		
 			gamma1, beta1, alpha1 = self.attn_adaLN(t)
 			gamma2, beta2, alpha2 = self.ffn_adaLN(t)
 
-			x = gamma1*self.attn_norm(x) + beta1
+			x2 = gamma1*self.attn_norm(x) + beta1
 
-			x2 = self.attn(	x, x, x,
+			x2 = self.attn(	x2, x2, x2,
 					coords=coords,
 					key_padding_mask=key_padding_mask
 				)
 
 			x = x + self.attn_dropout(x2)*alpha1
 
-			x = gamma2*self.ffn_norm(x) + beta2
+			x2 = gamma2*self.ffn_norm(x) + beta2
 
-			x = x + self.ffn_dropout(self.ffn(x))*alpha2
+			x = x + self.ffn_dropout(self.ffn(x2))*alpha2
 
 			return x
 
@@ -81,6 +85,7 @@ class GeoAttention(nn.Module):
 						heads=8, 
 						min_spread=2.0,
 						min_rbf=0.01, max_rbf=0.99, 
+						use_bias=False
 					):
 		super(GeoAttention, self).__init__()
 
@@ -95,6 +100,7 @@ class GeoAttention(nn.Module):
 		self.min_spread = min_spread
 		self.min_rbf = min_rbf
 		self.max_rbf = max_rbf
+		self.use_bias = use_bias
 
 		# QKV projection weight and bias matrices
 
@@ -134,7 +140,13 @@ class GeoAttention(nn.Module):
 		V = torch.matmul(v.unsqueeze(1), self.v_proj.unsqueeze(0)) + self.v_bias.unsqueeze(0).unsqueeze(2) # batch x heads x N x d_k
 
 		# perform attention
-		out = geometric_attn(Q, K, V, coords, self.get_spreads(), self.get_betas(), mask=key_padding_mask, min_rbf=self.min_rbf, max_rbf=self.max_rbf)  # batch x heads x N x d_k
+		if self.use_bias:
+			out = geometric_attn(Q, K, V, coords, self.get_spreads(), self.get_betas(), mask=key_padding_mask, min_rbf=self.min_rbf, max_rbf=self.max_rbf)  # batch x heads x N x d_k
+		else:
+			out = flash_attn(Q, K, V, mask=key_padding_mask)
+
+			# with sdpa_kernel(backends=[SDPBackend.FLASH_ATTENTION]): # use flash attention 2 backend
+			# 	out = torch.nn.functional.scaled_dot_product_attention(Q, K, V, dropout=0.0, mask=key_padding_mask)
 			
 		# cat heads
 		out = out.permute(0,2,3,1) # batch x N x d_k x heads

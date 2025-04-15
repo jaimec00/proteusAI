@@ -76,9 +76,7 @@ class Output():
 			d_latent: {hyper_parameters.d_latent} 
 			num_aa: {hyper_parameters.num_aa}
 			wave function embedding:
-				min_wl: {hyper_parameters.embedding.min_wl}
-				max_wl: {hyper_parameters.embedding.max_wl}
-				base_wl: {hyper_parameters.embedding.base_wl}
+				none, all are learnable
 			wave function encoding:
 				wf preprocessing:
 					d_hidden: {hyper_parameters.encoding.pre_process.d_hidden}
@@ -89,6 +87,7 @@ class Output():
 				encoders:
 					encoder_layers: {hyper_parameters.encoding.encoders.layers}
 					heads: {hyper_parameters.encoding.encoders.heads}
+					use_bias: {hyper_parameters.encoding.encoders.use_bias}
 					min_spread: {hyper_parameters.encoding.encoders.min_spread}
 					min_rbf: {hyper_parameters.encoding.encoders.min_rbf}
 					max_rbf: {hyper_parameters.encoding.encoders.max_rbf}
@@ -109,6 +108,7 @@ class Output():
 				encoders:
 					encoder_layers: {hyper_parameters.diffusion.encoders.layers}
 					heads: {hyper_parameters.diffusion.encoders.heads}
+					use_bias: {hyper_parameters.diffusion.encoders.use_bias}
 					min_spread: {hyper_parameters.diffusion.encoders.min_spread}
 					min_rbf: {hyper_parameters.diffusion.encoders.min_rbf}
 					max_rbf: {hyper_parameters.diffusion.encoders.max_rbf}
@@ -124,6 +124,7 @@ class Output():
 				encoders:
 					encoder_layers: {hyper_parameters.decoding.encoders.layers}
 					heads: {hyper_parameters.decoding.encoders.heads}
+					use_bias: {hyper_parameters.decoding.encoders.use_bias}
 					min_spread: {hyper_parameters.decoding.encoders.min_spread}
 					min_rbf: {hyper_parameters.decoding.encoders.min_rbf}
 					max_rbf: {hyper_parameters.decoding.encoders.max_rbf}
@@ -139,6 +140,7 @@ class Output():
 				encoder:
 					encoder_layers: {hyper_parameters.extraction.encoders.layers}
 					heads: {hyper_parameters.extraction.encoders.heads}
+					use_bias: {hyper_parameters.extraction.encoders.use_bias}
 					min_spread: {hyper_parameters.extraction.encoders.min_spread}
 					min_rbf: {hyper_parameters.extraction.encoders.min_rbf}
 					max_rbf: {hyper_parameters.extraction.encoders.max_rbf}
@@ -180,12 +182,15 @@ class Output():
 			regularization:
 				dropout: {training_parameters.regularization.dropout}
 				wf_dropout: {training_parameters.regularization.wf_dropout}
-				label_smoothing: {training_parameters.regularization.label_smoothing}
 				noise_coords_std: {training_parameters.regularization.noise_coords_std}
 				use_chain_mask: {training_parameters.regularization.use_chain_mask}
 			loss:
 				accumulation_steps: {training_parameters.loss.accumulation_steps} 
-				kl_div_beta: {training_parameters.loss.beta}
+				label_smoothing: {training_parameters.loss.cel.label_smoothing}
+				kl_div_beta: {training_parameters.loss.kl.beta}
+				kl_div_kappa: {training_parameters.loss.kl.kappa}
+				kl_div_midpoint: {training_parameters.loss.kl.midpoint}
+				gamma: {training_parameters.loss.nll.gamma}
 				grad_clip_norm: {training_parameters.loss.grad_clip_norm}
 			lr:
 				lr_step: {training_parameters.lr.lr_step}
@@ -209,7 +214,7 @@ class Output():
 		)
 
 	def log_epoch_losses(self, losses, train_type):
-		if train_type == "extraction":
+		if train_type in ["extraction", "extraction_finetune", "old"]:
 			cel, seq_sim = losses.tmp.get_avg()
 			self.log.info(f"train cross entropy loss per token: {str(cel)}")
 			self.log.info(f"train sequence similarity per token: {str(seq_sim)}\n")		
@@ -218,15 +223,17 @@ class Output():
 			kl_div, reconstruction, loss = losses.tmp.get_avg()
 			self.log.info(f"train kl divergence per token: {str(kl_div)}")
 			self.log.info(f"train squared error per token: {str(reconstruction)}")
-			self.log.info(f"train full loss per token: {str(loss)}")
+			self.log.info(f"train full loss per token: {str(loss)}\n")
 			losses.train.add_losses(kl_div, reconstruction, loss)
 		elif train_type == "diffusion":
-			squared_error = losses.tmp.get_avg()
-			self.log.info(f"train squared error per token per feature: {str(squared_error)}")
-			losses.train.add_losses(squared_error)
+			squared_error, nll, total_loss = losses.tmp.get_avg()
+			self.log.info(f"train squared error per token: {str(squared_error)}")
+			self.log.info(f"train negative log likelihood per token: {str(nll)}")
+			self.log.info(f"train full loss per token: {str(total_loss)}\n")
+			losses.train.add_losses(squared_error, nll, total_loss)
 
 	def log_val_losses(self, losses, train_type):
-		if train_type == "extraction":
+		if train_type in ["extraction", "extraction_finetune", "old"]:
 			cel, seq_sim = losses.tmp.get_avg()
 			self.log.info(f"validation cross entropy loss per token: {str(cel)}")
 			self.log.info(f"validation sequence similarity per token: {str(seq_sim)}\n")
@@ -235,15 +242,17 @@ class Output():
 			kl_div, reconstruction, loss = losses.tmp.get_avg()
 			self.log.info(f"validation kl divergence per token: {str(kl_div)}")
 			self.log.info(f"validation squared error per token: {str(reconstruction)}")
-			self.log.info(f"validation full loss per token: {str(loss)}")
+			self.log.info(f"validation full loss per token: {str(loss)}\n")
 			losses.val.add_losses(kl_div, reconstruction, loss)
 		elif train_type == "diffusion":
-			squared_error = losses.tmp.get_avg()
+			squared_error, nll, total_loss = losses.tmp.get_avg()
 			self.log.info(f"validation squared error per token: {str(squared_error)}")
-			losses.val.add_losses(squared_error)
+			self.log.info(f"validation negative log likelihood per token: {str(nll)}")
+			self.log.info(f"validation full loss per token: {str(total_loss)}\n")
+			losses.val.add_losses(squared_error, nll, total_loss)
 
 	def log_test_losses(self, losses, train_type):
-		if train_type == "extraction":
+		if train_type in ["extraction", "extraction_finetune", "old"]:
 			cel, seq_sim = losses.tmp.get_avg()
 			self.log.info(f"test cross entropy loss per token: {str(cel)}")
 			self.log.info(f"test sequence similarity per token: {str(seq_sim)}\n")
@@ -251,10 +260,10 @@ class Output():
 			kl_div, reconstruction, loss = losses.tmp.get_avg()
 			self.log.info(f"test kl divergence per token: {str(kl_div)}")
 			self.log.info(f"test squared error per token: {str(reconstruction)}")
-			self.log.info(f"test full loss per token: {str(loss)}")
+			self.log.info(f"test full loss per token: {str(loss)}\n")
 		elif train_type == "diffusion":
-			seq_sim = losses.tmp.get_avg(is_inference=True)
-			self.log.info(f"test sequence similarity per token: {str(seq_sim)}")
+			seq_sim, _, _ = losses.tmp.get_avg(is_inference=True) # seq sims stored in squared errors
+			self.log.info(f"test sequence similarity per token: {str(seq_sim)}\n")
 		losses.test.extend_losses(losses.tmp) # include all test losses to make a histogram (per batch seq sims), not implemented
 
 	def plot_training(self, losses, training_type):
@@ -263,7 +272,7 @@ class Output():
 		losses.to_numpy()
 
 		epochs = [i + 1 for i in range(len(losses.train))]
-		if training_type == "extraction":
+		if training_type in ["extraction", "extraction_finetune", "old"]:
 			self.plot_extraction(losses, epochs)
 		elif training_type == "vae":
 			self.plot_vae(losses, epochs)

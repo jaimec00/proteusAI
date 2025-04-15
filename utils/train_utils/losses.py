@@ -2,22 +2,23 @@ import torch
 import torch.nn as nn
 from torch.nn import CrossEntropyLoss, MSELoss
 import numpy as np
+import math
 
 # ----------------------------------------------------------------------------------------------------------------------
 # losses 
 
 class TrainingRunLosses():
 
-	def __init__(self, train_type, label_smoothing=0.0, beta=1.0):
-		if train_type == "extraction":
+	def __init__(self, train_type, label_smoothing=0.0, beta=1.0, kappa=1.0, midpoint=4000, anneal=True, gamma=1.0):
+		if train_type in ["extraction", "extraction_finetune", "old"]:
 			loss_type = ExtractionLosses 
 			self.loss_function = ExtractionLossFunction(label_smoothing)
 		elif train_type=="vae":
 			loss_type = VAELosses
-			self.loss_function = VAELossFunction(beta) 
+			self.loss_function = VAELossFunction(beta, kappa, midpoint, anneal) 
 		elif train_type == "diffusion":
 			loss_type = DiffusionLosses
-			self.loss_function = DiffusionLossFunction()
+			self.loss_function = DiffusionLossFunction(gamma)
 
 		self.train = loss_type()
 		self.val = loss_type()
@@ -143,6 +144,8 @@ class VAELosses():
 class DiffusionLosses():
 	def __init__(self):
 		self.squared_errors = []
+		self.nll = []
+		self.total_loss = [] # squared_err + gamma*nll
 		self.valid_toks = 0
 
 	def get_avg(self, is_inference=False):
@@ -151,29 +154,41 @@ class DiffusionLosses():
 		if is_inference: # store the seq sims in squared errors list, instead of dealing w seperate lists the whole run
 			return 100*sum(match.item() for match in self.squared_errors if match) / valid_toks
 		else:
-			return sum(loss.item() for loss in self.squared_errors if loss) / valid_toks
+			squared_err = sum(loss.item() for loss in self.squared_errors if loss) / valid_toks
+			nll = sum(loss.item() for loss in self.nll if loss) / valid_toks
+			total_loss = sum(loss.item() for loss in self.total_loss if loss) / valid_toks
+
+			return squared_err, nll, total_loss
 		
-	def add_losses(self, squared_error, valid=1):
+	def add_losses(self, squared_error, nll, total_loss, valid=1):
 		self.squared_errors.append(squared_error)
+		self.nll.append(nll)
+		self.total_loss.append(total_loss)
 		self.valid_toks += valid
 
 	def extend_losses(self, other):
 		self.squared_errors.extend(other.squared_errors)
+		self.nll.extend(other.nll)
+		self.total_loss.extend(other.total_loss)
 		self.valid_toks += other.valid_toks
 
 	def clear_losses(self):
 		self.squared_errors = []
+		self.nll = []
+		self.total_loss = []
 		self.valid_toks = 0
 
 	def get_last_loss(self):
-		return self.squared_errors[-1]
+		return self.total_loss[-1]
 
 	def to_numpy(self):
 		'''utility when plotting losses w/ matplotlib'''
 		self.squared_errors = [loss.detach().to("cpu").numpy() if isinstance(loss, torch.Tensor) else np.array([loss]) for loss in self.squared_errors]
+		self.nll = [loss.detach().to("cpu").numpy() if isinstance(loss, torch.Tensor) else np.array([loss]) for loss in self.nll]
+		self.total_loss = [loss.detach().to("cpu").numpy() if isinstance(loss, torch.Tensor) else np.array([loss]) for loss in self.total_loss]
 
 	def __len__(self):
-		return len(self.squared_errors)
+		return len(self.total_loss)
 
 # ----------------------------------------------------------------------------------------------------------------------
 # loss functions 
@@ -212,9 +227,13 @@ class ExtractionLossFunction(nn.Module):
 
 class VAELossFunction(nn.Module):
 
-	def __init__(self, beta=1.0):
+	def __init__(self, beta=1.0, kappa=1.0, midpoint=4000, anneal=True):
 		super(VAELossFunction, self).__init__()
 		self.beta = beta
+		self.kappa = kappa
+		self.midpoint = midpoint
+		self.anneal = anneal
+		self.kl_annealing_step = 0 # for kl annealing
 
 	def kl_div(self, prior_mean_pred, prior_log_var_pred, mask):
 		kl_div = -0.5*torch.sum(1 + prior_log_var_pred - prior_mean_pred.pow(2) - torch.exp(prior_log_var_pred), dim=2) # Z x N
@@ -224,26 +243,40 @@ class VAELossFunction(nn.Module):
 	def reconstruction(self, reconstruct_mean_pred, reconstruct_mean_true, mask):
 		return ((reconstruct_mean_true - reconstruct_mean_pred).pow(2) * (~mask).unsqueeze(2)).sum()
 
-	def full_loss(self, kl_div, reconstruction, cel):# cel is typically larger than mse and kldiv, so scale it down so vae focuses on wf reconstruction more
-		return (self.beta * kl_div) + reconstruction 
+	def full_loss(self, kl_div, reconstruction):# cel is typically larger than mse and kldiv, so scale it down so vae focuses on wf reconstruction more
+
+		# beta starts small and gradualy increases	
+		beta = self.beta if not self.anneal else self.beta/(1+math.exp(-self.kappa*(self.kl_annealing_step-self.midpoint)))
+		return ( beta * kl_div) + reconstruction 
 
 	def forward(self, 	prior_mean_pred, prior_log_var_pred,
-						reconstruct_mean_pred, reconstruct_mean_true, 
+						reconstruct_mean_pred, reconstruct_mean_true, mask
 				):
-		mask = seq_true == -1
 		kl_div = self.kl_div(prior_mean_pred, prior_log_var_pred, mask)
 		reconstruction = self.reconstruction(reconstruct_mean_pred, reconstruct_mean_true, mask)
-		full_loss = self.full_loss(kl_div, reconstruction, cel)
+		full_loss = self.full_loss(kl_div, reconstruction)
 
 		return kl_div, reconstruction, full_loss # return all for logging, only full loss used for backprop
 
 class DiffusionLossFunction(nn.Module):
-	def __init__(self, d_latent):
+	def __init__(self, gamma=1.0): # gamma scales the nll term
 		super(DiffusionLossFunction, self).__init__()
-		self.d_latent = d_latent # to scale the losses on a per feature basis
-	def forward(self, latent_pred, latent_true):
-		'''simple sum of squared errors'''
-		loss = ((latent_true - latent_pred).pow(2)).sum()
-		return [loss]
+		self.gamma = gamma
+
+	def nll(self, noised_latent, noise_pred, latent_mean, latent_log_var, abars, mask):
+		# computes the negative log likelihood of estimated x0 from diffusion prediction of eps_t
+		# probability of x0 is evaluated using the encoders mean and log var used to sample the latent
+		latent_pred =  (noised_latent - (((1-abars)**0.5)*noise_pred)) / (abars**0.5)
+		nll = 0.5 * ((~mask) * (math.log(2*math.pi) + latent_log_var + ((latent_pred - latent_mean)**2) * torch.exp(-latent_log_var))).sum()
+
+		return nll
+
+	def forward(self, noise_pred, noise_true, noised_latent, latent_mean, latent_log_var, abar, mask):
+		'''sum of squared errors plus an NLL term to evaluate the probability of the estimated x0 under encoders mean and var'''
+
+		squared_err = ((noise_true - noise_pred).pow(2)*(~mask)).sum()
+		nll = self.nll(noised_latent, noise_pred, latent_mean, latent_log_var, abar, mask)
+		loss = squared_err + self.gamma*nll # testing if nll implicitly improves squared err
+		return squared_err, nll, loss
 
 # ----------------------------------------------------------------------------------------------------------------------

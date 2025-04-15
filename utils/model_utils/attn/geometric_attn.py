@@ -9,13 +9,11 @@ description:	multi-scale geometric flash attention kernel written in triton.
 				Also credits to Umar Jamil (@umarjamilai) for giving a fantastic exlanation and demo:
 					YouTube Demo: https://www.youtube.com/watch?v=zy8ChVd_oTM
 
-				Performs Flash attention, as described in the paper, but includes scaling of attention logits using RBF
+				Performs Flash attention, as described in the paper, but includes bias using RBF
 				functions based on euclidean distances of alpha carbon pairs. each head uses a distinct spread to compute
-				the RBFs, The spreads are learnable, and they interact multiplicitavely with the attention weights, allowing
-				direct communication in both the forward and backward passes between RBFs and Q,K.  
+				the RBFs, The spreads are learnable, along with a learnable per head scaling factor, beta
 
-				Forward and backward passes are fully implemented, including reproducable dropout masks with RNG seeds 
-				for consistent bwd pass
+				Forward and backward passes are fully implemented, no dropout implemented
 '''
 # ----------------------------------------------------------------------------------------------------------------------
 
@@ -462,8 +460,10 @@ def _attn_bwd(
 		# compute dSij, ie grad wrt Sij. 
 		dSij = dSRij # N x N
 
-		# compute gradient wrt rbfs. also direct communication between dRij and Sij
+		# compute gradient wrt rbfs. 
 		dRij = dSRij * 2 * beta / rbf_range
+
+		# grads wrt beta, the rbf scaling factor
 		d_beta += tl.sum(dSRij * Rij_norm).to(tl.float32)
 
 		# compute the gradient wrt the spread of this head
@@ -551,7 +551,7 @@ class _geometric_attn(torch.autograd.Function):
 
 		# rbfs in fp32 and make sure everything is contiguous
 		coords = coords.to(torch.float32).contiguous()
-		spreads = spreads.to(torch.float32).contiguous() # this is now Z x H, need to update everything (forward and back)
+		spreads = spreads.to(torch.float32).contiguous() 
 		betas = betas.to(torch.float32).contiguous() 
 
 		# initialize mask, output, and logsumexp tensors
