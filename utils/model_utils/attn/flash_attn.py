@@ -2,8 +2,7 @@
 '''
 author:			jaime cardenas
 title:			flash_attn.py
-description:	flash attention kernel written in triton, probably will just be used for ablation studies to compare geometric attn. 
-				NEVERMIND, IT FUCKING WORKS. just needed MLP on WF emebedding output to do learned spatial encoding (3d positional encoding)
+description:	flash attention kernel written in triton, specifically for cross attention, only difference is that q and kv have diff masks
 				kernel based on:
 					FlashAttention2 paper: https://arxiv.org/abs/2307.08691
 					Triton Implementation: https://github.com/triton-lang/triton/blob/main/python/tutorials/06-fused-attention.py
@@ -23,7 +22,7 @@ import random
 configs = [	triton.Config({"BLOCK_I": i, "BLOCK_J": j}, num_warps=w)
 			for i in [16, 32, 64]
 			for j in [16, 32, 64]
-			for w in [1, 2, 4, 8, 16]
+			for w in [1, 2, 4, 8]
 		]
 
 # filter out configs that are too big
@@ -34,7 +33,7 @@ def keep_fwd(conf):
 	if autotune == "1":
 		return (BLOCK_I * BLOCK_J) <= 2048
 	else:
-		return ((BLOCK_I == 32) and (BLOCK_J == 16) and (conf.num_warps==2))
+		return ((BLOCK_I == 32) and (BLOCK_J == 32) and (conf.num_warps==4))
 
 def keep_bwd(conf):
 	autotune = os.environ.get("ATTN_AUTOTUNE")
@@ -43,11 +42,11 @@ def keep_bwd(conf):
 	if autotune == "1":
 		return (BLOCK_I * BLOCK_J) <= 2048
 	else:
-		return ((BLOCK_I == 16) and (BLOCK_J == 32) and (conf.num_warps==2))
+		return ((BLOCK_I == 32) and (BLOCK_J == 32) and (conf.num_warps==4))
 
 
 @triton.autotune(list(filter(keep_fwd, configs)),
-				 key=['tot_N', 'tot_Z', 'nheads', 'min_d_k'], # triton will not rerun autotune if these inputs are the same (size of input tensor)
+				 key=['tot_Nq', 'tot_Nkv', 'tot_Z', 'nheads', 'min_d_k'], # triton will not rerun autotune if these inputs are the same (size of input tensor)
 				 restore_value=["O_ptr", "L_ptr"]) # make sure autotuning resets the outputs of this function for each configuration
 @triton.jit
 def _attn_fwd(
@@ -56,10 +55,10 @@ def _attn_fwd(
 	K_ptr, stride_K_Z, stride_K_H, stride_K_N, stride_K_D,
 	V_ptr, stride_V_Z, stride_V_H, stride_V_N, stride_V_D,
 	L_ptr, stride_L_Z, stride_L_H, stride_L_N,
-	mask_ptr, stride_mask_Z, stride_mask_N,
+	mask_ptr, stride_mask_Z, stride_mask_N, 
 
-	tot_N: tl.constexpr, tot_Z: tl.constexpr, nheads: tl.constexpr,
-	d_k: tl.constexpr, min_d_k: tl.constexpr,
+	tot_Nq: tl.constexpr, tot_Nkv: tl.constexpr, tot_Z: tl.constexpr, 
+	nheads: tl.constexpr, d_k: tl.constexpr, min_d_k: tl.constexpr,
 	softmax_scale: tl.constexpr, 
 
 	BLOCK_I: tl.constexpr, # block sizes
@@ -81,7 +80,7 @@ def _attn_fwd(
 	# create Q, K, and V block pointers
 	Qi_block_ptr = tl.make_block_ptr( # N x d_k
 		base=Q_ptr + (offs_Z*stride_Q_Z) + (offs_H*stride_Q_H),
-		shape=(tot_N, d_k),
+		shape=(tot_Nq, d_k),
 		strides=(stride_Q_N, stride_Q_D),
 		offsets=(offs_I, 0),
 		block_shape=(BLOCK_I, min_d_k),
@@ -91,7 +90,7 @@ def _attn_fwd(
 	# transpose k when loading directly by flipping N and D,
 	KjT_block_ptr = tl.make_block_ptr( # d_k x N
 		base=K_ptr + (offs_Z*stride_K_Z) + (offs_H*stride_K_H),
-		shape=(d_k, tot_N),
+		shape=(d_k, tot_Nkv),
 		strides=(stride_K_D, stride_K_N),
 		offsets=(0, 0),
 		block_shape=(min_d_k, BLOCK_J),
@@ -100,27 +99,17 @@ def _attn_fwd(
 
 	Vj_block_ptr = tl.make_block_ptr( # N x d_k
 		base=V_ptr + (offs_Z*stride_V_Z) + (offs_H*stride_V_H),
-		shape=(tot_N, d_k),
+		shape=(tot_Nkv, d_k),
 		strides=(stride_V_N, stride_V_D),
 		offsets=(0, 0),
 		block_shape=(BLOCK_J, min_d_k),
 		order=(0, 1)
 	)
 
-	# create mask pointer for Q/O rows and load
-	mask_i_ptr = tl.make_block_ptr( # N,
+	# initialize mask pointer for j columns 
+	mask_ptr = tl.make_block_ptr( # N 
 		base=mask_ptr + (offs_Z*stride_mask_Z),
-		shape=(tot_N, ),
-		strides=(stride_mask_N, ),
-		offsets=(offs_I, ),
-		block_shape=(BLOCK_I, ),
-		order=(0, )
-	)
-
-	# create K/V column mask pointer (loaded in the next loop)
-	mask_j_ptr = tl.make_block_ptr( # N,
-		base=mask_ptr + (offs_Z*stride_mask_Z),
-		shape=(tot_N, ),
+		shape=(tot_Nkv, ),
 		strides=(stride_mask_N, ),
 		offsets=(0, ),
 		block_shape=(BLOCK_J, ),
@@ -136,23 +125,20 @@ def _attn_fwd(
 	inf = float("inf") # convenience
 	mi = (tl.zeros_like(li) - inf)
 
-	# load mask for rows
-	mask_i = tl.load(mask_i_ptr, boundary_check=(0,), padding_option="zero").to(tl.int1) # N x d_k
-
 	# loop through columns of K and V
-	for j in tl.range(0, triton.cdiv(tot_N, BLOCK_J), 1, loop_unroll_factor=1): # no loop unrolling
+	for j in tl.range(0, triton.cdiv(tot_Nkv, BLOCK_J), 1, loop_unroll_factor=1): # no loop unrolling
 
 		# compute attn: QK^T/sqrt(d_k). # both in fp16, dot outputs fp32
 		Sij = tl.dot(Qi, tl.load(KjT_block_ptr, boundary_check=(0,1), padding_option="zero")) * softmax_scale # N x N
 
 		# set masked positions to -inf, include out of range dists in mask
-		attn_mask = (mask_i[:, None]) & (tl.load(mask_j_ptr, boundary_check=(0,), padding_option="zero").to(tl.int1)[None, :]) # N x N
+		attn_mask = tl.load(mask_ptr, boundary_check=(0, ), padding_option="zero").to(tl.int1)[None, :] # N x N
 
 		# scale attention logits by Rij and mask invalid pairs
 		Sij = tl.where(attn_mask, Sij, -inf) # N x N (fp32)
 
 		# max of each row
-		mij = tl.maximum(mi, tl.max(Sij, axis=1)) # N,  (fp32)
+		mij = tl.maximum(mi, tl.max(Sij, axis=1)) # N, (fp32)
 
 		# compute softmax(SRij - mij) = Pij
 		Pij = tl.exp(tl.where(mij[:, None]==-inf, -inf, Sij - mij[:, None])) # N x N (fp32)
@@ -172,7 +158,7 @@ def _attn_fwd(
 		# advance block pointers for columns
 		KjT_block_ptr = tl.advance(KjT_block_ptr, (0, BLOCK_J))
 		Vj_block_ptr = tl.advance(Vj_block_ptr, (BLOCK_J, 0))
-		mask_j_ptr = tl.advance(mask_j_ptr, (BLOCK_J, ))
+		mask_ptr = tl.advance(mask_ptr, (BLOCK_J, ))
 
 	# epilogue
 
@@ -185,7 +171,7 @@ def _attn_fwd(
 	# create output block pointer
 	Oi_block_ptr = tl.make_block_ptr( # N x d_k
 		base=O_ptr + (offs_Z*stride_O_Z) + (offs_H*stride_O_H),
-		shape=(tot_N, d_k),
+		shape=(tot_Nq, d_k),
 		strides=(stride_O_N, stride_O_D),
 		offsets=(offs_I, 0),
 		block_shape=(BLOCK_I, min_d_k),
@@ -195,7 +181,7 @@ def _attn_fwd(
 	# create log sum exp pointer
 	Li_block_ptr = tl.make_block_ptr( # N,
 		base=L_ptr + (offs_Z*stride_L_Z) + (offs_H*stride_L_H),
-		shape=(tot_N, ),
+		shape=(tot_Nq, ),
 		strides=(stride_L_N, ),
 		offsets=(offs_I, ),
 		block_shape=(BLOCK_I, ),
@@ -207,8 +193,8 @@ def _attn_fwd(
 	tl.store(Li_block_ptr, mi, boundary_check=(0,))
 
 @triton.autotune(list(filter(keep_bwd, configs)), 
-				key=['tot_N', 'tot_Z', 'nheads', 'min_d_k'],
-				restore_value=["dQ_ptr", "dK_ptr", "dV_ptr", "d_spreads_ptr"])
+				key=['tot_Nq', 'tot_Nkv', 'tot_Z', 'nheads', 'min_d_k'],
+				restore_value=["dQ_ptr", "dK_ptr", "dV_ptr"])
 @triton.jit
 def _attn_bwd(
 	Q_ptr, stride_Q_Z, stride_Q_H, stride_Q_N, stride_Q_D,
@@ -222,7 +208,7 @@ def _attn_bwd(
 	L_ptr, stride_L_Z, stride_L_H, stride_L_N,
 	mask_ptr, stride_mask_Z, stride_mask_N,
 	
-	tot_Z: tl.constexpr, tot_N: tl.constexpr, nheads: tl.constexpr, 
+	tot_Z: tl.constexpr, tot_Nq: tl.constexpr, tot_Nkv: tl.constexpr, nheads: tl.constexpr, 
 	d_k: tl.constexpr, min_d_k: tl.constexpr, softmax_scale: tl.constexpr,
 
 	BLOCK_I: tl.constexpr, BLOCK_J: tl.constexpr
@@ -239,7 +225,7 @@ def _attn_bwd(
 	# prep pointers (KjT and Vj stay in SRAM throughout)
 	KjT_ptr = tl.make_block_ptr( # d_k x N (transpose on load)
 		base=K_ptr + (offs_Z*stride_K_Z) + (offs_H*stride_K_H),
-		shape=(d_k, tot_N),
+		shape=(d_k, tot_Nkv),
 		strides=(stride_K_D, stride_K_N),
 		offsets=(0, offs_J),
 		block_shape=(min_d_k, BLOCK_J),
@@ -248,18 +234,17 @@ def _attn_bwd(
 
 	Vj_ptr = tl.make_block_ptr( # N x d_k
 		base=V_ptr + (offs_Z*stride_V_Z) + (offs_H*stride_V_H),
-		shape=(tot_N, d_k),
+		shape=(tot_Nkv, d_k),
 		strides=(stride_V_N, stride_V_D),
 		offsets=(offs_J, 0),
 		block_shape=(BLOCK_J, min_d_k),
 		order=(0, 1)
 	)
 
-
 	# initialize mask pointer for j columns 
-	mask_j_ptr = tl.make_block_ptr( # N 
+	mask_ptr = tl.make_block_ptr( # N
 		base=mask_ptr + (offs_Z*stride_mask_Z),
-		shape=(tot_N, ),
+		shape=(tot_Nkv, ),
 		strides=(stride_mask_N, ),
 		offsets=(offs_J, ),
 		block_shape=(BLOCK_J, ),
@@ -269,7 +254,7 @@ def _attn_bwd(
 	# initialize pointers for Qi, dQi, dOi, Li, and Di. only loaded within loop
 	Qi_block_ptr = tl.make_block_ptr( # N x d_k
 		base=Q_ptr + (offs_Z*stride_Q_Z) + (offs_H*stride_Q_H),
-		shape=(tot_N, d_k),
+		shape=(tot_Nq, d_k),
 		strides=(stride_Q_N, stride_Q_D),
 		offsets=(0, 0),
 		block_shape=(BLOCK_I, min_d_k),
@@ -282,7 +267,7 @@ def _attn_bwd(
 
 	dOi_block_ptr = tl.make_block_ptr( # N x d_k
 		base=dO_ptr + (offs_Z*stride_dO_Z) + (offs_H*stride_dO_H),
-		shape=(tot_N, d_k),
+		shape=(tot_Nq, d_k),
 		strides=(stride_dO_N, stride_dO_D),
 		offsets=(0, 0),
 		block_shape=(BLOCK_I, min_d_k),
@@ -291,7 +276,7 @@ def _attn_bwd(
 
 	Li_block_ptr = tl.make_block_ptr( # N
 		base=L_ptr + (offs_Z*stride_L_Z) + (offs_H*stride_L_H),
-		shape=(tot_N, ),
+		shape=(tot_Nq, ),
 		strides=(stride_L_N, ),
 		offsets=(0, ),
 		block_shape=(BLOCK_I, ),
@@ -300,26 +285,15 @@ def _attn_bwd(
 
 	Di_block_ptr = tl.make_block_ptr( # N
 		base=D_ptr + (offs_Z*stride_D_Z) + (offs_H*stride_D_H),
-		shape=(tot_N, ),
+		shape=(tot_Nq, ),
 		strides=(stride_D_N, ),
 		offsets=(0, ),
 		block_shape=(BLOCK_I, ),
 		order=(0, )
 	)
 
-
-	# initialize mask for i rows
-	mask_i_ptr = tl.make_block_ptr( # N 
-		base=mask_ptr + (offs_Z*stride_mask_Z),
-		shape=(tot_N, ),
-		strides=(stride_mask_N, ),
-		offsets=(0, ),
-		block_shape=(BLOCK_I, ),
-		order=(0, )
-	)
-
 	# load mask
-	mask_j = tl.load(mask_j_ptr, boundary_check=(0, ), padding_option="zero").to(tl.int1)
+	mask = tl.load(mask_ptr, boundary_check=(0, ), padding_option="zero").to(tl.int1)
 
 	# initialize dKj and dVj and d_spread(scalar), in fp32
 	dKj = tl.zeros((BLOCK_J, min_d_k), dtype=tl.float32)
@@ -330,7 +304,7 @@ def _attn_bwd(
 	Vj = tl.load(Vj_ptr, boundary_check=(0, 1), padding_option="zero")
 
 	inf = float("inf") # convenience
-	for i in tl.range(0, triton.cdiv(tot_N, BLOCK_I), 1, loop_unroll_factor=1): # no loop unrolling
+	for i in tl.range(0, triton.cdiv(tot_Nq, BLOCK_I), 1, loop_unroll_factor=1): # no loop unrolling
 
 		# fp16, N x d_k
 		Qi = tl.load(Qi_block_ptr, boundary_check=(0, 1), padding_option="zero")
@@ -338,12 +312,8 @@ def _attn_bwd(
 		# load Qi and compute attn, ie Sij. inputs are fp16, Sij is fp32
 		Sij = tl.dot(Qi, KjT) * softmax_scale # N x N
 
-		# mask out attention that is not relevant to this head
-		mask_i = tl.load(mask_i_ptr, boundary_check=(0, ), padding_option="zero").to(tl.int1)
-		attn_mask = (mask_i[:, None]) & (mask_j[None, :]) # N x N
-
 		# scale attention logits by RBFs
-		Sij = tl.where(attn_mask, Sij, -inf) # N x N (fp32)
+		Sij = tl.where(mask[None, :], Sij, -inf) # N x N (fp32)
 
 		# load log sum exp statistics
 		Li = tl.load(Li_block_ptr, boundary_check=(0, ), padding_option="zero") # (fp32)
@@ -351,13 +321,13 @@ def _attn_bwd(
 		# exp(Sij - Lij) = exp(Sij - mi - log(li)) = exp(Sij - mi) / exp(log(li)) 
 		# = exp(Sij - mi) / li
 		# mi is max for the row pre-softmax (for safe softmax), li is the normalizing term (sum of exponentials for that row)
-		Pij = tl.exp(tl.where(attn_mask, Sij - Li[:, None], -inf)) # N x N (fp32)
+		Pij = tl.exp(tl.where(mask[None, :], Sij - Li[:, None], -inf)) # N x N (fp32)
 
 		# load gradient w.r.t output (fp16)
 		dOi = tl.load(dOi_block_ptr, boundary_check=(0, 1), padding_option="zero") # N x d_k
 
 		# compute gradient wrt Vj (dOi already in fp16, out is in fp32)
-		dVj += tl.where(mask_j[:, None], tl.dot(tl.permute(Pij, (1,0)).to(tl.float16), dOi), 0.0) # N x d_k
+		dVj += tl.where(mask[:, None], tl.dot(tl.permute(Pij, (1,0)).to(tl.float16), dOi), 0.0) # N x d_k
 
 		# compute gradient wrt Pij (dOi and Vj already in fp16)
 		dPij = tl.dot(dOi, tl.permute(Vj, (1,0))) # N x N
@@ -367,11 +337,11 @@ def _attn_bwd(
 
 		# compute gradient wrt Qij and perform atomic add to communicate between thread blocks (Kj already in fp16)
 		dQi = tl.dot(dSij.to(tl.float16), tl.permute(KjT, (1,0))) * softmax_scale # N x d_k		
-		dQi_mask = mask_i[:, None] & (tl.arange(0,min_d_k)[None, :] < d_k)
+		dQi_mask = ((i*BLOCK_I + tl.arange(0,BLOCK_I))[:, None] < tot_Nq) & (tl.arange(0,min_d_k)[None, :] < d_k)
 		tl.atomic_add(dQi_block_ptr, dQi, mask=dQi_mask)
 
 		# compute gradients wrt Kj (Qi already in fp16)
-		dKj += tl.where(mask_j[:, None], tl.dot(tl.permute(dSij, (1,0)).to(tl.float16), Qi) * softmax_scale, 0.0)   # N x d_k
+		dKj += tl.where(mask[:, None], tl.dot(tl.permute(dSij, (1,0)).to(tl.float16), Qi) * softmax_scale, 0.0)   # N x d_k
 
 		# advance the pointers
 		Qi_block_ptr = tl.advance(Qi_block_ptr, (BLOCK_I, 0))
@@ -379,13 +349,12 @@ def _attn_bwd(
 		dOi_block_ptr = tl.advance(dOi_block_ptr, (BLOCK_I, 0))
 		Li_block_ptr = tl.advance(Li_block_ptr, (BLOCK_I, ))
 		Di_block_ptr = tl.advance(Di_block_ptr, (BLOCK_I, ))
-		mask_i_ptr = tl.advance(mask_i_ptr, (BLOCK_I, ))
 
 
 	# initialize dK and dV pointers to write output
 	dKj_block_ptr = tl.make_block_ptr( # N x d_k
 		base=dK_ptr + (offs_Z*stride_dK_Z) + (offs_H*stride_dK_H),
-		shape=(tot_N, d_k),
+		shape=(tot_Nkv, d_k),
 		strides=(stride_dK_N, stride_dK_D),
 		offsets=(offs_J, 0),
 		block_shape=(BLOCK_J, min_d_k),
@@ -394,7 +363,7 @@ def _attn_bwd(
 
 	dVj_block_ptr = tl.make_block_ptr( # N x d_k
 		base=dV_ptr + (offs_Z*stride_dV_Z) + (offs_H*stride_dV_H),
-		shape=(tot_N, d_k),
+		shape=(tot_Nkv, d_k),
 		strides=(stride_V_N, stride_V_D),
 		offsets=(offs_J, 0),
 		block_shape=(BLOCK_J, min_d_k),
@@ -413,11 +382,12 @@ def flash_attn(Q, K, V, mask=None):
 class _flash_attn(torch.autograd.Function):
 
 	@staticmethod
-	def forward(ctx, Q, K, V, mask=None):
+	def forward(ctx, Q, K, V, mask):
 		
 		# checks
-		assert Q.shape == K.shape == V.shape, f"Q, K, and V projection shapes must match, but got {Q.shape=}, {K.shape=}, {V.shape=}"
-		batch, nheads, N, d_k = Q.shape
+		assert K.shape == V.shape, f"K, and V projection shapes must match, but got {K.shape=}, {V.shape=}"
+		batch, nheads, Nq, d_k = Q.shape
+		Nkv = K.size(2)
 		d_model = nheads*d_k
 		softmax_scale = 1/(d_k**0.5)
 		assert d_model % 2 == 0, f"d_model must be divisible by 2, not {d_model=}"
@@ -428,24 +398,24 @@ class _flash_attn(torch.autograd.Function):
 		V = V.to(torch.float16).contiguous()
 
 		# initialize mask, output, and logsumexp tensors
-		mask = (torch.ones(batch, N, dtype=torch.bool, device=Q.device) if mask is None else ~mask).contiguous() # batch x N		
-		out = torch.zeros(batch, nheads, N, d_k, dtype=torch.float32, device=Q.device).contiguous() # batch x N x d_model
-		L = torch.zeros(batch, nheads, N, dtype=torch.float32, device=Q.device).contiguous() # batch x nheads x N
+		mask = torch.ones(batch, Nkv, dtype=torch.bool, device=Q.device).contiguous() if mask is None else ~mask # only mask K
+		out = torch.zeros(batch, nheads, Nq, d_k, dtype=torch.float32, device=Q.device).contiguous() # batch x N x d_model
+		L = torch.zeros(batch, nheads, Nq, dtype=torch.float32, device=Q.device).contiguous() # batch x nheads x N
 		
 		# define the grid
-		grid = lambda args: (   triton.cdiv(args["tot_N"], args["BLOCK_I"]), 
+		grid = lambda args: (   triton.cdiv(args["tot_Nq"], args["BLOCK_I"]), 
 								args["tot_Z"]*args["nheads"],	
 								1
 							)
 
 		# run the kernel
-		_attn_fwd[grid](  	out, out.stride(0), out.stride(1), out.stride(2), out.stride(3), # batch x nheads x N x d_k
-							Q, Q.stride(0), Q.stride(1), Q.stride(2), Q.stride(3), # batch x nhead x N x d_k
-							K, K.stride(0), K.stride(1), K.stride(2), K.stride(3), # batch x nhead x N x d_k
-							V, V.stride(0), V.stride(1), V.stride(2), V.stride(3), # batch x nhead x N x d_k
-							L, L.stride(0), L.stride(1), L.stride(2), # batch x nhead x N
-							mask, mask.stride(0), mask.stride(1), # batch x N
-							N, batch, nheads, d_k, max(d_k, 16), softmax_scale,
+		_attn_fwd[grid](  	out, out.stride(0), out.stride(1), out.stride(2), out.stride(3), # batch x nheads x Nkv x d_k
+							Q, Q.stride(0), Q.stride(1), Q.stride(2), Q.stride(3), # batch x nhead x Nq x d_k
+							K, K.stride(0), K.stride(1), K.stride(2), K.stride(3), # batch x nhead x Nkv x d_k
+							V, V.stride(0), V.stride(1), V.stride(2), V.stride(3), # batch x nhead x Nkv x d_k
+							L, L.stride(0), L.stride(1), L.stride(2), # batch x nhead x Nq
+							mask, mask.stride(0), mask.stride(1),
+							Nq, Nkv, batch, nheads, d_k, max(d_k, 16), softmax_scale,
 						)
 
 		# for backwards pass
@@ -467,8 +437,8 @@ class _flash_attn(torch.autograd.Function):
 		dO = dO.to(torch.float16).contiguous()
 
 		# checks
-		assert Q.stride() == K.stride() == V.stride() == O.stride()
-		batch, nheads, N, d_k = Q.shape
+		batch, nheads, Nq, d_k = Q.shape
+		Nkv = K.size(2)
 
 		# initialize dQ, dK, and dV, all fp32
 		dQ = torch.zeros_like(Q).to(torch.float32).contiguous()
@@ -477,7 +447,7 @@ class _flash_attn(torch.autograd.Function):
 
 		# define the grid
 		grid = lambda args: (
-			triton.cdiv(args["tot_N"], args["BLOCK_J"]), # parralel along J for bwd
+			triton.cdiv(args["tot_Nkv"], args["BLOCK_J"]), # parralel along J for bwd
 			args["tot_Z"]*args["nheads"],
 			1
 		)
@@ -493,7 +463,7 @@ class _flash_attn(torch.autograd.Function):
 							D, D.stride(0), D.stride(1), D.stride(2),
 							L, L.stride(0), L.stride(1), L.stride(2),
 							mask, mask.stride(0), mask.stride(1),
-							batch, N, nheads, d_k, max(d_k, 16), ctx.softmax_scale,
+							batch, Nq, Nkv, nheads, d_k, max(d_k, 16), ctx.softmax_scale,
 						 )
 
 		# return the gradients

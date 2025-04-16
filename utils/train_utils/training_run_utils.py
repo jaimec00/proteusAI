@@ -19,7 +19,7 @@ class Epoch():
 		'''
 
 		# make sure in training mode
-		self.training_run_parent.model.train()
+		self.train(self.training_run_parent.model)
 
 		# setup the epoch
 		self.training_run_parent.output.log_epoch(self.epoch, self.training_run_parent.scheduler.get_last_lr()[0])
@@ -53,6 +53,39 @@ class Epoch():
 			self.training_run_parent.output.log.info("loading next epoch's training data...")
 			self.training_run_parent.data.train_data.rotate_data()
 			self.training_run_parent.data.val_data.rotate_data()
+
+	def train(self, model):
+
+		if self.training_run_parent.training_parameters.train_type == "extraction":
+			model.wf_embedding.train()
+			model.wf_encoding.eval()
+			model.wf_diffusion.eval()
+			model.wf_decoding.eval()
+			model.wf_extraction.train()
+		if self.training_run_parent.training_parameters.train_type == "vae":
+			model.wf_embedding.eval()
+			model.wf_encoding.train()
+			model.wf_diffusion.eval()
+			model.wf_decoding.train()
+			model.wf_extraction.eval()
+		if self.training_run_parent.training_parameters.train_type == "extraction_finetune":
+			model.wf_embedding.eval()
+			model.wf_encoding.eval()
+			model.wf_diffusion.eval()
+			model.wf_decoding.eval()
+			model.wf_extraction.train()
+		if self.training_run_parent.training_parameters.train_type == "diffusion":
+			model.wf_embedding.eval()
+			model.wf_encoding.eval()
+			model.wf_diffusion.train()
+			model.wf_decoding.eval()	
+			model.wf_extraction.eval()
+		if self.training_run_parent.training_parameters.train_type == "old":
+			model.wf_embedding.train()
+			model.wf_encoding.eval()
+			model.wf_diffusion.eval()
+			model.wf_decoding.eval()	
+			model.wf_extraction.train()
 
 # ----------------------------------------------------------------------------------------------------------------------
 
@@ -189,10 +222,10 @@ class Batch():
 	def run_extraction_training(self):
 
 		# get wf
-		wf = self.epoch_parent.training_run_parent.model(self.coords_alpha, coords_beta=self.coords_beta, aas=self.aas, key_padding_mask=self.key_padding_mask, embedding=True)
+		wf = self.epoch_parent.training_run_parent.model(coords_alpha=self.coords_alpha, coords_beta=self.coords_beta, aas=self.aas, key_padding_mask=self.key_padding_mask, embedding=True)
 
 		# extract sequence 
-		seq_pred = self.epoch_parent.training_run_parent.model(self.coords_alpha, wf=wf, key_padding_mask=self.key_padding_mask, extraction=True)
+		seq_pred = self.epoch_parent.training_run_parent.model(wf=wf, wf_no_aa=wf, key_padding_mask=self.key_padding_mask, extraction=True)
 
 		# convert to output object
 		return ExtractionOutput(self, seq_pred)
@@ -200,20 +233,17 @@ class Batch():
 	def run_vae_training(self):
 		
 		# get wf
-		wf = self.epoch_parent.training_run_parent.model(self.coords_alpha, coords_beta=self.coords_beta, aas=self.aas, key_padding_mask=self.key_padding_mask, embedding=True)
+		wf = self.epoch_parent.training_run_parent.model(coords_alpha=self.coords_alpha, coords_beta=self.coords_beta, aas=self.aas, key_padding_mask=self.key_padding_mask, embedding=True)
+		wf_no_aa = self.epoch_parent.training_run_parent.model(coords_alpha=self.coords_alpha, coords_beta=self.coords_beta, aas=self.aas, key_padding_mask=self.key_padding_mask, embedding=True, no_aa=True)
 		
-		# aa ambiguous wf used for spatial encoding
-		wf_no_aa = self.epoch_parent.training_run_parent.model(self.coords_alpha, coords_beta=self.coords_beta, aas=self.aas, key_padding_mask=self.key_padding_mask, embedding=True, no_aa=True)
-
-		# make into latent representation
 		# predict mean and log var
-		wf_encoded_mean, wf_encoded_log_var = self.epoch_parent.training_run_parent.model(self.coords_alpha, wf=wf, key_padding_mask=self.key_padding_mask, wf_no_aa=wf_no_aa, encoding=True)
+		wf_encoded_mean, wf_encoded_log_var = self.epoch_parent.training_run_parent.model(wf=wf, key_padding_mask=self.key_padding_mask, encoding=True)
 
 		# sample from the latent space given the mean and var
 		wf_encoded = self.epoch_parent.training_run_parent.model.wf_encoding.sample(wf_encoded_mean, wf_encoded_log_var)
 		
 		# decode from latent space to wf space, only computes mean to make reconstruction loss a simple squared error
-		wf_decoded = self.epoch_parent.training_run_parent.model(self.coords_alpha, wf=wf_encoded, wf_no_aa=wf_no_aa, key_padding_mask=self.key_padding_mask, decoding=True)
+		wf_decoded = self.epoch_parent.training_run_parent.model(latent=wf_encoded, wf_no_aa=wf_no_aa, key_padding_mask=self.key_padding_mask, decoding=True)
 
 		# convert to output object
 		return VAEOutput(self, wf_encoded_mean, wf_encoded_log_var, wf_decoded, wf)
@@ -225,13 +255,13 @@ class Batch():
 		wf_no_aa = self.epoch_parent.training_run_parent.model(self.coords_alpha, coords_beta=self.coords_beta, aas=self.aas, key_padding_mask=self.key_padding_mask, embedding=True, no_aa=True)
 
 		# make into latent representation
-		wf_encoded = self.epoch_parent.training_run_parent.model.wf_encoding.encode(wf, self.coords_alpha, key_padding_mask=self.key_padding_mask, wf_no_aa=wf_no_aa)
+		wf_encoded = self.epoch_parent.training_run_parent.model.wf_encoding.encode(wf, key_padding_mask=self.key_padding_mask)
 		
 		# decode from latent space to wf space, only computes mean to make reconstruction loss a simple squared error
-		wf_decoded = self.epoch_parent.training_run_parent.model(self.coords_alpha, wf=wf_encoded, key_padding_mask=self.key_padding_mask, wf_no_aa=wf_no_aa, decoding=True)
+		wf_decoded = self.epoch_parent.training_run_parent.model(latent=wf_encoded, wf_no_aa=wf_no_aa, key_padding_mask=self.key_padding_mask, decoding=True)
 
 		# extract sequence
-		seq_pred = self.epoch_parent.training_run_parent.model(self.coords_alpha, wf=wf_decoded, wf_no_aa=wf_no_aa, key_padding_mask=self.key_padding_mask, extraction=True)
+		seq_pred = self.epoch_parent.training_run_parent.model(wf=wf_decoded, wf_no_aa=wf_no_aa, key_padding_mask=self.key_padding_mask, extraction=True)
 
 		# convert to output object
 		return ExtractionOutput(self, seq_pred)
@@ -239,11 +269,11 @@ class Batch():
 	def run_diffusion_training(self):
 		
 		# get clean wavefunction
-		wf = self.epoch_parent.training_run_parent.model(self.coords_alpha, coords_beta=self.coords_beta, aas=self.aas, key_padding_mask=self.key_padding_mask, embedding=True)
-		wf_no_aa = self.epoch_parent.training_run_parent.model(self.coords_alpha, coords_beta=self.coords_beta, aas=self.aas, key_padding_mask=self.key_padding_mask, embedding=True, no_aa=True)
+		wf = self.epoch_parent.training_run_parent.model(coords_alpha=self.coords_alpha, coords_beta=self.coords_beta, aas=self.aas, key_padding_mask=self.key_padding_mask, embedding=True)
+		wf_no_aa = self.epoch_parent.training_run_parent.model(coords_alpha=self.coords_alpha, coords_beta=self.coords_beta, aas=self.aas, key_padding_mask=self.key_padding_mask, embedding=True, no_aa=True)
 
 		# encode the wf in latent space
-		wf_latent_mean, wf_latent_logvar = self.epoch_parent.training_run_parent.model(self.coords_alpha, wf=wf, key_padding_mask=self.key_padding_mask, wf_no_aa=wf_no_aa, encoding=True)
+		wf_latent_mean, wf_latent_logvar = self.epoch_parent.training_run_parent.model(wf=wf, wf_no_aa=wf_no_aa, key_padding_mask=self.key_padding_mask, encoding=True)
 		wf_encoded = self.epoch_parent.training_run_parent.model.wf_encoding.sample(wf_latent_mean, wf_latent_logvar)
 
 		# get timesteps from uniform distribution, as well as abars for reconstructing x0 for nll loss
@@ -254,7 +284,7 @@ class Batch():
 		noised_wf, noise = self.epoch_parent.training_run_parent.model.wf_diffusion.noise(wf_encoded, timesteps)
 
 		# predict noise
-		noise_pred = self.epoch_parent.training_run_parent.model(self.coords_alpha, wf=noised_wf, key_padding_mask=self.key_padding_mask, diffusion=True, t=timesteps, wf_no_aa=wf_no_aa)
+		noise_pred = self.epoch_parent.training_run_parent.model(latent=noised_wf, t=timesteps, key_padding_mask=self.key_padding_mask, diffusion=True)
 
 		# convert to output object
 		return DiffusionOutput(self, noise_pred, noise, noised_wf, wf_latent_mean, wf_latent_logvar, abars)

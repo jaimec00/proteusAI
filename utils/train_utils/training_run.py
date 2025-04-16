@@ -96,8 +96,9 @@ class TrainingRun():
 
 	def setup_model(self):
 		'''
-		instantiates proteusAI with given Hyper-Parameters, moves it to gpu, and 
-		optionally loads model weights from pre-trained model
+		instantiates proteusAI with given Hyper-Parameters, moves it to gpu, 
+		optionally loads model weights from pre-trained models, and freezes modules
+		depending on train type
 
 		Args:
 			None
@@ -108,12 +109,12 @@ class TrainingRun():
 		
 		self.output.log.info("loading model...")
 		
-		# so many fucking hyperparameters
 		self.model = proteusAI(	# model params
-								d_model=self.hyper_parameters.d_model, 
-								d_latent=self.hyper_parameters.d_latent, # same as dmodel for preliminary tests 
+								d_model=self.hyper_parameters.d_model,
+								d_latent=self.hyper_parameters.d_latent, 
+								N_latent=self.hyper_parameters.N_latent, 
 								num_aas=self.hyper_parameters.num_aa,
-								old=self.training_parameters.train_type == "old",
+								old=self.training_parameters.train_type=="old",
 
 								# wf embedding params (everything is learnable, so no configs)
 
@@ -128,21 +129,19 @@ class TrainingRun():
 								encoding_hidden_layers_post=self.hyper_parameters.encoding.post_process.hidden_layers,
 
 								# encoder layers
-								encoding_encoder_layers=self.hyper_parameters.encoding.encoders.layers,
-								encoding_heads=self.hyper_parameters.encoding.encoders.heads,
-								encoding_use_bias=self.hyper_parameters.encoding.encoders.use_bias,
-								encoding_min_spread=self.hyper_parameters.encoding.encoders.min_spread,
-								encoding_min_rbf=self.hyper_parameters.encoding.encoders.min_rbf,
-								encoding_max_rbf=self.hyper_parameters.encoding.encoders.max_rbf,
-								encoding_d_hidden_attn=self.hyper_parameters.encoding.encoders.d_hidden_attn,
-								encoding_hidden_layers_attn=self.hyper_parameters.encoding.encoders.hidden_layers_attn,
+								encoding_encoder_self_layers=self.hyper_parameters.encoding.encoders.self_attn.layers,
+								encoding_self_heads=self.hyper_parameters.encoding.encoders.self_attn.heads,
+								encoding_self_d_hidden_attn=self.hyper_parameters.encoding.encoders.self_attn.d_hidden_attn,
+								encoding_self_hidden_layers_attn=self.hyper_parameters.encoding.encoders.self_attn.hidden_layers_attn,
+								encoding_encoder_cross_layers=self.hyper_parameters.encoding.encoders.cross_attn.layers,
+								encoding_cross_heads=self.hyper_parameters.encoding.encoders.cross_attn.heads,
+								encoding_cross_d_hidden_attn=self.hyper_parameters.encoding.encoders.cross_attn.d_hidden_attn,
+								encoding_cross_hidden_layers_attn=self.hyper_parameters.encoding.encoders.cross_attn.hidden_layers_attn,
 
 								# wf diffusion params
 
 								# beta scheduler
 								diffusion_alpha_bar_min=self.hyper_parameters.diffusion.scheduler.alpha_bar_min,
-								diffusion_beta_min=self.hyper_parameters.diffusion.scheduler.beta_min,
-								diffusion_beta_max=self.hyper_parameters.diffusion.scheduler.beta_max,
 								diffusion_noise_schedule_type=self.hyper_parameters.diffusion.scheduler.noise_schedule_type, 
 								diffusion_t_max=self.hyper_parameters.diffusion.scheduler.t_max,
 
@@ -158,10 +157,6 @@ class TrainingRun():
 								# encoder layers
 								diffusion_encoder_layers=self.hyper_parameters.diffusion.encoders.layers,
 								diffusion_heads=self.hyper_parameters.diffusion.encoders.heads,
-								diffusion_use_bias=self.hyper_parameters.diffusion.encoders.use_bias,
-								diffusion_min_spread=self.hyper_parameters.diffusion.encoders.min_spread,
-								diffusion_min_rbf=self.hyper_parameters.diffusion.encoders.min_rbf,
-								diffusion_max_rbf=self.hyper_parameters.diffusion.encoders.max_rbf,
 								diffusion_d_hidden_attn=self.hyper_parameters.diffusion.encoders.d_hidden_attn,
 								diffusion_hidden_layers_attn=self.hyper_parameters.diffusion.encoders.hidden_layers_attn,
 
@@ -176,14 +171,14 @@ class TrainingRun():
 								decoding_hidden_layers_post=self.hyper_parameters.decoding.post_process.hidden_layers,
 
 								# encoder layers
-								decoding_encoder_layers=self.hyper_parameters.decoding.encoders.layers,
-								decoding_heads=self.hyper_parameters.decoding.encoders.heads,
-								decoding_use_bias=self.hyper_parameters.decoding.encoders.use_bias,
-								decoding_min_spread=self.hyper_parameters.decoding.encoders.min_spread,
-								decoding_min_rbf=self.hyper_parameters.decoding.encoders.min_rbf,
-								decoding_max_rbf=self.hyper_parameters.decoding.encoders.max_rbf,
-								decoding_d_hidden_attn=self.hyper_parameters.decoding.encoders.d_hidden_attn,
-								decoding_hidden_layers_attn=self.hyper_parameters.decoding.encoders.hidden_layers_attn,
+								decoding_encoder_self_layers=self.hyper_parameters.decoding.encoders.self_attn.layers,
+								decoding_self_heads=self.hyper_parameters.decoding.encoders.self_attn.heads,
+								decoding_self_d_hidden_attn=self.hyper_parameters.decoding.encoders.self_attn.d_hidden_attn,
+								decoding_self_hidden_layers_attn=self.hyper_parameters.decoding.encoders.self_attn.hidden_layers_attn,
+								decoding_encoder_cross_layers=self.hyper_parameters.decoding.encoders.cross_attn.layers,
+								decoding_cross_heads=self.hyper_parameters.decoding.encoders.cross_attn.heads,
+								decoding_cross_d_hidden_attn=self.hyper_parameters.decoding.encoders.cross_attn.d_hidden_attn,
+								decoding_cross_hidden_layers_attn=self.hyper_parameters.decoding.encoders.cross_attn.hidden_layers_attn,
 
 								# wf extraction params
 
@@ -198,16 +193,11 @@ class TrainingRun():
 								# encoder layers
 								extraction_encoder_layers=self.hyper_parameters.extraction.encoders.layers,
 								extraction_heads=self.hyper_parameters.extraction.encoders.heads,
-								extraction_use_bias=self.hyper_parameters.extraction.encoders.use_bias,
-								extraction_min_spread=self.hyper_parameters.extraction.encoders.min_spread,
-								extraction_min_rbf=self.hyper_parameters.extraction.encoders.min_rbf,
-								extraction_max_rbf=self.hyper_parameters.extraction.encoders.max_rbf,
 								extraction_d_hidden_attn=self.hyper_parameters.extraction.encoders.d_hidden_attn,
 								extraction_hidden_layers_attn=self.hyper_parameters.extraction.encoders.hidden_layers_attn,
 
 								# dropout
 								dropout=self.training_parameters.regularization.dropout,
-								wf_dropout=self.training_parameters.regularization.wf_dropout,
 							)
 
 		self.model.to(self.gpu)
@@ -265,9 +255,6 @@ class TrainingRun():
 		self.training_parameters.num_decoding_params = sum(p.numel() for p in self.model.wf_decoding.parameters())
 		self.training_parameters.num_extraction_params = sum(p.numel() for p in self.model.wf_extraction.parameters())
 		self.training_parameters.num_params = self.training_parameters.num_embedding_params + self.training_parameters.num_encoding_params + self.training_parameters.num_diffusion_params + self.training_parameters.num_decoding_params +  self.training_parameters.num_extraction_params 
-
-		# compile the model (more precisely the computational graph). doesnt seem to work, no time to debug anyways
-		# self.model = torch.compile(self.model)
 
 		# print gradients at each step if in debugging mode
 		if self.debug.debug_grad:

@@ -47,6 +47,8 @@ class ExtractionLosses():
 		# to scale losses for logging, does not affect backprop
 		self.valid_toks = 0 # valid tokens to compute avg per token per cha
 
+		self.valid_samples = 0
+
 	def get_avg(self):
 		'''this method is just for logging purposes, does not rescale loss used in bwd pass'''
 
@@ -56,20 +58,23 @@ class ExtractionLosses():
 		
 		return avg_cel, avg_seq_sim
 
-	def add_losses(self, cel, matches, valid=1):
+	def add_losses(self, cel, matches, valid_toks=1, valid_samples=1):
 		self.cel.append(cel)
 		self.matches.append(matches)
-		self.valid_toks += valid
+		self.valid_toks += valid_toks
+		self.valid_samples += valid_samples
 
 	def extend_losses(self, other):
 		self.cel.extend(other.cel)
 		self.matches.extend(other.matches)
 		self.valid_toks += other.valid_toks
+		self.valid_samples += other.valid_samples
 
 	def clear_losses(self):
 		self.cel = []
 		self.matches = []
 		self.valid_toks = 0
+		self.valid_samples = 0
 
 	def get_last_loss(self):
 		return self.cel[-1]
@@ -100,34 +105,39 @@ class VAELosses():
 
 		# to scale losses for logging, does not affect backprop
 		self.valid_toks = 0 # valid tokens to compute avg per token per cha
+		self.valid_samples = 0
 
 	def get_avg(self):
 		'''this method is just for logging purposes, does not rescale loss used in bwd pass'''
 
 		valid_toks = self.valid_toks.item()
-		avg_kl_div = sum(kl_div.item() for kl_div in self.kl_div if kl_div) / valid_toks
+		valid_samples = self.valid_samples.item()
+		avg_kl_div = sum(kl_div.item() for kl_div in self.kl_div if kl_div) / valid_samples
 		avg_reconstruction = sum(reconstruction.item() for reconstruction in self.reconstruction if reconstruction) / valid_toks
 		avg_loss = sum(loss.item() for loss in self.all_losses if loss) / valid_toks
 		
 		return avg_kl_div, avg_reconstruction, avg_loss
 
-	def add_losses(self, kl_div, reconstruction, full_loss, valid=1):
+	def add_losses(self, kl_div, reconstruction, full_loss, valid_toks=1, valid_samples=1):
 		self.kl_div.append(kl_div)
 		self.reconstruction.append(reconstruction)
 		self.all_losses.append(full_loss)
-		self.valid_toks += valid
+		self.valid_toks += valid_toks
+		self.valid_samples += valid_samples
 
 	def extend_losses(self, other):
 		self.kl_div.extend(other.kl_div)
 		self.reconstruction.extend(other.reconstruction)
 		self.all_losses.extend(other.all_losses)
-		self.valid_toks += other.valid_toks
+		self.valid_toks += valid_toks
+		self.valid_samples += valid_samples
 
 	def clear_losses(self):
 		self.kl_div = []
 		self.reconstruction = []
 		self.all_losses = []
 		self.valid_toks = 0
+		self.valid_samples = 0
 
 	def get_last_loss(self):
 		return self.all_losses[-1]
@@ -252,7 +262,7 @@ class VAELossFunction(nn.Module):
 	def forward(self, 	prior_mean_pred, prior_log_var_pred,
 						reconstruct_mean_pred, reconstruct_mean_true, mask
 				):
-		kl_div = self.kl_div(prior_mean_pred, prior_log_var_pred, mask)
+		kl_div = self.kl_div(prior_mean_pred, prior_log_var_pred, mask.all(dim=1, keepdim=True))
 		reconstruction = self.reconstruction(reconstruct_mean_pred, reconstruct_mean_true, mask)
 		full_loss = self.full_loss(kl_div, reconstruction)
 

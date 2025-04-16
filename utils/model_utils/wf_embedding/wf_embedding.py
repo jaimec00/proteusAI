@@ -22,9 +22,7 @@ from utils.model_utils.base_modules.base_modules import StaticLayerNorm
 
 class WaveFunctionEmbedding(nn.Module):
 
-	def __init__(self, 	d_model=512, num_aas=20,
-						dropout=0.0, old=False
-				):
+	def __init__(self, 	d_model=512, num_aas=20, old=False):
 
 		super(WaveFunctionEmbedding, self).__init__()
 
@@ -39,15 +37,12 @@ class WaveFunctionEmbedding(nn.Module):
 			self.aa_magnitudes = nn.Parameter(torch.ones(d_model//2, num_aas))
 
 		# additional layers
-		self.dropout = dropout # not implemented for learnable rn bc of register pressure, might take the hit and add it though since just for pre-training
 		self.norm = StaticLayerNorm(d_model)
 
 	def get_wavenumbers(self):
 		return torch.exp(self.wavenumbers) # learns log of wavenumbers, ie log(2pi) - log(lambda)
 
 	def forward(self, coords_alpha, coords_beta, aa_labels, key_padding_mask=None, no_aa=False):
-
-		dropout = self.dropout if self.training else 0.0
 
 		if self.old: # not a big deal if run the learnable version when not necessary, since still get decent occupancy since dont have to store aa grads in smem
 			return wf_embedding_learnCB(coords_alpha, coords_beta, self.aa_magnitudes, self.get_wavenumbers(), mask=key_padding_mask)

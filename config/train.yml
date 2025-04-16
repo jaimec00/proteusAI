@@ -17,7 +17,8 @@ hyper_parameters:
 
   # main stuff
   d_model: 256
-  d_latent: 256
+  d_latent: 1024 
+  N_latent: 64
   num_aa: 20
 
   # ----------------------------------------------------------------------------
@@ -36,39 +37,35 @@ hyper_parameters:
       d_hidden: 2048
       hidden_layers: 1
     encoders:
-      layers: 4
-      heads: 8
-      use_bias: False # spreads and rbf params are ignored if this is False, looks like spatial encoding works, so will prob remove geo attn
-      min_spread: 2.0 
-      min_rbf: 0.00
-      max_rbf: 1.00
-      d_hidden_attn: 1024
-      hidden_layers_attn: 0
+      self_attn:
+        layers: 2
+        heads: 8
+        d_hidden_attn: 1024
+        hidden_layers_attn: 0
+      cross_attn:
+        layers: 2
+        heads: 16
+        d_hidden_attn: 2048
+        hidden_layers_attn: 0
 
   # ----------------------------------------------------------------------------
 
   # wf diffusion params
   diffusion:
     scheduler:
-      alpha_bar_min: 0.01 # snr ratio in final timestep most of signal preserved, since this is refinement
-      beta_min: 0.02 # betas not used, linear is a linear abar scheduler
-      beta_max: 0.04
-      noise_schedule_type: "linear" # only one implemented atm
+      alpha_bar_min: 0.00
+      noise_schedule_type: "linear" 
       t_max: 100
     timestep:
       d_in: 256
       d_hidden: 1024
-      hidden_layers: 1
+      hidden_layers: 0
     post_process:
       d_hidden: 1024
       hidden_layers: 0
     encoders:
       layers: 2
       heads: 4
-      use_bias: False
-      min_spread: 2.0 
-      min_rbf: 0.00 
-      max_rbf: 1.00
       d_hidden_attn: 1024
       hidden_layers_attn: 0
 
@@ -83,14 +80,16 @@ hyper_parameters:
       d_hidden: 1024
       hidden_layers: 0
     encoders:
-      layers: 4
-      heads: 8
-      use_bias: False
-      min_spread: 2.0 
-      min_rbf: 0.00
-      max_rbf: 1.00
-      d_hidden_attn: 1024
-      hidden_layers_attn: 0
+      self_attn:
+        layers: 2
+        heads: 8
+        d_hidden_attn: 1024
+        hidden_layers_attn: 0
+      cross_attn:
+        layers: 2
+        heads: 16
+        d_hidden_attn: 1024
+        hidden_layers_attn: 0
 
   # ----------------------------------------------------------------------------
 
@@ -105,10 +104,6 @@ hyper_parameters:
     encoders:
       layers: 4
       heads: 8
-      use_bias: False # testing if attention works with no rbf bias. 
-      min_spread: 2.0
-      min_rbf: 0.00
-      max_rbf: 1.00
       d_hidden_attn: 1024
       hidden_layers_attn: 0
 
@@ -117,7 +112,7 @@ hyper_parameters:
 # training params
 training_parameters:
 
-  train_type: "diffusion"  # options are:
+  train_type: "extraction_finetune"  # options are:
                             #   extraction:
                             #     train embedding and extraction together, defines the wf space. everything else is frozen
                             #   vae:
@@ -135,10 +130,10 @@ training_parameters:
   weights:
     use_model: ""
     use_embedding_weights: "/scratch/hjc2538/projects/proteusAI/models/extraction_5_w_normed_wf/model_parameters_embedding.pth"
-    use_encoding_weights: "/scratch/hjc2538/projects/proteusAI/models/vae_w_spaceEnc/tmp/model_parameters_encoding.pth" 
+    use_encoding_weights: "/scratch/hjc2538/projects/proteusAI/models/VAE_protein_latent4_1emin6beta_sqrtsched_wtanh_1024dl/tmp/model_parameters_encoding.pth"
     use_diffusion_weights: ""
-    use_decoding_weights: "/scratch/hjc2538/projects/proteusAI/models/vae_w_spaceEnc/tmp/model_parameters_decoding.pth"
-    use_extraction_weights: "/scratch/hjc2538/projects/proteusAI/models/ext_finetune_w_spaceEnc/tmp/model_parameters_extraction.pth"
+    use_decoding_weights: "/scratch/hjc2538/projects/proteusAI/models/VAE_protein_latent4_1emin6beta_sqrtsched_wtanh_1024dl/tmp/model_parameters_decoding.pth"
+    use_extraction_weights: "/scratch/hjc2538/projects/proteusAI/models/extraction_5_w_normed_wf/model_parameters_extraction.pth"
   inference:
     temperature: !!float 1e-6
     cycles: 10
@@ -154,7 +149,7 @@ training_parameters:
     epsilon: !!float 10e-9  # for adam optim (!!float lets PyYAML know this is a float, not str)
   
   regularization:
-    dropout: 0.15  # percentage of dropout
+    dropout: 0.00  # percentage of dropout
     wf_dropout: 0.00 # dropout for wf embedding, drops out this pct of sources, diff sources dropped for diff wavenumbers
     noise_coords_std: 0.00 # stdev of noise injection into coordinates during training
     use_chain_mask: True # whether to mask all chains except the sequence cluster representative in loss computation, all chains still used for fwd pass as context though
@@ -166,7 +161,7 @@ training_parameters:
       label_smoothing: 0.0
     kl:
       annealing: False # only beta used if this is false
-      beta: 0.1 # for beta-VAE, this serves as the max beta in kl annealing
+      beta: !!float 1e-6 # for beta-VAE, this serves as the max beta in kl annealing
       kappa: 0.001 # controls the steepness of the transition for kl annealing
       midpoint: 8000 # number of steps to pass the midpoint in sigmoidal kl annealing
     nll:
@@ -174,9 +169,9 @@ training_parameters:
     grad_clip_norm: 1.0 # max L2 norm of gradients for gradient clipping. if set to 0, no gradient clipping is applied (not recommended since the loss is a sum)
   
   lr:
-    lr_type: "static"
-    lr_step: !!float 1e-4 # max lr, ramps up to this val before decreasing  
-    warmup_steps: 4000 # number of warmup steps before decreasing
+    lr_type: "attn"
+    lr_step: !!float 1e-3 # max lr, ramps up to this val before decreasing  
+    warmup_steps: 6000 # number of warmup steps before decreasing
   
 # ------------------------------------------------------------------------------
 
@@ -203,7 +198,7 @@ data:
 
 # Output
 output:
-  out_path: "/scratch/hjc2538/projects/proteusAI/models/DIFFUSION_2dit_4HEAD_15t"  # path to store output, such as plots and weights file. for uncw hpc
+  out_path: "/scratch/hjc2538/projects/proteusAI/models/extraction_finetune_protlatent"  # path to store output, such as plots and weights file. for uncw hpc
   cel_plot: "cel_vs_epoch.png"  # path to save plot of loss vs epochs after training
   mse_plot: "mse_vs_epoch.png"  # path to save plot of loss vs epochs after training
   kldiv_plot: "kldiv_vs_epoch.png"  # path to save plot of loss vs epochs after training

@@ -2,7 +2,93 @@
 
 import torch
 
+class GeoAttention(nn.Module):
+	'''
+	Geometric Attention (w/ Flash Attention 2 implementation)
+	custom MHA module, in order to scale attention weights for each head based 
+	on each head's spread in the RBF of PW distances 
+	see the imported function (supports fwd and bwd) triton implementation
+	note that if minrbf and maxrbf are set, this is essentially sparse attention, 
+	so i recommend to do higher dropout on other layers and no dropout here
+	this essentially noises the inputs to the geo attention module, rather than directly doing dropout on attention weights
+	'''
 
+	def __init__(self, 	d_model=512, 
+						heads=8, 
+						min_spread=2.0,
+						min_rbf=0.01, max_rbf=0.99, 
+						use_bias=False
+					):
+		super(GeoAttention, self).__init__()
+
+		self.heads = heads
+		self.d_model = d_model
+
+		if self.d_model % self.heads != 0: raise ValueError(f"number of dimensions ({self.d_model}) must be divisible by number of attention heads ({self.heads})")
+		self.d_k = self.d_model // self.heads
+
+		self.spread_weights = nn.Parameter(torch.zeros(heads))
+		self.beta_weights = nn.Parameter(torch.zeros(heads))
+		self.min_spread = min_spread
+		self.min_rbf = min_rbf
+		self.max_rbf = max_rbf
+		self.use_bias = use_bias
+
+		# QKV projection weight and bias matrices
+
+		# init xavier distribution
+		xavier_scale = (6/(self.d_k + d_model))**0.5
+
+		self.q_proj = nn.Parameter(-xavier_scale + torch.rand(self.heads, self.d_model, self.d_k) * (2*xavier_scale)) # heads x d_model x d_k
+		self.k_proj = nn.Parameter(-xavier_scale + torch.rand(self.heads, self.d_model, self.d_k) * (2*xavier_scale)) # heads x d_model x d_k
+		self.v_proj = nn.Parameter(-xavier_scale + torch.rand(self.heads, self.d_model, self.d_k) * (2*xavier_scale)) # heads x d_model x d_k
+
+		self.q_bias = nn.Parameter(torch.zeros(self.heads, self.d_k)) # heads x d_k
+		self.k_bias = nn.Parameter(torch.zeros(self.heads, self.d_k)) # heads x d_k
+		self.v_bias = nn.Parameter(torch.zeros(self.heads, self.d_k)) # heads x d_k
+
+		self.out_proj = nn.Linear(d_model, d_model, bias=False)
+
+	def get_spreads(self):
+		return self.min_spread + torch.exp(self.spread_weights)
+
+	def get_betas(self):
+		return torch.exp(self.beta_weights)
+
+	def forward(self, q, k, v, coords, key_padding_mask=None):
+		'''
+		performs scaled dot-product attention weighted by Gaussian RBFs
+		'''
+
+		# make sure shape is compatible
+		assert q.shape == k.shape == v.shape
+		assert q.dim() == 3
+		batch, N, d_model = q.shape
+		assert d_model == self.d_model
+
+		# project the tensors
+		Q = torch.matmul(q.unsqueeze(1), self.q_proj.unsqueeze(0)) + self.q_bias.unsqueeze(0).unsqueeze(2) # batch x heads x N x d_k
+		K = torch.matmul(k.unsqueeze(1), self.k_proj.unsqueeze(0)) + self.k_bias.unsqueeze(0).unsqueeze(2) # batch x heads x N x d_k
+		V = torch.matmul(v.unsqueeze(1), self.v_proj.unsqueeze(0)) + self.v_bias.unsqueeze(0).unsqueeze(2) # batch x heads x N x d_k
+
+		# perform attention
+		if self.use_bias:
+			out = geometric_attn(Q, K, V, coords, self.get_spreads(), self.get_betas(), mask=key_padding_mask, min_rbf=self.min_rbf, max_rbf=self.max_rbf)  # batch x heads x N x d_k
+		else:
+			out = flash_attn(Q, K, V, mask=key_padding_mask)
+
+			# with sdpa_kernel(backends=[SDPBackend.FLASH_ATTENTION]): # use flash attention 2 backend
+			# 	out = torch.nn.functional.scaled_dot_product_attention(Q, K, V, dropout=0.0, mask=key_padding_mask)
+			
+		# cat heads
+		out = out.permute(0,2,3,1) # batch x N x d_k x heads
+		out = out.reshape(batch, N, self.d_model) # batch x N x d_k x heads --> batch x N x d_model
+
+		# project through final linear layer
+		out = self.out_proj(out) # batch x N x d_model --> batch x N x d_model
+
+		# return
+		return out # batch x N x d_model
 
 class AminoAcidEmbedding(nn.Module):
 

@@ -16,25 +16,24 @@ from utils.model_utils.base_modules.base_modules import init_xavier, MLP
 class WaveFunctionExtraction(nn.Module):
 	
 	def __init__(self, 	d_model=512, num_aas=20, # model dimension
-						mlp_pre=False, d_hidden_pre=2048, hidden_layers_pre=0, norm_pre=False,
-						mlp_post=False, d_hidden_post=2048, hidden_layers_post=0,
+						d_hidden_pre=2048, hidden_layers_pre=0,
+						d_hidden_post=2048, hidden_layers_post=0,
 						encoder_layers=8, heads=8, 
-						use_bias=False, min_spread=3.0, min_rbf=0.001, max_rbf=0.85, 
 						d_hidden_attn=2048, hidden_layers_attn=0,
-						dropout=0.10, attn_dropout=0.00,
+						dropout=0.10
 				):
 
 		super(WaveFunctionExtraction, self).__init__()
 
 		self.dropout = nn.Dropout(dropout)
-		self.space_enc = MLP(d_in=d_model, d_out=d_model, d_hidden=d_hidden_pre, hidden_layers=hidden_layers_pre)
-		self.mlp_pre = MLP(d_in=d_model, d_out=d_model, d_hidden=d_hidden_pre, hidden_layers=hidden_layers_pre)
+		self.space_enc = MLP(d_in=d_model, d_out=d_model, d_hidden=d_hidden_pre, hidden_layers=hidden_layers_pre, dropout=dropout)
+		self.mlp_pre = MLP(d_in=d_model, d_out=d_model, d_hidden=d_hidden_pre, hidden_layers=hidden_layers_pre, dropout=dropout)
 		self.norm_pre = nn.LayerNorm(d_model)
-		self.mlp_post = MLP(d_in=d_model, d_out=d_model, d_hidden=d_hidden_post, hidden_layers=hidden_layers_post)
+		self.mlp_post = MLP(d_in=d_model, d_out=d_model, d_hidden=d_hidden_post, hidden_layers=hidden_layers_post, dropout=dropout)
 		self.norm_post = nn.LayerNorm(d_model)
 
-		self.encoders = nn.ModuleList([ Encoder(	d_model=d_model, heads=heads, d_hidden=d_hidden_attn, hidden_layers=hidden_layers_attn, 
-													use_bias=use_bias, min_spread=min_spread, min_rbf=min_rbf, max_rbf=max_rbf, # for geo attn, if needed
+		self.encoders = nn.ModuleList([ Encoder(	d_model=d_model, d_other=d_model, heads=heads, 
+													d_hidden=d_hidden_attn, hidden_layers=hidden_layers_attn, 
 													dropout=dropout
 												) 
 										for _ in range(encoder_layers)
@@ -44,18 +43,19 @@ class WaveFunctionExtraction(nn.Module):
 		self.out_proj = nn.Linear(d_model, num_aas)
 		init_xavier(self.out_proj)
 
-	def forward(self, wf, coords_alpha, key_padding_mask=None, wf_no_aa=None,):
+	def forward(self, wf, wf_no_aa, key_padding_mask=None):
 
-		space_enc = wf + self.dropout(self.space_enc(wf_no_aa)) # using the raw wf, i think wf_no_aa just confuses the model
-		wf = wf + self.dropout(self.mlp_pre(wf)) # using the raw wf, i think wf_no_aa just confuses the model
+		# spatial encoding, assumes the decoders wf is too noisy to be reliable
+		space_enc = wf + self.dropout(self.space_enc(wf_no_aa)) 
+		wf = wf + self.dropout(self.mlp_pre(wf))
 		wf = self.norm_pre(wf + space_enc)
 
-		# geometric attention encoders
+		# encoders
 		for encoder in self.encoders:
-			wf = encoder(wf, coords_alpha, key_padding_mask=key_padding_mask)
+			wf = encoder(wf, wf, wf, mask=key_padding_mask)
 
-		wf = wf + self.dropout(self.mlp_post(wf))
-		wf = self.norm_post(wf)
+		# post process
+		wf = self.norm_post(wf + self.dropout(self.mlp_post(wf)))
 
 		# map to probability logits
 		aa_logits = self.out_proj(wf)

@@ -29,29 +29,19 @@ class MLP(nn.Module):
 		else:
 			self.act = lambda x: x # no activation if none of the above 
 
-		if zeros:
-			self.init_zeros()
+		self.init_linears(zeros=zeros)
 
-		else:
-			self.init_linears()
-
-	def init_zeros(self):
-
-		init_zeros(self.in_proj)  
-
-		for layer in self.hidden_proj:
-			init_zeros(layer)  
-
-		init_zeros(self.out_proj) 
-
-	def init_linears(self):
+	def init_linears(self, zeros=False):
 
 		init_xavier(self.in_proj)  # Xavier for the first layer
 
 		for layer in self.hidden_proj:
 			init_kaiming(layer)  # Kaiming for hidden layers
 
-		init_xavier(self.out_proj)  # Xavier for output layer
+		if zeros:
+			init_zeros(self.out_proj) 
+		else:
+			init_xavier(self.out_proj)  # Xavier for output layer
 
 	def forward(self, x):
 		x = self.in_dropout(self.act(self.in_proj(x)))

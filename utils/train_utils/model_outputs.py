@@ -21,6 +21,9 @@ class ExtractionOutput():
 		# valid tokens for averaging
 		self.valid_toks = (batch_parent.labels!=-1).sum()
 
+		self.valid_samples = (batch_parent.labels!=-1).any(dim=1).sum()
+
+
 	def compute_losses(self):
 		return self.batch_parent.epoch_parent.training_run_parent.losses.loss_function(self.seq_pred, self.batch_parent.labels)
 
@@ -46,6 +49,7 @@ class VAEOutput():
 
 		# valid tokens for averaging
 		self.valid_toks = (batch_parent.labels!=-1).sum()
+		self.valid_samples = (batch_parent.labels!=-1).any(dim=1).sum()
 
 	def compute_losses(self):
 		return self.batch_parent.epoch_parent.training_run_parent.losses.loss_function(	self.latent_mean_pred, self.latent_log_var_pred, 
@@ -71,6 +75,7 @@ class InferenceOutput():
 		self.batch_parent = batch_parent 
 		self.seq_pred = seq_pred
 		self.valid_toks = (batch_parent.labels!=-1).sum()
+		self.valid_samples = (batch_parent.labels!=-1).any(dim=1).sum()
 
 	def compute_matches(self):
 		'''greedy selection, computed seq sim here for simplicity, will do it with other losses later '''
@@ -92,4 +97,4 @@ class ModelOutputs():
 		self.output = output
 
 	def get_losses(self):
-		self.output.batch_parent.epoch_parent.training_run_parent.losses.tmp.add_losses(*self.output.compute_losses(), self.output.valid_toks)
+		self.output.batch_parent.epoch_parent.training_run_parent.losses.tmp.add_losses(*self.output.compute_losses(), valid_toks=self.output.valid_toks, valid_samples=self.output.valid_samples)

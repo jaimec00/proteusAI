@@ -6,9 +6,9 @@ description:	predicts the amino acid sequence of a protein based on alpha carbon
 				uses wave function embedding, encoding, diffusion, decoding, and extraction 
 
 				embedding maps Ca in cartesian space to wf space
-				encoding maps Ca in wf space to latent space
+				encoding maps Ca in wf space to fixed size protein latent space
 				diffusion moves imperfect latent space representation closer to manifold of viable proteins in the same latent space
-				decoding maps latent space to wf space 
+				decoding maps latent space to wf space, uses cross attention between aa ambiguous residues and the protein latent, then multiple self attention layers
 				extraction maps wf space to discrete sequence space (sequence prediction)
 '''
 # ----------------------------------------------------------------------------------------------------------------------
@@ -30,66 +30,65 @@ class proteusAI(nn.Module):
 	
 	def __init__(self, 	# model dimension and number of amino acid classes, plus option to run old model, 
 						# which is just embedding with no aa info + extraction 
-						d_model=256, d_latent=256, num_aas=20, old=False,
+						d_model=256, d_latent=512, N_latent=64, num_aas=20, old=False,
 
 						# wf embedding params, everything is learnable, so not included
 
 						# wf encoder params
 						encoding_d_hidden_pre=1024, encoding_hidden_layers_pre=0,
 						encoding_d_hidden_post=2048, encoding_hidden_layers_post=1, 
-						encoding_encoder_layers=4, encoding_heads=8, 
-						encoding_use_bias=False, encoding_min_spread=3.0, encoding_min_rbf=0.001, encoding_max_rbf=0.85, # these only matter if use_bias is True, for geometric attn
-						encoding_d_hidden_attn=1024, encoding_hidden_layers_attn=0,
+						encoding_encoder_self_layers=4, encoding_self_heads=8, 
+						encoding_self_d_hidden_attn=1024, encoding_self_hidden_layers_attn=0,
+						encoding_encoder_cross_layers=4, encoding_cross_heads=8, 
+						encoding_cross_d_hidden_attn=1024, encoding_cross_hidden_layers_attn=0,
 
 						# wf diffusion params
-						diffusion_alpha_bar_min=0.5, diffusion_beta_min=0.02, diffusion_beta_max=0.04,
+						diffusion_alpha_bar_min=0.0,
 						diffusion_noise_schedule_type="linear", diffusion_t_max=100,
 						diffusion_d_in_timestep=256, diffusion_d_hidden_timestep=1024, diffusion_hidden_layers_timestep=1,
 						diffusion_d_hidden_post=1024, diffusion_hidden_layers_post=0,
 						diffusion_encoder_layers=4, diffusion_heads=4, 
-						diffusion_use_bias=False, diffusion_min_spread=3.0, diffusion_min_rbf=0.001, diffusion_max_rbf=0.85,
 						diffusion_d_hidden_attn=1024, diffusion_hidden_layers_attn=0,
 
 						# wf decoder params
 						decoding_d_hidden_pre=1024, decoding_hidden_layers_pre=0,
 						decoding_d_hidden_post=1024, decoding_hidden_layers_post=0,
-						decoding_encoder_layers=4, decoding_heads=8,
-						decoding_use_bias=False, decoding_min_spread=3.0, decoding_min_rbf=0.001, decoding_max_rbf=0.85,
-						decoding_d_hidden_attn=1024, decoding_hidden_layers_attn=0,
+						decoding_encoder_self_layers=4, decoding_self_heads=8, 
+						decoding_self_d_hidden_attn=1024, decoding_self_hidden_layers_attn=0,
+						decoding_encoder_cross_layers=4, decoding_cross_heads=8, 
+						decoding_cross_d_hidden_attn=1024, decoding_cross_hidden_layers_attn=0,
 
 						# wf extraction params
 						extraction_d_hidden_pre=1024, extraction_hidden_layers_pre=0, 
 						extraction_d_hidden_post=1024, extraction_hidden_layers_post=0,
 						extraction_encoder_layers=4, extraction_heads=8, 
-						extraction_use_bias=False, extraction_min_spread=3.0, extraction_min_rbf=0.001, extraction_max_rbf=0.85,
 						extraction_d_hidden_attn=1024, extraction_hidden_layers_attn=0,
 
 						# dropout params
-						dropout=0.10, wf_dropout=0.00,
+						dropout=0.10
 				):
 
 		super(proteusAI, self).__init__()
 
 		self.num_aas = num_aas
 
-		self.wf_embedding = WaveFunctionEmbedding(d_model=d_model, num_aas=num_aas, dropout=wf_dropout, old=old)
+		self.wf_embedding = WaveFunctionEmbedding(d_model=d_model, num_aas=num_aas, old=old)
 
-		self.wf_encoding = WaveFunctionEncoding(	d_model=d_model, d_latent=d_latent,
+		self.wf_encoding = WaveFunctionEncoding(	d_model=d_model, d_latent=d_latent, N_latent=N_latent,
 													d_hidden_pre=encoding_d_hidden_pre, hidden_layers_pre=encoding_hidden_layers_pre, 
 													d_hidden_post=encoding_d_hidden_post, hidden_layers_post=encoding_hidden_layers_post,						
-													encoder_layers=encoding_encoder_layers, heads=encoding_heads, 
-													use_bias=encoding_use_bias, min_spread=encoding_min_spread, min_rbf=encoding_min_rbf, max_rbf=encoding_max_rbf, # looking to get rid of this, i like global attention better, seems like getting close to geo attention
-													d_hidden_attn=encoding_d_hidden_attn, hidden_layers_attn=encoding_hidden_layers_attn,
+													encoder_self_layers=encoding_encoder_self_layers, self_heads=encoding_self_heads, 
+													self_d_hidden_attn=encoding_self_d_hidden_attn, self_hidden_layers_attn=encoding_self_hidden_layers_attn,
+													encoder_cross_layers=encoding_encoder_cross_layers, cross_heads=encoding_cross_heads, 
+													cross_d_hidden_attn=encoding_cross_d_hidden_attn, cross_hidden_layers_attn=encoding_cross_hidden_layers_attn,
 													dropout=dropout
 												)										
 
 		self.wf_diffusion = WaveFunctionDiffusion(	d_model=d_latent, 
-													alpha_bar_min=diffusion_alpha_bar_min, beta_min=diffusion_beta_min, beta_max=diffusion_beta_max,
-													noise_schedule_type=diffusion_noise_schedule_type, t_max=diffusion_t_max,
+													alpha_bar_min=diffusion_alpha_bar_min, noise_schedule_type=diffusion_noise_schedule_type, t_max=diffusion_t_max,
 													d_in_timestep=diffusion_d_in_timestep, d_hidden_timestep=diffusion_d_hidden_timestep, hidden_layers_timestep=diffusion_hidden_layers_timestep,
 													d_hidden_post=diffusion_d_hidden_post, hidden_layers_post=diffusion_hidden_layers_post,					
-													encoder_layers=diffusion_encoder_layers, heads=diffusion_heads, use_bias=diffusion_use_bias,
-													min_spread=diffusion_min_spread, min_rbf=diffusion_min_rbf, max_rbf=diffusion_max_rbf, 
+													encoder_layers=diffusion_encoder_layers, heads=diffusion_heads, 
 													d_hidden_attn=diffusion_d_hidden_attn, hidden_layers_attn=diffusion_hidden_layers_attn,
 													dropout=dropout
 												)
@@ -97,23 +96,23 @@ class proteusAI(nn.Module):
 		self.wf_decoding = WaveFunctionDecoding(	d_model=d_model, d_latent=d_latent,
 													d_hidden_pre=decoding_d_hidden_pre, hidden_layers_pre=decoding_hidden_layers_pre, 
 													d_hidden_post=decoding_d_hidden_post, hidden_layers_post=decoding_hidden_layers_post,						
-													encoder_layers=decoding_encoder_layers, heads=decoding_heads, use_bias=decoding_use_bias,
-													min_spread=decoding_min_spread,min_rbf=decoding_min_rbf, max_rbf=decoding_max_rbf, 
-													d_hidden_attn=decoding_d_hidden_attn, hidden_layers_attn=decoding_hidden_layers_attn,
+													encoder_self_layers=decoding_encoder_self_layers, self_heads=decoding_self_heads, 
+													self_d_hidden_attn=decoding_self_d_hidden_attn, self_hidden_layers_attn=decoding_self_hidden_layers_attn,
+													encoder_cross_layers=decoding_encoder_cross_layers, cross_heads=decoding_cross_heads, 
+													cross_d_hidden_attn=decoding_cross_d_hidden_attn, cross_hidden_layers_attn=decoding_cross_hidden_layers_attn,
 													dropout=dropout
 												)
 
 		self.wf_extraction = WaveFunctionExtraction(	d_model=d_model, num_aas=num_aas, 
 														d_hidden_pre=extraction_d_hidden_pre, hidden_layers_pre=extraction_hidden_layers_pre,
 														d_hidden_post=extraction_d_hidden_post, hidden_layers_post=extraction_hidden_layers_post,
-														encoder_layers=extraction_encoder_layers, heads=extraction_heads, use_bias=extraction_use_bias,
-														min_spread=extraction_min_spread, min_rbf=extraction_min_rbf, max_rbf=extraction_max_rbf, 
+														encoder_layers=extraction_encoder_layers, heads=extraction_heads,
 														d_hidden_attn=extraction_d_hidden_attn, hidden_layers_attn=extraction_hidden_layers_attn,
 														dropout=dropout,
 													)
 
-	def forward(self, 	coords_alpha, coords_beta=None, aas=None, wf=None, chain_idxs=None, key_padding_mask=None, 
-						embedding=False, encoding=False, diffusion=False, decoding=False, extraction=False, no_aa=False, t=None, wf_no_aa=None,
+	def forward(self, 	coords_alpha=None, coords_beta=None, aas=None, wf=None, wf_no_aa=None, latent=None, t=None, chain_idxs=None, key_padding_mask=None, 
+						embedding=False, encoding=False, diffusion=False, decoding=False, extraction=False, no_aa=False, 
 						inference=False, cycles=10, temp=1e-6 # last row is for inference only
 				):
 
@@ -133,17 +132,17 @@ class proteusAI(nn.Module):
 			wf = self.wf_embedding(coords_alpha, coords_beta, aas, key_padding_mask=key_padding_mask, no_aa=no_aa) # no_aa allows you to compute wf from mean of aa for each wavenumber, essentially just encoding struct w/ no aa info for spatial encoding
 		elif encoding:
 			assert wf is not None, "wf cannot be NoneType if running encoding, must be a tensor of size batch x N x d_model"
-			wf = self.wf_encoding(wf, coords_alpha, key_padding_mask=key_padding_mask, wf_no_aa=wf_no_aa)
+			wf = self.wf_encoding(wf, key_padding_mask=key_padding_mask)
 		elif diffusion: # run diffusion
-			assert wf is not None, "wf cannot be NoneType if running diffusion, must be a tensor of size batch x N x d_latent"
+			assert latent is not None, "wf cannot be NoneType if running diffusion, must be a tensor of size batch x N x d_latent"
 			assert t is not None, "t (timestep) cannot be NoneType if running diffusion, must be a tensor of size batch,"
-			wf = self.wf_diffusion(wf, coords_alpha, t, key_padding_mask=key_padding_mask, wf_no_aa=wf_no_aa)
+			wf = self.wf_diffusion(latent, t, key_padding_mask=key_padding_mask)
 		elif decoding:
-			assert wf is not None, "wf cannot be NoneType if running decoding, must be a tensor of size batch x N x d_model"
-			wf = self.wf_decoding(wf, coords_alpha, key_padding_mask=key_padding_mask, wf_no_aa=wf_no_aa)
+			assert latent is not None, "wf cannot be NoneType if running decoding, must be a tensor of size batch x N x d_model"
+			wf = self.wf_decoding(wf_no_aa, latent, key_padding_mask=key_padding_mask)
 		elif extraction: # run extraction
 			assert wf is not None, "wf cannot be NoneType if running extraction, must be a tensor of size batch x N x d_model"
-			wf = self.wf_extraction(wf, coords_alpha, key_padding_mask=key_padding_mask, wf_no_aa=wf_no_aa)
+			wf = self.wf_extraction(wf, wf_no_aa, key_padding_mask=key_padding_mask)
 
 		return wf
 
@@ -159,7 +158,6 @@ class proteusAI(nn.Module):
 
 		wf_no_aa = self.wf_embedding(coords_alpha, coords_beta, aas, key_padding_mask=key_padding_mask, no_aa=True)
 
-
 		# multiple embedding + encoding + diffusion + decoding + extraction runs, each giving a slightly better guess and thus using less noise
 		for t_fwd in range(t_max, 0, -t_max//cycles):
 
@@ -169,21 +167,21 @@ class proteusAI(nn.Module):
 			# all of the following modules do not use coords alpha, since replaced geo attn with regular attn + spatial encoding, but leaving it until i am sure geo attn is dead
 
 			# encode from wf space to latent space
-			latent_wf = self.wf_encoding.encode(wf, coords_alpha, key_padding_mask=key_padding_mask, wf_no_aa=wf_no_aa)
+			protein = self.wf_encoding.encode(wf, key_padding_mask=key_padding_mask)
 			
 			for diffusion_iter in range(diffusion_iters): # slight nudge, then denoise, then repeat, nudging latent towards manifold, rather than starting from full gaussian
 				
 				# add gaussian noise to latent space
-				latent_wf_noised, _ = self.wf_diffusion.noise(latent_wf, t_fwd)
+				protein_noised, _ = self.wf_diffusion.noise(protein, t_fwd)
 
 				# remove the noise
-				latent_wf = self.wf_diffusion.denoise(latent_wf_noised, coords_alpha, t_fwd, key_padding_mask=key_padding_mask, wf_no_aa=wf_no_aa)
+				protein = self.wf_diffusion.denoise(protein_noised, t_fwd, key_padding_mask=key_padding_mask)
 
 			# decode from latent space to wf space
-			wf_pred = self.wf_decoding(latent_wf, coords_alpha, key_padding_mask=key_padding_mask, wf_no_aa=wf_no_aa)
+			wf_pred = self.wf_decoding(protein, wf_no_aa, key_padding_mask=key_padding_mask)
 
 			# extract sequence from wf
-			aa_pred = self.wf_extraction.extract(wf_pred, coords_alpha, key_padding_mask=key_padding_mask, wf_no_aa=wf_no_aa)
+			aa_pred = self.wf_extraction.extract(wf_pred, wf_no_aa, key_padding_mask=key_padding_mask)
 
 			# keeping fixed positions as they were for next iteration, 
 			aas = torch.where(fixed_aas, aas, aa_pred)

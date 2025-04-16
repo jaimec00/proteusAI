@@ -74,6 +74,7 @@ class Output():
 		model hyper-parameters:
 			d_model: {hyper_parameters.d_model} 
 			d_latent: {hyper_parameters.d_latent} 
+			N_latent: {hyper_parameters.N_latent} 
 			num_aa: {hyper_parameters.num_aa}
 			wave function embedding:
 				none, all are learnable
@@ -85,14 +86,16 @@ class Output():
 					d_hidden: {hyper_parameters.encoding.post_process.d_hidden}
 					hidden_layers: {hyper_parameters.encoding.post_process.hidden_layers}
 				encoders:
-					encoder_layers: {hyper_parameters.encoding.encoders.layers}
-					heads: {hyper_parameters.encoding.encoders.heads}
-					use_bias: {hyper_parameters.encoding.encoders.use_bias}
-					min_spread: {hyper_parameters.encoding.encoders.min_spread}
-					min_rbf: {hyper_parameters.encoding.encoders.min_rbf}
-					max_rbf: {hyper_parameters.encoding.encoders.max_rbf}
-					d_hidden_attn: {hyper_parameters.encoding.encoders.d_hidden_attn}
-					hidden_layers_attn: {hyper_parameters.encoding.encoders.hidden_layers_attn}
+					self-attn:
+						encoder_layers: {hyper_parameters.encoding.encoders.self_attn.layers}
+						heads: {hyper_parameters.encoding.encoders.self_attn.heads}
+						d_hidden_attn: {hyper_parameters.encoding.encoders.self_attn.d_hidden_attn}
+						hidden_layers_attn: {hyper_parameters.encoding.encoders.self_attn.hidden_layers_attn}
+					cross_attn:
+						encoder_layers: {hyper_parameters.encoding.encoders.cross_attn.layers}
+						heads: {hyper_parameters.encoding.encoders.cross_attn.heads}
+						d_hidden_attn: {hyper_parameters.encoding.encoders.cross_attn.d_hidden_attn}
+						hidden_layers_attn: {hyper_parameters.encoding.encoders.cross_attn.hidden_layers_attn}
 			wave function diffusion:
 				scheduler:
 					alpha_bar_min: {hyper_parameters.diffusion.scheduler.alpha_bar_min}
@@ -108,10 +111,6 @@ class Output():
 				encoders:
 					encoder_layers: {hyper_parameters.diffusion.encoders.layers}
 					heads: {hyper_parameters.diffusion.encoders.heads}
-					use_bias: {hyper_parameters.diffusion.encoders.use_bias}
-					min_spread: {hyper_parameters.diffusion.encoders.min_spread}
-					min_rbf: {hyper_parameters.diffusion.encoders.min_rbf}
-					max_rbf: {hyper_parameters.diffusion.encoders.max_rbf}
 					d_hidden_attn: {hyper_parameters.diffusion.encoders.d_hidden_attn}
 					hidden_layers_attn: {hyper_parameters.diffusion.encoders.hidden_layers_attn}
 			wave function decoding:
@@ -122,14 +121,16 @@ class Output():
 					d_hidden: {hyper_parameters.decoding.post_process.d_hidden}
 					hidden_layers: {hyper_parameters.decoding.post_process.hidden_layers}
 				encoders:
-					encoder_layers: {hyper_parameters.decoding.encoders.layers}
-					heads: {hyper_parameters.decoding.encoders.heads}
-					use_bias: {hyper_parameters.decoding.encoders.use_bias}
-					min_spread: {hyper_parameters.decoding.encoders.min_spread}
-					min_rbf: {hyper_parameters.decoding.encoders.min_rbf}
-					max_rbf: {hyper_parameters.decoding.encoders.max_rbf}
-					d_hidden_attn: {hyper_parameters.decoding.encoders.d_hidden_attn}
-					hidden_layers_attn: {hyper_parameters.decoding.encoders.hidden_layers_attn}
+					self-attn:
+						encoder_layers: {hyper_parameters.decoding.encoders.self_attn.layers}
+						heads: {hyper_parameters.decoding.encoders.self_attn.heads}
+						d_hidden_attn: {hyper_parameters.decoding.encoders.self_attn.d_hidden_attn}
+						hidden_layers_attn: {hyper_parameters.decoding.encoders.self_attn.hidden_layers_attn}
+					cross-attn:
+						encoder_layers: {hyper_parameters.decoding.encoders.cross_attn.layers}
+						heads: {hyper_parameters.decoding.encoders.cross_attn.heads}
+						d_hidden_attn: {hyper_parameters.decoding.encoders.cross_attn.d_hidden_attn}
+						hidden_layers_attn: {hyper_parameters.decoding.encoders.cross_attn.hidden_layers_attn}
 			wave function extraction:
 				wf preprocessing:
 					d_hidden: {hyper_parameters.extraction.pre_process.d_hidden}
@@ -140,10 +141,6 @@ class Output():
 				encoder:
 					encoder_layers: {hyper_parameters.extraction.encoders.layers}
 					heads: {hyper_parameters.extraction.encoders.heads}
-					use_bias: {hyper_parameters.extraction.encoders.use_bias}
-					min_spread: {hyper_parameters.extraction.encoders.min_spread}
-					min_rbf: {hyper_parameters.extraction.encoders.min_rbf}
-					max_rbf: {hyper_parameters.extraction.encoders.max_rbf}
 					d_hidden_attn: {hyper_parameters.extraction.encoders.d_hidden_attn}
 					hidden_layers_attn: {hyper_parameters.extraction.encoders.hidden_layers_attn}
 
