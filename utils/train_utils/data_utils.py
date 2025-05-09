@@ -21,9 +21,6 @@ import math
 import os
 import argparse
 
-from utils.train_utils.io_utils import Output
-
-
 # ----------------------------------------------------------------------------------------------------------------------
 
 # add safe globals
@@ -124,8 +121,11 @@ class BioUnitCache():
 				return None
 
 class BioUnit():
-	def __init__(self, biounit_dict):
+	def __init__(self, biounit_dict, ca_only=True):
 		self.coords = biounit_dict["coords"]
+		if ca_only: 
+			self.coords = self.coords[:, 1, :] # idx 1 of dim 1 is Ca
+		
 		self.labels = biounit_dict["labels"] # no mask needed, masked vals have -1 for labels
 		self.labels = torch.where(self.labels==20, -1, self.labels) # don't predict NCAA
 		self.chain_idxs = biounit_dict["chain_idxs"] # dict of chain [start, end)
@@ -137,13 +137,20 @@ class DataHolder():
 
 	'''
 	hold Data Objects, one each for train, test and val
+	using multi chain or single chain version is not handled here, as both are cleaned so that they are in the same format, 
+	just make sure you run the data cleaners and specify the correct path of the CLEANED data. will add option in the data
+	cleaners to automatically download and unpack later, but here are the urls for now
+
+	single-chain: https://people.csail.mit.edu/ingraham/graph-protein-design/data/cath/{chain_set.jsonl,chain_set_splits.json}
+	multi-chain: https://files.ipd.uw.edu/pub/training_sets/pdb_2021aug02.tar.gz 
 	'''
 
 	def __init__(self, 	data_path, num_train, num_val, num_test, 
 						batch_tokens=16384, max_batch_size=128, 
 						min_seq_size=64, max_seq_size=16384,
 						use_chain_mask=True,
-						max_resolution=3.5
+						max_resolution=3.5,
+						ca_only=True, # return ca only data or full backbone
 					):
 
 
@@ -158,6 +165,7 @@ class DataHolder():
 
 		# whether to mask non-cluter-representative chains in the biounit
 		self.use_chain_mask = use_chain_mask
+		self.ca_only = ca_only
 
 		# load the info about clusters
 		pdb_info_path = data_path / Path("list.csv")
@@ -173,18 +181,20 @@ class DataHolder():
 		# filter out long sequences
 
 		# get indices of each chains biounit sizes that are less than max_seq_size
-		pdbs_info["VALID_IDX"] = pdbs_info.loc[:, "BIOUNIT_SIZE"].apply(lambda x: [i for i, size in enumerate(x.split(";")) if int(size) <= max_seq_size])
+		pdbs_info["VALID_IDX"] = pdbs_info.loc[:, "BIOUNIT_SIZE"].apply(lambda x: [i for i, size in enumerate(str(x).split(";")) if int(size) <= max_seq_size])
 		# remove the indices
-		pdbs_info.BIOUNIT = pdbs_info.apply(lambda row: [row.BIOUNIT.split(";")[idx] for idx in row.VALID_IDX], axis=1)
-		pdbs_info.BIOUNIT_SIZE = pdbs_info.apply(lambda row: [row.BIOUNIT_SIZE.split(";")[idx] for idx in row.VALID_IDX], axis=1)
+		pdbs_info.BIOUNIT = pdbs_info.apply(lambda row: [str(row.BIOUNIT).split(";")[idx] for idx in row.VALID_IDX], axis=1)
+		pdbs_info.BIOUNIT_SIZE = pdbs_info.apply(lambda row: [str(row.BIOUNIT_SIZE).split(";")[idx] for idx in row.VALID_IDX], axis=1)
 		# remove any chains who do not have a biounit after the length filter, and remove the VALID IDX column
 		pdbs_info = pdbs_info.loc[pdbs_info.BIOUNIT.apply(lambda x: len(x)>0), [col for col in pdbs_info.columns if col != "VALID_IDX"]].reset_index(drop=True)
+		# clusters formatted differently in multi and single chain, so convert them to string for consistency
+		pdbs_info.CLUSTER = pdbs_info.apply(lambda row: str(row.CLUSTER), axis=1)
 
 		# get pdb info, as well as validation and training clusters
 		with 	open(	val_clusters_path,   "r") as v, \
 				open(   test_clusters_path,  "r") as t:
-			val_clusters = [int(i) for i in v.read().split("\n") if i]
-			test_clusters = [int(i) for i in t.read().split("\n") if i]
+			val_clusters = [str(i) for i in v.read().split("\n") if i]
+			test_clusters = [str(i) for i in t.read().split("\n") if i]
 
 		# seperate training, validation, and testing
 		train_pdbs = pdbs_info.loc[~pdbs_info.CLUSTER.isin(test_clusters + val_clusters), :]
@@ -206,14 +216,14 @@ class DataHolder():
 		loads the Data Objects, allowing for the objects to be retrieved afterwards
 		'''
 		if data_type == "train":
-			self.train_data = Data(self.data_path, self.train_pdbs, self.num_train, self.batch_tokens, self.max_batch_size, self.min_seq_size, self.max_seq_size, self.use_chain_mask)
+			self.train_data = Data(self.data_path, self.train_pdbs, self.num_train, self.batch_tokens, self.max_batch_size, self.min_seq_size, self.max_seq_size, self.use_chain_mask, self.ca_only)
 		elif data_type == "val":
-			self.val_data = Data(self.data_path, self.val_pdbs, self.num_val, self.batch_tokens, self.max_batch_size, self.min_seq_size, self.max_seq_size, self.use_chain_mask)
+			self.val_data = Data(self.data_path, self.val_pdbs, self.num_val, self.batch_tokens, self.max_batch_size, self.min_seq_size, self.max_seq_size, self.use_chain_mask, self.ca_only)
 		elif data_type == "test":	
-			self.test_data = Data(self.data_path, self.test_pdbs, self.num_test, self.batch_tokens, self.max_batch_size, self.min_seq_size, self.max_seq_size, self.use_chain_mask)
+			self.test_data = Data(self.data_path, self.test_pdbs, self.num_test, self.batch_tokens, self.max_batch_size, self.min_seq_size, self.max_seq_size, self.use_chain_mask, self.ca_only)
 
 class Data():
-	def __init__(self, data_path, clusters_df, num_samples=None, batch_tokens=16384, max_batch_size=128, min_seq_size=512, max_seq_size=16384, use_chain_mask=True, device="cpu"):
+	def __init__(self, data_path, clusters_df, num_samples=None, batch_tokens=16384, max_batch_size=128, min_seq_size=512, max_seq_size=16384, use_chain_mask=True, ca_only=True, device="cpu"):
 
 		# path to pdbs
 		self.pdb_path = data_path / Path("pdb")
@@ -224,6 +234,7 @@ class Data():
 		self.max_seq_size = max_seq_size
 		self.min_seq_size = min_seq_size
 		self.use_chain_mask = use_chain_mask
+		self.ca_only = ca_only
 
 		# should be cpu
 		self.device = device
@@ -283,7 +294,7 @@ class Data():
 
 		biounit_path = self.pdb_path / Path(f"{biounit_id.split('_')[0][1:3]}/{biounit_id}.pt") 
 		biounit_raw = torch.load(biounit_path, weights_only=True)
-		biounit = BioUnit(biounit_raw)
+		biounit = BioUnit(biounit_raw, self.ca_only)
 		self.biounit_cache.add_biounit(biounit, biounit_id)
 
 		return biounit
@@ -386,11 +397,11 @@ class DataCleaner():
 
 	'''
 	class to pre-process pdbs. it is much faster to compute each chains corresponding biounit and save the complete biounits to disk before 
-	training, rather than reconstructing the biounits from the individual chains on the fly
+	training, rather than reconstructing the biounits from the individual chains on the fly like pmpnn. more disk space, but definitley worth it
 	'''
 
-	def __init__(self, 	data_path=Path("/share/wangyy/hjc2538/proteusAI/pdb_2021aug02"),
-						new_data_path=Path("/share/wangyy/hjc2538/proteusAI/pdb_2021aug02_filtered"),
+	def __init__(self, 	data_path=Path("/scratch/hjc2538/projects/proteusAI/pdb_2021aug02"),
+						new_data_path=Path("/scratch/hjc2538/projects/proteusAI/pdb_2021aug02_filtered"),
 						pdb_path=Path("pdb"),
 						all_clusters_path=Path("list.csv"),
 						val_clusters_path=Path("valid_clusters.txt"),
@@ -403,7 +414,10 @@ class DataCleaner():
 		self.pdb_path = self.data_path / pdb_path
 
 		# define output path
-		self.output = Output(new_data_path)
+		self.new_data_path = new_data_path
+		self.val_clusters_path = val_clusters_path
+		self.test_clusters_path = test_clusters_path
+		self.all_clusters_path = all_clusters_path
 
 			
 		# read which clusters are for validation and for testing
@@ -428,11 +442,6 @@ class DataCleaner():
 		self.amino_acids = "ACDEFGHIKLMNPQRSTVWYX"
 		self.aa_idx = {aa: idx for idx, aa in enumerate(self.amino_acids)}
 		self.rev_aa_idx = {idx: aa for idx, aa in enumerate(self.amino_acids)}
-		
-		# to keep track of dataset statistics
-		self.aa_distributions = {aa: 0 for aa in range(len(self.amino_acids))}
-		self.seq_lengths = []
-		self.max_seq_len = 0
 
 		# compute biounits
 		self.get_pmpnn_pdbs()
@@ -470,12 +479,12 @@ class DataCleaner():
 
 			# assign BIOUNIT and BIOUNIT_SIZE for the chains
 			self.cluster_info.loc[self.cluster_info.CHAINID.isin(pdb_biounits.keys()), "BIOUNIT"] = self.cluster_info.loc[self.cluster_info.CHAINID.isin(pdb_biounits.keys()), :].apply(lambda row: ';'.join(pdb_biounits[row.CHAINID]["BIOUNIT"]), axis=1)
-			self.cluster_info.loc[self.cluster_info.CHAINID.isin(pdb_biounits.keys()), "BIOUNIT_SIZE"] = self.cluster_info.loc[self.cluster_info.CHAINID.isin(pdb_biounits.keys()), :].apply(lambda row: ';'.join(pdb_biounits[row.CHAINID]["BIOUNIT_SIZE"]), axis=1)
+			self.cluster_info.loc[self.cluster_info.CHAINID.isin(pdb_biounits.keys()), "BIOUNIT_SIZE"] = self.cluster_info.loc[self.cluster_info.CHAINID.isin(pdb_biounits.keys()), :].apply(lambda row: ';'.join([str(i) for i in pdb_biounits[row.CHAINID]["BIOUNIT_SIZE"]]), axis=1)
 
 			# remove unused chains, i.e. the pt file doesnt exist
 			self.cluster_info = self.cluster_info.dropna(subset="BIOUNIT").reset_index(drop=True)
 					
-			self.output.write_new_clusters(self.cluster_info, self.val_clusters, self.test_clusters)
+			self.write_new_clusters(self.cluster_info, self.val_clusters, self.test_clusters)
 			
 	def compute_biounits(self, pdbid):
 
@@ -494,7 +503,7 @@ class DataCleaner():
 		single_chains = chains.loc[~chains.isin(biounits_flat)]
 		biounits.extend([chain.split("_")[1] for _, chain in single_chains.items()])
 
-		pdb_path = self.output.out_path / Path(f"pdb/{pdbid[1:3]}")
+		pdb_path = self.new_data_path / Path(f"pdb/{pdbid[1:3]}")
 
 		# loop through each biounit
 		for idx, biounit in enumerate(biounits):
@@ -570,18 +579,21 @@ class DataCleaner():
 			labels = torch.tensor([self.aa_idx[aa] if aa in self.amino_acids else self.aa_idx["X"] for aa in seq])
 			labels = labels[mask]
 
-			# get the Ca coords
-			ca = chain["xyz"][:, 1, :]
-			ca = ca[mask]
+			# get the coords, removes masked pos. wf embedding for Ca only model computes virtual cb between adjacent Ca, 
+			# so the approx will be more innacurate for chains with missing coords in the middle, but still a better approximation 
+			# that virtual N/C lies on line connecting adjacent Ca, even if not actually adjacent. alternative is no Cb for Ca next to missing coords, which is worse  
+			n = chain["xyz"][:, 0, :][mask]
+			ca = chain["xyz"][:, 1, :][mask]
+			c = chain["xyz"][:, 2, :][mask]
 
 			# make sure same size
-			assert ca.size(0) == labels.size(0)
+			assert ca.size(0) == labels.size(0) == n.size(0) == c.size(0)
 
 			# save chain indices, to seperate them when computing loss
 			chain_indices[chainid] = [chain_start_idx, chain_start_idx + labels.size(0)]
 			chain_start_idx += labels.size(0)
 
-			biounit_coords.append(ca)
+			biounit_coords.append(torch.stack([n, ca, c], dim=1))
 			biounit_labels.append(labels)
 
 		if biounit_coords==[] or biounit_labels==[]:
@@ -605,6 +617,191 @@ class DataCleaner():
 
 		return pdb
 
+	def write_new_clusters(self, cluster_info, val_clusters, test_clusters):
+
+		# seperate training, validation, and testing
+		val_pdbs = cluster_info.loc[cluster_info.CLUSTER.isin(val_clusters), :]
+		test_pdbs =cluster_info.loc[cluster_info.CLUSTER.isin(test_clusters), :]
+
+		# get lists of unique clusters
+		val_clusters = "\n".join(str(i) for i in val_pdbs.CLUSTER.unique().tolist())
+		test_clusters = "\n".join(str(i) for i in test_pdbs.CLUSTER.unique().tolist())
+
+		with    open(   self.new_data_path / self.val_clusters_path,   "w") as v, \
+				open(   self.new_data_path / self.test_clusters_path,  "w") as t:
+				v.write(val_clusters)
+				t.write(test_clusters)
+
+		# save training pdbs
+		cluster_info.to_csv(self.new_data_path / self.all_clusters_path, index=False)
+
+
+class SingleChainDataCleaner():
+	'''
+	clean single chain data from Ingraham et al so that it is in same format as pmpnn multi chain data, so can use the same DataHolder object 
+	'''
+	def __init__(self, 	data_path, new_data_path, pdb_path, 
+						chain_clusters_path, chain_clusters_split_path,
+						all_clusters_path, val_clusters_path, test_clusters_path, 
+						test):
+
+		# define paths
+		self.data_path = data_path
+		self.new_data_path = new_data_path
+		self.pdb_path = self.new_data_path / pdb_path
+		self.val_clusters_path = self.new_data_path / val_clusters_path
+		self.test_clusters_path = self.new_data_path / test_clusters_path
+		self.all_clusters_path = self.new_data_path / all_clusters_path
+
+		self.chain_clusters = pd.read_json(self.data_path / chain_clusters_path, lines=True)
+		self.chain_clusters_split = pd.read_json(self.data_path / chain_clusters_split_path, lines=True)
+			
+		self.val_clusters = self.chain_clusters_split.validation[0]
+		self.test_clusters = self.chain_clusters_split.test[0]
+		self.train_clusters = self.chain_clusters_split.train[0]
+
+		# need these columns, 
+		# 'CHAINID', 'DEPOSITION', 'RESOLUTION', 'HASH', 'CLUSTER', 'SEQUENCE', 'BIOUNIT', 'BIOUNIT_SIZE', 'PDB'
+		# DEPOSITION, RESOLUTION, HASH, not used, so just fill with none, 
+		# CHAINID is pdb_chain
+		# CLUSTER will be the cath_id(s). to keep the same sampling logic in data, if a chain has multiple clusters, it will have seperate rows, each with one cluster
+		# BIOUNIT is the same as CHAIN_ID
+		# PDB also just like chainID
+
+		self.cluster_info = {key: [] for key in ['CHAINID', 'DEPOSITION', 'RESOLUTION', 'HASH', 'CLUSTER', 'SEQUENCE', 'BIOUNIT', 'BIOUNIT_SIZE', 'PDB']}
+
+		# useful conversions between aa and idx
+		self.amino_acids = "ACDEFGHIKLMNPQRSTVWYX"
+		self.aa_idx = {aa: idx for idx, aa in enumerate(self.amino_acids)}
+		self.rev_aa_idx = {idx: aa for idx, aa in enumerate(self.amino_acids)}
+
+		# compute biounits
+		self.get_single_chain_pdbs(test)
+
+	def get_single_chain_pdbs(self, test=False):
+		
+		current_cluster = {0: "train", 1: "validation", 2: "test"}
+		for idx, cluster in enumerate([self.train_clusters, self.val_clusters, self.test_clusters]):
+			
+			# init progress bar
+			load_pbar = tqdm(total=len(cluster), desc=f"processing {current_cluster[idx]} clusters", unit="pdbs")
+
+			# parallel execution
+			with ThreadPoolExecutor(max_workers=8) as executor:
+				
+				# submit tasks
+				cluster = cluster[:32] if test else cluster # just process the first 32 for each cluster if testing the cleaner
+				futures = {executor.submit(self.process_pdb, pdb): pdb for pdb in cluster}
+				
+				# collect results
+				for future in as_completed(futures):
+
+					# processed concurrently, but only one thread does this part in serial, so each row is of the same cluster
+					result = future.result()
+					if result is not None:  # Ignore failed results
+						pdb_info = result
+						for key, val in pdb_info.items():
+							self.cluster_info[key].extend(val)
+					load_pbar.update(1)
+
+		# once finished, write the list.csv, valid_clusters.txt, and test_clusters.txt files
+		
+		# convert to df
+		cluster_info_df = pd.DataFrame(self.cluster_info)
+
+		# write the clusters
+		self.write_new_clusters(cluster_info_df, self.val_clusters, self.test_clusters)
+
+	def write_new_clusters(self, cluster_info, val_clusters, test_clusters):
+
+		# seperate training, validation, and testing
+		val_pdbs = cluster_info.loc[cluster_info.BIOUNIT.isin(["_".join(i.split(".")) for i in val_clusters]), :] # they did the split based on pdb_chainid, not cluster
+		test_pdbs =cluster_info.loc[cluster_info.BIOUNIT.isin(["_".join(i.split(".")) for i in test_clusters]), :]
+
+		# get lists of unique clusters
+		val_clusters = "\n".join(str(i) for i in val_pdbs.CLUSTER.unique().tolist())
+		test_clusters = "\n".join(str(i) for i in test_pdbs.CLUSTER.unique().tolist())
+
+		with    open(   self.val_clusters_path,   "w") as v, \
+				open(   self.test_clusters_path,  "w") as t:
+				v.write(val_clusters)
+				t.write(test_clusters)
+
+		# save training pdbs
+		cluster_info.to_csv(self.all_clusters_path, index=False)
+
+	# define the function for loading pdbs
+	def process_pdb(self, pdb):
+
+		# extract info used by Data Class from the json
+		pdb_info =  self.chain_clusters.loc[self.chain_clusters.loc[:, "name"].eq(pdb), :].iloc[0, :]
+		if pdb_info.empty: return None
+
+		CHAINID = "_".join(str(pdb_info.at["name"]).split("."))
+		DEPOSITION, RESOLUTION, HASH = None, 0, None # set resolution to 0 so not filtered out, idk the resolutions, can prob write a script to fetch this data online, but assuming resolution is good enough for now
+		CLUSTER = pdb_info.at["CATH"]
+		SEQUENCE = pdb_info.at["seq"]
+		BIOUNIT = CHAINID # only single chains
+		PDB = CHAINID.split("_")[0]
+
+		COORDS = pdb_info.at["coords"]
+		N = COORDS["N"]
+		Ca = COORDS["CA"]
+		C = COORDS["C"]
+
+		# missing coords are this
+		missing_coords = [None, None, None]
+
+		# false is not masked, did this when started and not enough time to make the whole codebase consistent so keeping it
+		mask = [(n==missing_coords) | (ca==missing_coords) | (c==missing_coords) for n, ca, c in zip(N, Ca, C)]
+
+		# remove missing coords, not a problem for full backbone model, but makes Cb approximation for Ca only model more innacurate, but better than skipping Ca whose sequence neighbor is missing
+		N = [coords for coords, not_valid in zip(N, mask) if not not_valid]
+		Ca = [coords for coords, not_valid in zip(Ca, mask) if not not_valid]
+		C = [coords for coords, not_valid in zip(C, mask) if not not_valid]
+
+		# make into tensor
+		coords = torch.tensor([N, Ca, C]).transpose(0,1) # 3(NCaC) x N x 3(xyz) --> N x 3(NCaC) x 3(xyz)
+
+		# mask is baked into labels (-1)
+		labels = torch.tensor([self.aa_idx[aa] if (aa in self.amino_acids) else self.aa_idx["X"] for aa in SEQUENCE])
+		labels = labels[~torch.tensor(mask)] # remove missing coords
+
+		# single chain, so just [0, len(chain)]
+		# did default dict for pmpnn so same here
+		chain_idxs = defaultdict(list)
+		chain_idxs[CHAINID.split("_")[1]] = [0, len(labels)]
+
+		# create the dictionary
+		chain_dict = {"coords": coords, "labels": labels, "chain_idxs": chain_idxs}
+
+		# define path and save
+		pdb_section =  self.pdb_path / Path(PDB[1:3])
+		if not pdb_section.exists():
+			pdb_section.mkdir(parents=True, exist_ok=True)
+		chain_path = pdb_section / Path(f"{BIOUNIT}.pt")
+		torch.save(chain_dict, chain_path)
+
+		# last part needed for the list.csv
+		BIOUNIT_SIZE = labels.size(0)
+		
+		# define local cluster info dict
+		cluster_info = {key: [] for key in ['CHAINID', 'DEPOSITION', 'RESOLUTION', 'HASH', 'CLUSTER', 'SEQUENCE', 'BIOUNIT', 'BIOUNIT_SIZE', 'PDB']}
+
+		# now make a seperate entry for each cluster
+		for cluster in CLUSTER:
+			cluster_info["CHAINID"].append(CHAINID) 
+			cluster_info["DEPOSITION"].append(DEPOSITION)
+			cluster_info["RESOLUTION"].append(RESOLUTION)
+			cluster_info["HASH"].append(HASH)
+			cluster_info["CLUSTER"].append(cluster)
+			cluster_info["SEQUENCE"].append(SEQUENCE)
+			cluster_info["BIOUNIT"].append(BIOUNIT)
+			cluster_info["BIOUNIT_SIZE"].append(BIOUNIT_SIZE)
+			cluster_info["PDB"].append(PDB)		
+
+		return cluster_info
+
 # ----------------------------------------------------------------------------------------------------------------------
 
 if __name__ == "__main__":
@@ -613,19 +810,29 @@ if __name__ == "__main__":
 
 	parser.add_argument("--clean_pdbs", default=True, type=bool, help="whether to clean the pdbs")
 
-	parser.add_argument("--data_path", default=Path("/share/wangyy/hjc2538/proteusAI/pdb_2021aug02"), type=Path, help="path where decompressed the PMPNN dataset")
-	parser.add_argument("--new_data_path", default=Path("/share/wangyy/hjc2538/proteusAI/pdb_2021aug02_filtered_2"), type=Path, help="path to write the filtered dataset")
+	parser.add_argument("--data_path", default=Path("/scratch/hjc2538/projects/proteusAI/data/single_chain/raw"), type=Path, help="path where decompressed the PMPNN dataset")
+	parser.add_argument("--new_data_path", default=Path("/scratch/hjc2538/projects/proteusAI/single_chain_processed"), type=Path, help="path to write the filtered dataset")
+	parser.add_argument("--single_chain", default=True, type=bool, help="whether to clean the single chain dataset or multi chain")
 	parser.add_argument("--pdb_path", default=Path("pdb"), type=Path, help="path where pdbs are located, in the data_path parent directory")
 	parser.add_argument("--all_clusters_path", default=Path("list.csv"), type=Path, help="path where cluster csv is located within data_path")
 	parser.add_argument("--val_clusters_path", default=Path("valid_clusters.txt"), type=Path, help="path where valid clusters text file is located within data_path")
 	parser.add_argument("--test_clusters_path", default=Path("test_clusters.txt"), type=Path, help="path where test clusters text file is located within data_path")
+	parser.add_argument("--chain_clusters_path", default=Path("chain_set.jsonl"), type=Path, help="path to chain clusters, used for single chain only")
+	parser.add_argument("--chain_clusters_split_path", default=Path("chain_set_splits.json"), type=Path, help="path to chain clusters split, used for single chain only")
 	parser.add_argument("--test", default=False, type=bool, help="test the cleaner or run")
 
 	args = parser.parse_args()
 
 	if args.clean_pdbs:
 
-		data_cleaner = DataCleaner(	data_path=args.data_path, new_data_path=args.new_data_path, pdb_path=args.pdb_path, 
-									all_clusters_path=args.all_clusters_path, val_clusters_path=args.val_clusters_path, test_clusters_path=args.test_clusters_path, 
-									test=args.test
-								)
+		if args.single_chain:
+			data_cleaner = SingleChainDataCleaner(	data_path=args.data_path, new_data_path=args.new_data_path, pdb_path=args.pdb_path, 
+													chain_clusters_path=args.chain_clusters_path, chain_clusters_split_path=args.chain_clusters_split_path,
+													all_clusters_path=args.all_clusters_path, val_clusters_path=args.val_clusters_path, test_clusters_path=args.test_clusters_path, 
+													test=args.test
+									)
+		else:
+			data_cleaner = DataCleaner(	data_path=args.data_path, new_data_path=args.new_data_path, pdb_path=args.pdb_path, 
+										all_clusters_path=args.all_clusters_path, val_clusters_path=args.val_clusters_path, test_clusters_path=args.test_clusters_path, 
+										test=args.test
+									)

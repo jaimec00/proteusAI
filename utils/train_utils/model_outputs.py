@@ -10,7 +10,7 @@ class ExtractionOutput():
 		a reconstruction loss
 		a cel loss
 	'''
-	def __init__(self, batch_parent, seq_pred):
+	def __init__(self, batch_parent, seq_pred, dist_pred, coords):
 		
 		# batch parent
 		self.batch_parent = batch_parent 
@@ -23,17 +23,22 @@ class ExtractionOutput():
 
 		self.valid_samples = (batch_parent.labels!=-1).any(dim=1).sum()
 
+		self.dist_pred = dist_pred
+
+		self.coords = coords
 
 	def compute_losses(self):
-		return self.batch_parent.epoch_parent.training_run_parent.losses.loss_function(self.seq_pred, self.batch_parent.labels)
+		return self.batch_parent.epoch_parent.training_run_parent.losses.loss_function(self.seq_pred, self.batch_parent.labels, self.dist_pred, self.coords, self.batch_parent.key_padding_mask)
 
 class VAEOutput():
-	'''need to edit so have 
-		a kl div loss
-		a reconstruction loss
-		a cel loss
 	'''
-	def __init__(self, batch_parent, latent_mean_pred, latent_log_var_pred, wf_mean_pred, wf_mean_true):
+	computes loss for true wf, and the aa ambiguous function, with the goal of forcing the encoder to map similar structures to similar latent spaces
+	'''
+	def __init__(self, 	batch_parent, 
+						latent_mean_pred, latent_log_var_pred, wf_mean_pred, 
+						latent_mean_pred_no_aa, latent_log_var_pred_no_aa, wf_mean_pred_no_aa,
+						wf_mean_true
+				):
 		
 		# batch parent
 		self.batch_parent = batch_parent 
@@ -42,33 +47,35 @@ class VAEOutput():
 		# encoder outputs, loss is computed by comparing to gaussian, so dont need a true
 		self.latent_mean_pred = latent_mean_pred # gaussian prior mean
 		self.latent_log_var_pred = latent_log_var_pred # gaussian prior log var
+		self.latent_mean_pred_no_aa = latent_mean_pred_no_aa # also do aa ambiguous
+		self.latent_log_var_pred_no_aa = latent_log_var_pred_no_aa 
 
 		# decoder outputs
 		self.wf_mean_pred = wf_mean_pred # wf prediction mean
+		self.wf_mean_pred_no_aa = wf_mean_pred_no_aa # wf prediction mean
 		self.wf_mean_true = wf_mean_true # true
 
 		# valid tokens for averaging
 		self.valid_toks = (batch_parent.labels!=-1).sum()
-		self.valid_samples = (batch_parent.labels!=-1).any(dim=1).sum()
 
 	def compute_losses(self):
 		return self.batch_parent.epoch_parent.training_run_parent.losses.loss_function(	self.latent_mean_pred, self.latent_log_var_pred, 
-																						self.wf_mean_pred, self.wf_mean_true, self.batch_parent.labels==-1, 
+																						self.wf_mean_pred, 
+																						self.latent_mean_pred_no_aa, self.latent_log_var_pred_no_aa, self.wf_mean_pred_no_aa, 
+																						self.wf_mean_true, 
+																						self.batch_parent.labels==-1, 
 																					)
 
 class DiffusionOutput():
-	def __init__(self, batch_parent, noise_pred, true_noise, noised_latent, latent_mean, latent_logvar, abars):
+	def __init__(self, batch_parent, noise_pred, true_noise, abars):
 		self.batch_parent = batch_parent
 		self.noise_pred = noise_pred
 		self.true_noise = true_noise
-		self.latent_mean = latent_mean
-		self.latent_logvar = latent_logvar
-		self.noised_latent = noised_latent
 		self.mask = batch_parent.labels.unsqueeze(2)==-1
 		self.valid_toks = (~self.mask).sum()
 		self.abars = abars
 	def compute_losses(self):
-		return self.batch_parent.epoch_parent.training_run_parent.losses.loss_function(self.noise_pred, self.true_noise, self.noised_latent, self.latent_mean, self.latent_logvar, self.abars, self.mask)
+		return self.batch_parent.epoch_parent.training_run_parent.losses.loss_function(self.noise_pred, self.true_noise, self.abars, self.mask)
 
 class InferenceOutput():
 	def __init__(self, batch_parent, seq_pred):
@@ -97,4 +104,4 @@ class ModelOutputs():
 		self.output = output
 
 	def get_losses(self):
-		self.output.batch_parent.epoch_parent.training_run_parent.losses.tmp.add_losses(*self.output.compute_losses(), valid_toks=self.output.valid_toks, valid_samples=self.output.valid_samples)
+		self.output.batch_parent.epoch_parent.training_run_parent.losses.tmp.add_losses(*self.output.compute_losses(), valid_toks=self.output.valid_toks)

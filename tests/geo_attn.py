@@ -3,8 +3,7 @@ import math
 import torch
 import torch.nn.functional as F
 from utils.test_utils import calculate_error, profile_func, profile_bwd
-# from utils.model_utils.geometric_attn.triton.geometric_attn import geometric_attn
-from utils.model_utils.geometric_attn.cuda.geometric_attn import geometric_attn
+from utils.model_utils.attn.geometric_attn import geometric_attn
 import os
 
 def main():
@@ -14,23 +13,24 @@ def main():
 	device = torch.device("cuda")
 
 	# prepare inputs
-	batch, nheads, N, d_model = 2, 4, 8192, 512
+	batch, nheads, N, d_model = 1, 4, 128, 128
 	assert d_model%2==0 and d_model%nheads==0
 	d_k = d_model // nheads
 	min_wl, max_wl, base = 3.7, 20, 20
-	min_rbf, max_rbf = 0.01, 0.99
+	min_rbf, max_rbf = 0.00, 1.00
 
-	coords = 3.7 * torch.normal(mean=0, std=1, size=(batch, N, 1), dtype=torch.float32, device=device).expand(batch, N, 3) # batch x N x 3
+	coords = 50 * torch.normal(mean=0, std=1, size=(batch, N, 1), dtype=torch.float32, device=device).expand(batch, N, 3) # batch x N x 3
 	# spreads = torch.logspace(0, 1, nheads, base, dtype=torch.float32, device=coords.device, requires_grad=True).unsqueeze(0).expand(batch, -1)
 
 	spreads = torch.full((nheads, ), 3, device=coords.device, dtype=torch.float32, requires_grad=True)
+	betas = torch.full((nheads, ), 1, device=coords.device, dtype=torch.float32, requires_grad=True)
 
 	mask = torch.rand((batch, N), device=coords.device) > 1 # batch x N
 	Q = torch.normal(mean=0, std=1, size=(batch, nheads, N, d_k), device=device, dtype=torch.float32, requires_grad=True) # batch x nhead x N x d_k 
 	K = torch.normal(mean=0, std=1, size=(batch, nheads, N, d_k), device=device, dtype=torch.float32, requires_grad=True) # batch x nhead x N x d_k 
 	V = torch.normal(mean=0, std=1, size=(batch, nheads, N, d_k), device=device, dtype=torch.float32, requires_grad=True) # batch x nhead x N x d_k 
 	
-	params = [Q, K, V, coords, spreads, min_rbf, max_rbf, mask]
+	params = [Q, K, V, coords, spreads, betas, mask, min_rbf, max_rbf]
 
 	# prepare for recording mem and time
 	torch.cuda.synchronize()  
@@ -55,19 +55,20 @@ def main():
 	print("forward pass:\n")
 
 	# max number of floats is the intermediate attn tensor 
-	num_floats = batch * nheads * N * N  * 2
-	num_bytes = num_floats * 4 # assume fp32
-	max_bytes = 20 * (1024**3) # 20 GB
-	if num_bytes >= max_bytes:
-		print("skipping torch implementation because intermediate tensor is too large")
-		torch_func = geometric_attn # rerun with kernel instead of using torch
-	else:
-		torch_func = torch_attn
+	# num_floats = batch * nheads * N * N  * 2
+	# num_bytes = num_floats * 4 # assume fp32
+	# max_bytes = 20 * (1024**3) # 20 GB
+	# if num_bytes >= max_bytes:
+	# 	print("skipping torch implementation because intermediate tensor is too large")
+	# 	torch_func = geometric_attn # rerun with kernel instead of using torch
+	# else:
+	# 	torch_func = torch_attn
 
-	torch_out, triton_out = test_fwd(torch_func, geometric_attn, params, start_event, end_event, atol, rtol)
-	# print("\nbackward pass:\n")
+	torch_out, triton_out = test_fwd(torch_attn, geometric_attn, params, start_event, end_event, atol, rtol)
+	# print(torch_out.mean(dim=2)/triton_out.mean(dim=2))
+	print("\nbackward pass:\n")
 
-	# test_bwd(torch_out.sum(), triton_out.sum(), Q, K, V, spreads, start_event, end_event, atol, rtol)
+	test_bwd(torch_out.sum(), triton_out.sum(), Q, K, V, spreads, betas, start_event, end_event, atol, rtol)
 
 	# Q.grad.zero_()
 	# K.grad.zero_()
@@ -113,21 +114,22 @@ def test_fwd(torch_attn, attn, params, start_event, end_event, atol, rtol):
 
 	return torch_out, triton_out
 
-def test_bwd(torch_loss, triton_loss, Q, K, V, spreads_p, start_event, end_event, atol, rtol):
+def test_bwd(torch_loss, triton_loss, Q, K, V, spreads_p, betas, start_event, end_event, atol, rtol):
 
 	# torch
 	torch_time, torch_memory = profile_bwd(torch_loss, start_event, end_event)
-	torch_dQ, torch_dK, torch_dV, torch_d_spreads = [i.grad.clone() for i in [Q, K, V, spreads_p]]
+	torch_dQ, torch_dK, torch_dV, torch_d_spreads, torch_d_betas = [i.grad.clone() for i in [Q, K, V, spreads_p, betas]]
 
 	# # zero grads
 	Q.grad.zero_()
 	K.grad.zero_()
 	V.grad.zero_()
 	spreads_p.grad.zero_()
+	betas.grad.zero_()
 
 	# triton
 	triton_time, triton_memory = profile_bwd(triton_loss, start_event, end_event)
-	triton_dQ, triton_dK, triton_dV, triton_d_spreads = [i.grad.clone() for i in [Q, K, V, spreads_p]]
+	triton_dQ, triton_dK, triton_dV, triton_d_spreads, triton_d_betas = [i.grad.clone() for i in [Q, K, V, spreads_p, betas]]
 
 	dQ_rel_error, dQ_abs_error = calculate_error(torch_dQ, triton_dQ)
 	print(f"dQ is correct: {torch.allclose(triton_dQ, torch_dQ, atol=atol, rtol=rtol, equal_nan=False)}")
@@ -153,6 +155,12 @@ def test_bwd(torch_loss, triton_loss, Q, K, V, spreads_p, start_event, end_event
 	print(f"triton d_spreads relative error: {d_spreads_rel_error:.5f}")
 	print(f"triton d_spreads percent error: {d_spreads_rel_error*100:.5f}%\n")
 
+	d_betas_rel_error, d_betas_abs_error = calculate_error(torch_d_betas, triton_d_betas)
+	print(f"d_betas is correct: {torch.allclose(triton_d_betas, torch_d_betas, atol=atol, rtol=rtol, equal_nan=False)}")
+	print(f"triton d_betas absolute error: {d_betas_abs_error:.5f}")
+	print(f"triton d_betas relative error: {d_betas_rel_error:.5f}")
+	print(f"triton d_betas percent error: {d_betas_rel_error*100:.5f}%\n")
+
 	print(f"torch time: {torch_time:.3f} ms")
 	print(f"triton time: {triton_time:.3f} ms")
 	print(f"torch memory usage: {torch_memory / (1024 ** 3):.3f} GB")
@@ -161,7 +169,7 @@ def test_bwd(torch_loss, triton_loss, Q, K, V, spreads_p, start_event, end_event
 def test_dropout():
 	pass
 
-def torch_attn(Q, K, V, coords, spreads, min_rbf=0.99, max_rbf=0.99, mask=None):
+def torch_attn(Q, K, V, coords, spreads, b, mask=None, min_rbf=0.00, max_rbf=0.99):
 
 	assert (Q.shape == K.shape) and (K.shape == V.shape), f"Q, K, and V projection shapes must match, but got {Q.shape=}, {K.shape=}, {V.shape=}"
 	batch, nheads, N, d_k = Q.shape
@@ -181,14 +189,11 @@ def torch_attn(Q, K, V, coords, spreads, min_rbf=0.99, max_rbf=0.99, mask=None):
 	coords = coords.contiguous()
 	spreads = spreads.contiguous()
 	mask = mask.contiguous()
-	b = 1
+	b = b[None, :, None, None].contiguous()
 
-	S = torch.matmul(Q, K.transpose(2,3)) / (b*(d_k**0.5)) # batch x nheads x N x N
+	S = torch.matmul(Q, K.transpose(2,3)) / ((d_k**0.5)) # batch x nheads x N x N
 
 	dists = torch.sqrt(torch.sum((coords[:, :, None, :] - coords[:, None, :, :])**2, axis=3))[:, None, :, :]
-
-	min_dist = torch.sqrt(math.log(1/max_rbf)*2*(spreads**2))[None, :, None, None]
-	max_dist = torch.sqrt(math.log(1/min_rbf)*2*(spreads**2))[None, :, None, None]
 
 	# clamping
 	#dists = torch.where(dists<min_dist, min_dist, dists)
@@ -196,9 +201,10 @@ def torch_attn(Q, K, V, coords, spreads, min_rbf=0.99, max_rbf=0.99, mask=None):
 
 	rbfs = torch.exp(-(dists**2)/(2*(spreads[None, :, None, None]**2)))
 
-	attn_mask = mask[:, None, :, None] | mask[:, None, None, :]  | (dists>=max_dist)
+	attn_mask = mask[:, None, :, None] | mask[:, None, None, :]  | (rbfs < min_rbf) | (rbfs > max_rbf)
+	rbfs = (2*(rbfs-min_rbf)/(max_rbf-min_rbf)) - 1
 
-	S = torch.where(attn_mask, float("-inf"), S + b*rbfs*F.softplus(S, threshold=float("inf"))) 
+	S = torch.where(attn_mask, -float("inf"), S + b*rbfs*torch.abs(S)) 
 	P = torch.softmax(S, dim=-1)
 
 	out = torch.matmul(P, V) # batch x nheads x N x d_k

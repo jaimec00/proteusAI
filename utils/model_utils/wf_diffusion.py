@@ -15,11 +15,11 @@ from utils.model_utils.base_modules.encoder import DiTEncoder
 
 class WaveFunctionDiffusion(nn.Module):
 	
-	def __init__(self, 	d_model=512,
-						alpha_bar_min=0.0, noise_schedule_type="linear", t_max=1000,
-						d_in_timestep=512, d_hidden_timestep=2048, hidden_layers_timestep=0,
-						d_hidden_post=2048, hidden_layers_post=0,
-						encoder_layers=8, heads=8,
+	def __init__(self, 	d_latent=256, d_proj=256,
+						alpha_bar_min=0.0, noise_schedule_type="linear", t_max=100,
+						d_in_timestep=256, d_hidden_timestep=1024, hidden_layers_timestep=1,
+						d_hidden_post=1024, hidden_layers_post=0,
+						encoder_layers=4, heads=8,
 						d_hidden_attn=2048, hidden_layers_attn=0,
 						dropout=0.10
 				):
@@ -27,9 +27,13 @@ class WaveFunctionDiffusion(nn.Module):
 		super(WaveFunctionDiffusion, self).__init__()
 
 		# compute wavenumbers for sinusoidal embeddings of timesteps
-		self.register_buffer("wavenumbers", 10000**(-torch.arange(0, d_in_timestep, 2) / d_model))
+		self.register_buffer("wavenumbers", 10000**(-torch.arange(0, d_in_timestep, 2) / d_latent))
 		self.noise_scheduler = NoiseScheduler(alpha_bar_min=alpha_bar_min, noise_schedule_type=noise_schedule_type, t_max=t_max)
-		self.encoders = nn.ModuleList([ DiTEncoder(	d_model=d_model, heads=heads, 
+
+		d_proj = 512 # testing if projecting to high dim before attn is beneficial, then projecting back to latent
+		self.d_proj = nn.Linear(d_latent, d_proj)
+
+		self.encoders = nn.ModuleList([ DiTEncoder(	d_model=d_proj, heads=heads, 
 													d_hidden=d_hidden_attn, hidden_layers=hidden_layers_attn, 
 													d_in_t=d_in_timestep, d_hidden_t=d_hidden_timestep, hidden_layers_t=hidden_layers_timestep,										 
 													dropout=dropout,
@@ -37,33 +41,36 @@ class WaveFunctionDiffusion(nn.Module):
 										for _ in range(encoder_layers)
 									])
 
-		# # self.out_norm = nn.LayerNorm(d_model)
-		self.noise_proj = nn.Linear(d_model, d_model, bias=False)
+		# # self.out_norm = nn.LayerNorm(d_latent)
+		self.noise_proj = nn.Linear(d_proj, d_latent, bias=False)
 		init_xavier(self.noise_proj)
 
 	# wf is the noised wf, context is unnoised, but with no aa info, used as kv in cross attention, defaults to self-attention if context is none
-	def forward(self, wf, t, key_padding_mask=None):
+	def forward(self, wf, t, coords_alpha, key_padding_mask=None):
 
 		# featurize the timestep w/ frequency embedding
 		t_features = self.featurize_t(t)
 
+		# testing if projecting to higher dim before attn helps
+		wf = self.d_proj(wf)
+
 		for encoder in self.encoders:
-			wf = encoder(wf, t_features, key_padding_mask=key_padding_mask)
+			wf = encoder(wf, t_features, coords_alpha, key_padding_mask=key_padding_mask)
 
 		# linear projection for noise pred, no bias
 		noise = self.noise_proj(wf)
 
 		# return noise
-		return wf
+		return noise
 
 	def featurize_t(self, t):
 
 		# once in the latent space, add token embedding info
-		# featurize the timestep (shape: batch, -> batch x 1 x d_model) with  sinusoidal embedding
+		# featurize the timestep (shape: batch, -> batch x 1 x d_latent) with  sinusoidal embedding
 		phase = self.wavenumbers.unsqueeze(0).unsqueeze(1)*t.unsqueeze(1).unsqueeze(2)
 		sine = torch.sin(phase) # Z x 1 x K
 		cosine = torch.cos(phase) # Z x 1 x K
-		t_features = torch.stack([sine, cosine], dim=3).view(t.size(0), 1, self.wavenumbers.size(0)*2) # Z x 1 x d_model
+		t_features = torch.stack([sine, cosine], dim=3).view(t.size(0), 1, self.wavenumbers.size(0)*2) # Z x 1 x d_latent
 
 		return t_features
 
@@ -82,10 +89,10 @@ class WaveFunctionDiffusion(nn.Module):
 
 		return wf, noise
 
-	def denoise(self, wf, t_start, key_padding_mask=None, wf_no_aa=None): # meant to operate on same t for all samples in batch during inference
+	def denoise(self, wf, t_start, key_padding_mask=None): # meant to operate on same t for all samples in batch during inference
 
 		# convert to tensor
-		t_bwd = torch.full((coords_alpha.size(0), 1, 1), t_start, device=coords_alpha.device)
+		t_bwd = torch.full((wf.size(0), 1, 1), t_start, device=wf.device)
 			
 		# perform diffusion
 		while (t_bwd>=1).any():
@@ -94,11 +101,13 @@ class WaveFunctionDiffusion(nn.Module):
 			alpha_bar_t, alpha_bar_tminus1 = self.noise_scheduler(t_bwd) 
 			
 			# predict the noise
-			noise_pred = self.forward(wf, coords_alpha, t_bwd.squeeze(1,2), key_padding_mask=key_padding_mask, wf_no_aa=wf_no_aa)
+			noise_pred = self.forward(wf, t_bwd.squeeze(1,2), key_padding_mask=key_padding_mask)
 
 			# update wf, use ode flow to deterministically move the wf towards high prob denisty manifold. non-markovian denoising
 			pred_wf_0 = (wf - ((1-alpha_bar_t)**0.5)*noise_pred)/(alpha_bar_t**0.5)
+
 			pred_wf_grad_t = ((1 - alpha_bar_tminus1)**0.5) * noise_pred
+
 			wf = (alpha_bar_tminus1**0.5)*pred_wf_0 + pred_wf_grad_t
 
 			# update t

@@ -30,11 +30,11 @@ class TrainingRun():
 	Attributes:
 		hyper_parameters (Box): 	store model hyper_parameters
 		training_parameters (Box): 	stores training parameters
-		data (DataHolder): 			object to store data (contains object of Data type), splits into train, 
+		data (DataHolder): 			object to store data (contains objects of Data type), splits into train, 
 									val, and test depending on arguments, also capable of loading the Data
 		output (Output): 			holds information about where to write output to, also contains the logging object. comes with
 									methods to print logs, plot training, and save model parameters
-		losses (TrainingRunLosses):	stores losses over the training run
+		losses (TrainingRunLosses):	stores losses over the training run and holds the loss functions
 		gpu (torch.device): 		for convenience in moving tensors to GPU
 		cpu (torch.device): 		for loading Data before moving to GPU
 
@@ -45,17 +45,23 @@ class TrainingRun():
 		self.hyper_parameters = args.hyper_parameters
 		self.training_parameters = args.training_parameters
 		
-		self.data = DataHolder(	args.data.data_path, 
+		self.data = DataHolder(	(args.data.single_chain_data_path if args.training_parameters.single_chain else args.data.multi_chain_data_path), # single chain or multichain
 								args.data.num_train, args.data.num_val, args.data.num_test, 
 								args.data.batch_tokens, args.data.max_batch_size, 
 								args.data.min_seq_size, args.data.max_seq_size, 
-								args.training_parameters.regularization.use_chain_mask, args.data.max_resolution
+								args.training_parameters.regularization.use_chain_mask, args.data.max_resolution,
+								args.training_parameters.ca_only_model
 							)
 		
 		self.losses = TrainingRunLosses(	# general
 											args.training_parameters.train_type, 
 											# for extraction
 											args.training_parameters.loss.cel.label_smoothing, 
+											args.training_parameters.loss.distogram.label_smoothing, 
+											args.training_parameters.loss.distogram.beta, 
+											args.hyper_parameters.extraction.distogram.bins,
+											args.hyper_parameters.extraction.distogram.min_dist,
+											args.hyper_parameters.extraction.distogram.max_dist,
 											# for kl annealing
 											args.training_parameters.loss.kl.beta, 
 											args.training_parameters.loss.kl.kappa, 
@@ -112,9 +118,10 @@ class TrainingRun():
 		self.model = proteusAI(	# model params
 								d_model=self.hyper_parameters.d_model,
 								d_latent=self.hyper_parameters.d_latent, 
-								N_latent=self.hyper_parameters.N_latent, 
+								d_wf=self.hyper_parameters.d_wf, 
 								num_aas=self.hyper_parameters.num_aa,
 								old=self.training_parameters.train_type=="old",
+								mlm=self.training_parameters.train_type=="mlm",
 
 								# wf embedding params (everything is learnable, so no configs)
 
@@ -129,14 +136,10 @@ class TrainingRun():
 								encoding_hidden_layers_post=self.hyper_parameters.encoding.post_process.hidden_layers,
 
 								# encoder layers
-								encoding_encoder_self_layers=self.hyper_parameters.encoding.encoders.self_attn.layers,
-								encoding_self_heads=self.hyper_parameters.encoding.encoders.self_attn.heads,
-								encoding_self_d_hidden_attn=self.hyper_parameters.encoding.encoders.self_attn.d_hidden_attn,
-								encoding_self_hidden_layers_attn=self.hyper_parameters.encoding.encoders.self_attn.hidden_layers_attn,
-								encoding_encoder_cross_layers=self.hyper_parameters.encoding.encoders.cross_attn.layers,
-								encoding_cross_heads=self.hyper_parameters.encoding.encoders.cross_attn.heads,
-								encoding_cross_d_hidden_attn=self.hyper_parameters.encoding.encoders.cross_attn.d_hidden_attn,
-								encoding_cross_hidden_layers_attn=self.hyper_parameters.encoding.encoders.cross_attn.hidden_layers_attn,
+								encoding_encoder_layers=self.hyper_parameters.encoding.encoders.layers,
+								encoding_heads=self.hyper_parameters.encoding.encoders.heads,
+								encoding_d_hidden_attn=self.hyper_parameters.encoding.encoders.d_hidden_attn,
+								encoding_hidden_layers_attn=self.hyper_parameters.encoding.encoders.hidden_layers_attn,
 
 								# wf diffusion params
 
@@ -171,16 +174,16 @@ class TrainingRun():
 								decoding_hidden_layers_post=self.hyper_parameters.decoding.post_process.hidden_layers,
 
 								# encoder layers
-								decoding_encoder_self_layers=self.hyper_parameters.decoding.encoders.self_attn.layers,
-								decoding_self_heads=self.hyper_parameters.decoding.encoders.self_attn.heads,
-								decoding_self_d_hidden_attn=self.hyper_parameters.decoding.encoders.self_attn.d_hidden_attn,
-								decoding_self_hidden_layers_attn=self.hyper_parameters.decoding.encoders.self_attn.hidden_layers_attn,
-								decoding_encoder_cross_layers=self.hyper_parameters.decoding.encoders.cross_attn.layers,
-								decoding_cross_heads=self.hyper_parameters.decoding.encoders.cross_attn.heads,
-								decoding_cross_d_hidden_attn=self.hyper_parameters.decoding.encoders.cross_attn.d_hidden_attn,
-								decoding_cross_hidden_layers_attn=self.hyper_parameters.decoding.encoders.cross_attn.hidden_layers_attn,
+								decoding_encoder_layers=self.hyper_parameters.decoding.encoders.layers,
+								decoding_heads=self.hyper_parameters.decoding.encoders.heads,
+								decoding_d_hidden_attn=self.hyper_parameters.decoding.encoders.d_hidden_attn,
+								decoding_hidden_layers_attn=self.hyper_parameters.decoding.encoders.hidden_layers_attn,
 
 								# wf extraction params
+
+								# distogram params
+								extraction_bins=self.hyper_parameters.extraction.distogram.bins,
+								extraction_dk=self.hyper_parameters.extraction.distogram.dk,
 
 								# wf preprocessing
 								extraction_d_hidden_pre=self.hyper_parameters.extraction.pre_process.d_hidden,
@@ -193,6 +196,7 @@ class TrainingRun():
 								# encoder layers
 								extraction_encoder_layers=self.hyper_parameters.extraction.encoders.layers,
 								extraction_heads=self.hyper_parameters.extraction.encoders.heads,
+								extraction_min_rbf=self.hyper_parameters.extraction.encoders.min_rbf,
 								extraction_d_hidden_attn=self.hyper_parameters.extraction.encoders.d_hidden_attn,
 								extraction_hidden_layers_attn=self.hyper_parameters.extraction.encoders.hidden_layers_attn,
 
@@ -218,7 +222,11 @@ class TrainingRun():
 			self.model.load_WFExtraction_weights(self.training_parameters.weights.use_extraction_weights, self.gpu)
 		
 		# what weights should be frozen depending on training type 
-		if self.training_parameters.train_type == "extraction": # train embedding and extraction only
+		if self.training_parameters.train_type in ["extraction", "old", "mlm"]: # train embedding and extraction only
+			if self.training_parameters.weights.embedding.freeze_at_seq_sim == 0.0: # option to freeze embedding right away, only use if have pretrained embedding weights
+				self.model.freeze_WFEmbedding_weights()
+			if self.training_parameters.weights.geo_attn.init_bias_off:
+				self.model.turn_off_bias() # turn off geo attn bias until certain seq sim
 			self.model.freeze_WFEncoding_weights()
 			self.model.freeze_WFDiffusion_weights()
 			self.model.freeze_WFDecoding_weights()
@@ -240,13 +248,8 @@ class TrainingRun():
 			self.model.freeze_WFDecoding_weights()
 			self.model.freeze_WFExtraction_weights()
 
-		elif self.training_parameters.train_type == "old":
-			self.model.freeze_WFEncoding_weights()
-			self.model.freeze_WFDiffusion_weights()
-			self.model.freeze_WFDecoding_weights()
-
 		else:
-			raise ValueError(f"invalid train_type selected, {self.training_parameters.train_type=}. options are ['extraction', 'vae', 'extraction_finetune', 'diffusion']") 
+			raise ValueError(f"invalid train_type selected, {self.training_parameters.train_type=}. options are ['extraction', 'vae', 'extraction_finetune', 'diffusion', 'old', 'mlm']") 
 
 		# get number of parameters for logging
 		self.training_parameters.num_embedding_params = sum(p.numel() for p in self.model.wf_embedding.parameters())
@@ -308,6 +311,7 @@ class TrainingRun():
 			
 			def attn(step):
 				'''lr scheduler from attn paper'''
+				step = step + self.training_parameters.lr.start_from_step # in case job gets cancelled and want to start from where left off
 				return scale * min((step+1)**(-0.5), (step+1)*(self.training_parameters.lr.warmup_steps**(-1.5)))
 
 			self.scheduler = lr_scheduler.LambdaLR(self.optim, attn)
@@ -327,7 +331,7 @@ class TrainingRun():
 
 	def training_converged(self, epoch_idx):
 
-		if self.training_parameters.train_type in ["extraction", "extraction_finetune", "old"]:
+		if self.training_parameters.train_type in ["extraction", "extraction_finetune", "old", "mlm"]:
 			criteria = self.losses.val.cel
 		if self.training_parameters.train_type == "vae":
 			criteria = self.losses.val.all_losses
@@ -356,6 +360,17 @@ class TrainingRun():
 
 		return has_converged
 
+	def check_if_freeze_embedding(self):
+		if self.training_parameters.train_type in ["extraction", "old", "mlm"]:
+			if self.model.wf_embedding.aa_magnitudes.requires_grad or self.model.wf_embedding.wavenumbers.requires_grad:
+				if self.losses.val.get_last_match() >= self.training_parameters.weights.embedding.freeze_at_seq_sim:
+					self.model.freeze_WFEmbedding_weights()
+
+	def check_if_turn_bias_on(self):
+		if self.training_parameters.train_type in ["extraction", "old", "mlm"]:
+			if not any(encoder.attn.beta_weights.requires_grad for encoder in self.model.wf_extraction.encoders):
+				if self.losses.val.get_last_match() >= self.training_parameters.weights.geo_attn.turn_bias_on_at_seq_sim:
+					self.model.turn_on_bias() # turn the geo attention bias on now that embedding and the QKV weights are expressive enough 
 	def train(self):
 		'''
 		entry point for training the model. loads train and validation data, loops through epochs, plots training, 
@@ -376,10 +391,16 @@ class TrainingRun():
 		
 		# loop through epochs
 		for epoch_idx in range(self.training_parameters.epochs):
+
 			epoch = Epoch(self, epoch_idx)
 			epoch.epoch_loop()
+			
 			self.model_checkpoint(epoch_idx)
 			if self.training_converged(epoch_idx): break
+			
+			self.check_if_freeze_embedding() # freeze embedding once validation seq sim gets high enough
+			# hopefully distogram gets rid of need for geo attn
+			# self.check_if_turn_bias_on() # turn geo attn bias on once QKV weights and embedding are well tuned
 
 		self.output.plot_training(self.losses, self.training_parameters.train_type)
 		self.output.save_model(self.model, train_type=self.training_parameters.train_type)
@@ -447,7 +468,7 @@ class TrainingRun():
 				batch = Batch(  coords, labels, chain_idxs, chain_mask, key_padding_mask, 
 								temp=self.training_parameters.inference.temperature, 
 								cycles=self.training_parameters.inference.cycles,
-								inference=self.training_parameters.train_type == "diffusion", # can only run inference once extraction AND diffusion have been trained
+								inference=self.training_parameters.train_type in ["diffusion", "mlm"], # can only run inference once extraction AND diffusion have been trained
 								epoch=dummy_epoch
 							)
 

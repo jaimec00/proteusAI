@@ -26,6 +26,9 @@ class WaveFunctionEmbedding(nn.Module):
 
 		super(WaveFunctionEmbedding, self).__init__()
 
+		# wl = 4.0 + 16*((torch.logspace(0,1,d_model//2, 30) - 1)/29)
+		# wn = torch.log(torch.pi*2/wl)
+
 		self.wavenumbers = nn.Parameter(torch.zeros(d_model//2)) # learns log of wavenumbers, initialized so all dmodel dims start w/ corresponding wavelength of 2pi
 		self.num_aas = num_aas
 
@@ -40,12 +43,13 @@ class WaveFunctionEmbedding(nn.Module):
 		self.norm = StaticLayerNorm(d_model)
 
 	def get_wavenumbers(self):
-		return torch.exp(self.wavenumbers) # learns log of wavenumbers, ie log(2pi) - log(lambda)
+		return torch.exp(self.wavenumbers) # learns log of wavenumbers, ie log(2pi/lambda) = log(2pi) - log(lambda), log(2pi) is constant, so learning -log(lambda)
 
 	def forward(self, coords_alpha, coords_beta, aa_labels, key_padding_mask=None, no_aa=False):
 
-		if self.old: # not a big deal if run the learnable version when not necessary, since still get decent occupancy since dont have to store aa grads in smem
-			return wf_embedding_learnCB(coords_alpha, coords_beta, self.aa_magnitudes, self.get_wavenumbers(), mask=key_padding_mask)
+		if self.old: 
+			return self.norm(wf_embedding_learnCB(coords_alpha, coords_beta, self.aa_magnitudes, self.get_wavenumbers(), mask=key_padding_mask))
+			# return wf_embedding_learnCB(coords_alpha, coords_beta, self.aa_magnitudes, self.get_wavenumbers(), mask=key_padding_mask)
 
 		if no_aa: # compute the anisotropic wavefunction, but using the mean magnitude for each wavenumber so that the aa info is ambiguous. 
 			aa_magnitudes = self.aa_magnitudes.mean(dim=1, keepdim=True).repeat(1, self.aa_magnitudes.size(1))

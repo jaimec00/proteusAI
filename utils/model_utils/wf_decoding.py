@@ -9,48 +9,42 @@ from utils.model_utils.base_modules.encoder import Encoder
 from utils.model_utils.base_modules.base_modules import init_xavier, MLP
 
 class WaveFunctionDecoding(nn.Module):
-	def __init__(self,  d_model=512, d_latent=512,
+	def __init__(self,  d_model=256, d_latent=32, d_proj=512,
 						d_hidden_pre=2048, hidden_layers_pre=0, 
 						d_hidden_post=2048, hidden_layers_post=0,
-						encoder_self_layers=4, self_heads=8,
-						self_d_hidden_attn=1024, self_hidden_layers_attn=0,
-						encoder_cross_layers=4, cross_heads=8,
-						cross_d_hidden_attn=1024, cross_hidden_layers_attn=0,
+						encoder_layers=4, heads=8,
+						d_hidden_attn=1024, hidden_layers_attn=0,
 						dropout=0.10,
 					):
 
 		super(WaveFunctionDecoding, self).__init__()
 		
 		self.dropout = nn.Dropout(dropout)
-		self.mlp_pre = MLP(d_in=d_model, d_out=d_model, d_hidden=d_hidden_pre, hidden_layers=hidden_layers_pre, dropout=dropout) 
-		self.norm_pre = nn.LayerNorm(d_model)
-		self.mlp_post = MLP(d_in=d_model, d_out=d_model, d_hidden=d_hidden_post, hidden_layers=hidden_layers_post, dropout=0.0)
-		self.residue_encoders = nn.ModuleList([ Encoder(	d_model=d_model, d_other=d_latent, heads=cross_heads, 
-															d_hidden=cross_d_hidden_attn, hidden_layers=cross_hidden_layers_attn, 
-															dropout=dropout
-												)
-												for _ in range(encoder_cross_layers)
-											])
-		self.wf_encoders = nn.ModuleList([ Encoder(	d_model=d_model, d_other=d_model, heads=self_heads, 
-													d_hidden=self_d_hidden_attn, hidden_layers=self_hidden_layers_attn, 
+
+		self.d_proj = nn.Linear(d_latent, d_proj)
+		self.norm = nn.LayerNorm(d_proj)
+		self.space_enc = MLP(d_in=d_model, d_out=d_proj, d_hidden=d_hidden_pre, hidden_layers=hidden_layers_pre, dropout=dropout) 
+
+		self.encoders = nn.ModuleList([ Encoder(	d_model=d_proj, d_other=d_proj, heads=heads, 
+													d_hidden=d_hidden_attn, hidden_layers=hidden_layers_attn, 
 													dropout=dropout
 												)
-												for _ in range(encoder_self_layers)
+												for _ in range(encoder_layers)
 											])
-	def forward(self, wf, protein, key_padding_mask=None): # forward generates the mean and stds, so can use them for loss, 
+
+		self.mlp_post = MLP(d_in=d_proj, d_out=d_model, d_hidden=d_hidden_post, hidden_layers=hidden_layers_post, dropout=0.0)
+
+	def forward(self, wf, wf_no_aa, key_padding_mask=None): # forward generates the mean and stds, so can use them for loss, 
 		
 		# pre-process the wf
-		wf = self.norm_pre(wf + self.dropout(self.mlp_pre(wf))) # spatial encoding on aa ambiguous wf (cb scale is mean of all aas for each k)
-
-		# cross attn, wf is query, protein is kv
-		for encoder in self.residue_encoders:
-			wf = encoder(wf, protein, protein, mask=None)
+		wf = self.d_proj(wf)
+		wf = self.norm(wf + self.dropout(self.space_enc(wf_no_aa))) # spatial encoding on aa ambiguous wf (cb scale is mean of all aas for each k)
 
 		# self attention on updated wf
-		for encoder in self.wf_encoders:
+		for encoder in self.encoders:
 			wf = encoder(wf, wf, wf, mask=key_padding_mask)
 
 		# post-process to get final wf
-		wf = wf + self.mlp_post(wf)
+		wf = self.mlp_post(wf)
 
 		return wf

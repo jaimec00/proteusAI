@@ -16,7 +16,7 @@ def main():
 	device = "cuda"
 
 	# load an example pdb
-	example_pt = Path("/scratch/hjc2538/projects/proteusAI/pdb_2021aug02_filtered/pdb/rv/1rvz_1.pt")
+	example_pt = Path("/scratch/hjc2538/projects/proteusAI/data/multi_chain/processed/pdb/rv/1rvz_1.pt")
 	example_pdb = torch.load(example_pt, weights_only=True)
 	
 	# define output path
@@ -27,7 +27,7 @@ def main():
 	# load the data of the example pdb
 	# also expand so batch dim included, chains is wrapped in a list to simulate this
 	# first do pca on coords so that plotting is cleaner
-	coords = example_pdb["coords"]
+	coords = example_pdb["coords"][:, 1, :]
 	coords = coords - coords.mean(dim=1, keepdim=True)
 	pca = PCA(n_components=3)
 	pca.fit(coords)
@@ -41,15 +41,16 @@ def main():
 	# define the pretrained weights
 	# embedding_weights =  Path("/scratch/hjc2538/projects/proteusAI/models/extraction_4_learnwavenumbers/tmp/model_parameters_embedding.pth")
 	# extraction_weights = Path("/scratch/hjc2538/projects/proteusAI/models/extraction_4_learnwavenumbers/tmp/model_parameters_extraction.pth")
+	# setup model
+	model = proteusAI(old=False, mlm=True, extraction_min_rbf=0.001, extraction_encoder_layers=4)
+	model_path = "/scratch/hjc2538/projects/proteusAI/models/mlm_from_scratch_pure_attn/ctd/model_parameters_e59_s1.74.pth"
 	
-	embedding_weights = Path("/scratch/hjc2538/projects/proteusAI/models/vanilla_model_12enc/model_parameters_embedding.pth")
-	extraction_weights = Path("/scratch/hjc2538/projects/proteusAI/models/vanilla_model_12enc/model_parameters_extraction.pth")
-	
-	# init the model and load the weights
-	model = proteusAI(old=True, extraction_encoder_layers=12, extraction_hidden_layers_pre=2, extraction_heads=16) # assume the model defaults align with the weights, only ones that matter for this test are embedding and extraction though
-	model.load_WFEmbedding_weights(embedding_weights, device)
-	model.load_WFExtraction_weights(extraction_weights, device)
-	model.to(device)
+	model_weights = torch.load(model_path, map_location=device, weights_only=True)
+	emb_weights = {".".join(i.split(".")[1:]): model_weights[i] for i in model_weights.keys() if i.startswith("wf_embedding")}
+	ext_weights = {".".join(i.split(".")[1:]): model_weights[i] for i in model_weights.keys() if i.startswith("wf_extraction")}
+	model.wf_embedding.load_state_dict(emb_weights, strict=True)
+	model.wf_extraction.load_state_dict(ext_weights, strict=True)
+	model = model.to(device)
 
 	model.eval() # make sure in evaluation mode
 	with torch.no_grad():

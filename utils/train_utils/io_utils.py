@@ -64,6 +64,8 @@ class Output():
 
 		log = 	textwrap.dedent(f'''
 
+		training the {"Ca only model" if training_parameters.ca_only_model else "full backbone model"}
+
 		wave function embedding parameters: {training_parameters.num_embedding_params:,}
 		wave function encoding parameters: {training_parameters.num_encoding_params:,}
 		wave function diffusion parameters: {training_parameters.num_diffusion_params:,}
@@ -73,8 +75,8 @@ class Output():
 		
 		model hyper-parameters:
 			d_model: {hyper_parameters.d_model} 
+			d_wf: {hyper_parameters.d_wf} 
 			d_latent: {hyper_parameters.d_latent} 
-			N_latent: {hyper_parameters.N_latent} 
 			num_aa: {hyper_parameters.num_aa}
 			wave function embedding:
 				none, all are learnable
@@ -86,16 +88,10 @@ class Output():
 					d_hidden: {hyper_parameters.encoding.post_process.d_hidden}
 					hidden_layers: {hyper_parameters.encoding.post_process.hidden_layers}
 				encoders:
-					self-attn:
-						encoder_layers: {hyper_parameters.encoding.encoders.self_attn.layers}
-						heads: {hyper_parameters.encoding.encoders.self_attn.heads}
-						d_hidden_attn: {hyper_parameters.encoding.encoders.self_attn.d_hidden_attn}
-						hidden_layers_attn: {hyper_parameters.encoding.encoders.self_attn.hidden_layers_attn}
-					cross_attn:
-						encoder_layers: {hyper_parameters.encoding.encoders.cross_attn.layers}
-						heads: {hyper_parameters.encoding.encoders.cross_attn.heads}
-						d_hidden_attn: {hyper_parameters.encoding.encoders.cross_attn.d_hidden_attn}
-						hidden_layers_attn: {hyper_parameters.encoding.encoders.cross_attn.hidden_layers_attn}
+					encoder_layers: {hyper_parameters.encoding.encoders.layers}
+					heads: {hyper_parameters.encoding.encoders.heads}
+					d_hidden_attn: {hyper_parameters.encoding.encoders.d_hidden_attn}
+					hidden_layers_attn: {hyper_parameters.encoding.encoders.hidden_layers_attn}
 			wave function diffusion:
 				scheduler:
 					alpha_bar_min: {hyper_parameters.diffusion.scheduler.alpha_bar_min}
@@ -121,16 +117,10 @@ class Output():
 					d_hidden: {hyper_parameters.decoding.post_process.d_hidden}
 					hidden_layers: {hyper_parameters.decoding.post_process.hidden_layers}
 				encoders:
-					self-attn:
-						encoder_layers: {hyper_parameters.decoding.encoders.self_attn.layers}
-						heads: {hyper_parameters.decoding.encoders.self_attn.heads}
-						d_hidden_attn: {hyper_parameters.decoding.encoders.self_attn.d_hidden_attn}
-						hidden_layers_attn: {hyper_parameters.decoding.encoders.self_attn.hidden_layers_attn}
-					cross-attn:
-						encoder_layers: {hyper_parameters.decoding.encoders.cross_attn.layers}
-						heads: {hyper_parameters.decoding.encoders.cross_attn.heads}
-						d_hidden_attn: {hyper_parameters.decoding.encoders.cross_attn.d_hidden_attn}
-						hidden_layers_attn: {hyper_parameters.decoding.encoders.cross_attn.hidden_layers_attn}
+					encoder_layers: {hyper_parameters.decoding.encoders.layers}
+					heads: {hyper_parameters.decoding.encoders.heads}
+					d_hidden_attn: {hyper_parameters.decoding.encoders.d_hidden_attn}
+					hidden_layers_attn: {hyper_parameters.decoding.encoders.hidden_layers_attn}
 			wave function extraction:
 				wf preprocessing:
 					d_hidden: {hyper_parameters.extraction.pre_process.d_hidden}
@@ -141,6 +131,7 @@ class Output():
 				encoder:
 					encoder_layers: {hyper_parameters.extraction.encoders.layers}
 					heads: {hyper_parameters.extraction.encoders.heads}
+					min_rbf: {hyper_parameters.extraction.encoders.min_rbf}
 					d_hidden_attn: {hyper_parameters.extraction.encoders.d_hidden_attn}
 					hidden_layers_attn: {hyper_parameters.extraction.encoders.hidden_layers_attn}
 
@@ -160,6 +151,9 @@ class Output():
 			train_type: {training_parameters.train_type}
 			epochs: {training_parameters.epochs}
 			weights:
+				freeze embedding weigths after sequence similarity >= {training_parameters.weights.embedding.freeze_at_seq_sim}%
+				turn geometric attention bias off to start: {training_parameters.weights.geo_attn.init_bias_off}
+				turn geometric attention bias on after sequence similarity >= {training_parameters.weights.geo_attn.turn_bias_on_at_seq_sim}%
 				use_model: {training_parameters.weights.use_model}
 				use_embedding_weights: {training_parameters.weights.use_embedding_weights}
 				use_encoding_weights: {training_parameters.weights.use_encoding_weights}
@@ -211,55 +205,65 @@ class Output():
 		)
 
 	def log_epoch_losses(self, losses, train_type):
-		if train_type in ["extraction", "extraction_finetune", "old"]:
-			cel, seq_sim = losses.tmp.get_avg()
+		if train_type in ["extraction", "extraction_finetune", "old", "mlm"]:
+			cel, dist_cel, full_loss, seq_sim = losses.tmp.get_avg()
 			self.log.info(f"train cross entropy loss per token: {str(cel)}")
+			self.log.info(f"train distogram cross entropy loss per token: {str(dist_cel)}")
+			self.log.info(f"train full cross entropy loss per token: {str(full_loss)}")
 			self.log.info(f"train sequence similarity per token: {str(seq_sim)}\n")		
-			losses.train.add_losses(cel, seq_sim)
+			losses.train.add_losses(cel, dist_cel, full_loss, seq_sim)
 		elif train_type == "vae":
-			kl_div, reconstruction, loss = losses.tmp.get_avg()
+			kl_div, reconstruction, kl_div_no_aa, reconstruction_no_aa, loss = losses.tmp.get_avg()
 			self.log.info(f"train kl divergence per token: {str(kl_div)}")
 			self.log.info(f"train squared error per token: {str(reconstruction)}")
+			self.log.info(f"train kl divergence no_aa per token: {str(kl_div_no_aa)}")
+			self.log.info(f"train squared error no_aa per token: {str(reconstruction_no_aa)}")
 			self.log.info(f"train full loss per token: {str(loss)}\n")
-			losses.train.add_losses(kl_div, reconstruction, loss)
+			losses.train.add_losses(kl_div, reconstruction, kl_div_no_aa, reconstruction_no_aa, loss)
 		elif train_type == "diffusion":
-			squared_error, nll, total_loss = losses.tmp.get_avg()
+			squared_error, total_loss = losses.tmp.get_avg()
 			self.log.info(f"train squared error per token: {str(squared_error)}")
-			self.log.info(f"train negative log likelihood per token: {str(nll)}")
 			self.log.info(f"train full loss per token: {str(total_loss)}\n")
-			losses.train.add_losses(squared_error, nll, total_loss)
+			losses.train.add_losses(squared_error, total_loss)
 
 	def log_val_losses(self, losses, train_type):
-		if train_type in ["extraction", "extraction_finetune", "old"]:
-			cel, seq_sim = losses.tmp.get_avg()
+		if train_type in ["extraction", "extraction_finetune", "old", "mlm"]:
+			cel, dist_cel, full_loss, seq_sim = losses.tmp.get_avg()
 			self.log.info(f"validation cross entropy loss per token: {str(cel)}")
-			self.log.info(f"validation sequence similarity per token: {str(seq_sim)}\n")
-			losses.val.add_losses(cel, seq_sim)
+			self.log.info(f"validation distogram cross entropy loss per token: {str(dist_cel)}")
+			self.log.info(f"validation full cross entropy loss per token: {str(full_loss)}")
+			self.log.info(f"validation sequence similarity per token: {str(seq_sim)}\n")		
+			losses.val.add_losses(cel, dist_cel, full_loss, seq_sim)
 		elif train_type == "vae":
-			kl_div, reconstruction, loss = losses.tmp.get_avg()
+			kl_div, reconstruction, kl_div_no_aa, reconstruction_no_aa, loss = losses.tmp.get_avg()
 			self.log.info(f"validation kl divergence per token: {str(kl_div)}")
 			self.log.info(f"validation squared error per token: {str(reconstruction)}")
+			self.log.info(f"validation kl divergence no_aa per token: {str(kl_div_no_aa)}")
+			self.log.info(f"validation squared error no_aa per token: {str(reconstruction_no_aa)}")
 			self.log.info(f"validation full loss per token: {str(loss)}\n")
-			losses.val.add_losses(kl_div, reconstruction, loss)
+			losses.val.add_losses(kl_div, reconstruction, kl_div_no_aa, reconstruction_no_aa, loss)
 		elif train_type == "diffusion":
-			squared_error, nll, total_loss = losses.tmp.get_avg()
+			squared_error,  total_loss = losses.tmp.get_avg()
 			self.log.info(f"validation squared error per token: {str(squared_error)}")
-			self.log.info(f"validation negative log likelihood per token: {str(nll)}")
 			self.log.info(f"validation full loss per token: {str(total_loss)}\n")
-			losses.val.add_losses(squared_error, nll, total_loss)
+			losses.val.add_losses(squared_error, total_loss)
 
 	def log_test_losses(self, losses, train_type):
-		if train_type in ["extraction", "extraction_finetune", "old"]:
-			cel, seq_sim = losses.tmp.get_avg()
+		if train_type in ["extraction", "extraction_finetune", "old", "mlm"]:
+			cel, dist_cel, full_loss, seq_sim = losses.tmp.get_avg()
 			self.log.info(f"test cross entropy loss per token: {str(cel)}")
-			self.log.info(f"test sequence similarity per token: {str(seq_sim)}\n")
+			self.log.info(f"test distogram cross entropy loss per token: {str(dist_cel)}")
+			self.log.info(f"test full cross entropy loss per token: {str(full_loss)}")
+			self.log.info(f"test sequence similarity per token: {str(seq_sim)}\n")		
 		elif train_type == "vae":
-			kl_div, reconstruction, loss = losses.tmp.get_avg()
+			kl_div, reconstruction, kl_div_no_aa, reconstruction_no_aa, loss = losses.tmp.get_avg()
 			self.log.info(f"test kl divergence per token: {str(kl_div)}")
 			self.log.info(f"test squared error per token: {str(reconstruction)}")
+			self.log.info(f"test kl divergence no_aa per token: {str(kl_div_no_aa)}")
+			self.log.info(f"test squared error no_aa per token: {str(reconstruction_no_aa)}")
 			self.log.info(f"test full loss per token: {str(loss)}\n")
 		elif train_type == "diffusion":
-			seq_sim, _, _ = losses.tmp.get_avg(is_inference=True) # seq sims stored in squared errors
+			seq_sim, _ = losses.tmp.get_avg(is_inference=True) # seq sims stored in squared errors
 			self.log.info(f"test sequence similarity per token: {str(seq_sim)}\n")
 		losses.test.extend_losses(losses.tmp) # include all test losses to make a histogram (per batch seq sims), not implemented
 
@@ -421,23 +425,5 @@ class Output():
 			model.save_WFDecoding_weights(weights_path=weights_path("decoding"))
 		elif train_type == "diffusion":
 			model.save_WFDiffusion_weights(weights_path=weights_path("diffusion"))
-
-	def write_new_clusters(self, cluster_info, val_clusters, test_clusters):
-
-		# seperate training, validation, and testing
-		val_pdbs = cluster_info.loc[cluster_info.CLUSTER.isin(val_clusters), :]
-		test_pdbs =cluster_info.loc[cluster_info.CLUSTER.isin(test_clusters), :]
-
-		# get lists of unique clusters
-		val_clusters = "\n".join(str(i) for i in val_pdbs.CLUSTER.unique().tolist())
-		test_clusters = "\n".join(str(i) for i in test_pdbs.CLUSTER.unique().tolist())
-
-		with    open(   self.out_path / Path("test_clusters.txt"),   "w") as t, \
-				open(   self.out_path / Path("valid_clusters.txt"),  "w") as v:
-				v.write(val_clusters)
-				t.write(test_clusters)
-
-		# save training pdbs
-		cluster_info.to_csv(self.out_path / Path("list.csv"), index=False)
 
 # ----------------------------------------------------------------------------------------------------------------------

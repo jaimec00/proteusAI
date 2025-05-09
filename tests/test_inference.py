@@ -2,162 +2,99 @@ import torch
 from tqdm import tqdm
 from proteusAI import proteusAI
 from utils.train_utils.data_utils import DataHolder
-from utils.model_utils.base_modules.base_modules import CrossFeatureNorm
+
 def main():
 
-    device = torch.device("cuda")
+	device = torch.device("cuda")
 
-    # setup model
-    model = proteusAI(diffusion_encoder_layers=1, diffusion_use_bias=True)
-    model_path = "/scratch/hjc2538/projects/proteusAI/models/DIFFUSION_biasedattn_noadaln/model_parameters.pth"
-    model_weights = torch.load(model_path, map_location=device, weights_only=True)
-    model.load_state_dict(model_weights)
-    model = model.to(device)
-    model.eval()
+	# setup model
+	model = proteusAI(old=False, mlm=True, extraction_min_rbf=0.001, extraction_encoder_layers=4)
+	# model_path = "/scratch/hjc2538/projects/proteusAI/models/geo_attn_old_4enc_adaptivebias/model_parameters.pth"
+	# model_path = "/scratch/hjc2538/projects/proteusAI/models/redo_imfuckinglost/model_parameters_e9_s2.26.pth"
+	# model_path = "/scratch/hjc2538/projects/proteusAI/models/mlm_from_scratch_pure_attn/ctd/model_parameters_e59_s1.74.pth"
+	model_path = "/scratch/hjc2538/projects/proteusAI/models/mlm_from_scratch_pure_attn/ctd_maskedchain/model_parameters_e469_s2.21.pth"
+	
+	model_weights = torch.load(model_path, map_location=device, weights_only=True)
+	emb_weights = {".".join(i.split(".")[1:]): model_weights[i] for i in model_weights.keys() if i.startswith("wf_embedding")}
+	ext_weights = {".".join(i.split(".")[1:]): model_weights[i] for i in model_weights.keys() if i.startswith("wf_extraction")}
+	model.wf_embedding.load_state_dict(emb_weights, strict=True)
+	model.wf_extraction.load_state_dict(ext_weights, strict=True)
+	model = model.to(device)
+	model.eval()
 
-    # setup data
-    data = DataHolder(	"/scratch/hjc2538/projects/proteusAI/pdb_2021aug02_filtered", 
-                        0, 0, -1, # train, val, test samples
-                        8192, 256, # tokens per batch, max batch size
-                        64, 8192, # min seq size, max seq size
-                        True, 3.5 # use chain mask, max resolution
-                    )
-    data.load("test")
+	# setup data
+	data = DataHolder(	"/scratch/hjc2538/projects/proteusAI/data/multi_chain/processed", 
+						0, 0, -1, # train, val, test samples
+						8192, 256, # tokens per batch, max batch size
+						64, 8192, # min seq size, max seq size
+						True, 3.5, True # use chain mask, max resolution
+					)
+	data.load("test")
 
-    seq_sims = []
-    all_matches = 0
-    all_valid = 0
+	preds, labels, seq_sims = [],[],[]
+	with torch.no_grad():
 
-    outputs, labels, coords, chain_idxs_all = [],[],[], []
+		pbar = tqdm(total=len(data.test_data), desc="epoch_progress", unit="step")
+		for coords_batch, label_batch, chain_idxs, chain_mask, key_padding_mask in data.test_data:
+			
+			# move to gpu
+			label_batch = label_batch.to(device)
+			coords_batch = coords_batch.to(device)
+			chain_mask = chain_mask.to(device)
+			key_padding_mask = key_padding_mask.to(device)
+			coords_alpha, coords_beta = model.wf_embedding.get_CaCb_coords(coords_batch, chain_idxs)
 
-    with torch.no_grad():
+			# for old
+			# wf = model.wf_embedding(coords_alpha, coords_beta, label_batch, key_padding_mask=key_padding_mask)
+			# output = model.wf_extraction(wf, coords_alpha, key_padding_mask=key_padding_mask).argmax(dim=2)
+			# seq_sim, seq_pred, seq_true = get_seq_sim(output, label_batch, chain_idxs, key_padding_mask)
+			# print(seq_sim)
 
-        pbar = tqdm(total=len(data.test_data), desc="epoch_progress", unit="step")
+			# for mlm
+			# first test one shot prediction
+			aas = -torch.ones_like(label_batch)
+			# aas = torch.where(chain_mask, label_batch, -1) # mask token
+			# aas = torch.where(chain_mask, -1, -1) # mask token
+			# wf = model.wf_embedding(coords_alpha, coords_beta, aas, key_padding_mask=key_padding_mask)
+			# output = model.wf_extraction(wf, coords_alpha, key_padding_mask=key_padding_mask).argmax(dim=2)
+			output = model(coords_alpha, coords_beta, aas, key_padding_mask=key_padding_mask, inference=True)
+			# print(output.shape, output)
+			seq_sim, seq_pred, seq_true = get_seq_sim(output, label_batch, chain_idxs, key_padding_mask)
+			print(seq_sim)
 
-        for coords_batch, label_batch, chain_idxs, chain_mask, key_padding_mask in data.test_data:
-            
-            # move to gpu
-            label_batch = label_batch.to(device)
-            coords_batch = coords_batch.to(device)
-            chain_mask = chain_mask.to(device)
-            key_padding_mask = key_padding_mask.to(device)
+			seq_sims.extend(seq_sim)
+			preds.extend(seq_pred)
+			labels.extend(seq_true)
+			pbar.update(1)
 
-            coords_alpha, coords_beta = model.wf_embedding.get_CaCb_coords(coords_batch, chain_idxs)
+	print(sum(seq_sims)/len(seq_sims))
+	with open("results.csv", "w") as f:
+		f.write("accuracy,len,chains,pred,true\n")
+		for seq_sim, pred, lbl in zip(seq_sims, preds, labels):
+			f.write(f"{seq_sim},{len(pred)},{pred.count(":")},{pred},{lbl}\n")
 
-            # first predict with the true seq as input
-            # prediction_batch = torch.nn.functional.one_hot(torch.where(label_batch==-1, 20, label_batch), num_classes=21)
-            aas = label_batch # first see if can actually denoise and reconstruct seq
-            # aas = -torch.ones_like(label_batch)
-            # aas = torch.full_like(label_batch, 5)
+def get_seq_sim(output, labels, chains, mask):
 
-            # wf = model.wf_embedding(coords_alpha, coords_beta, aas, key_padding_mask)
-            wf_no_aa = model.wf_embedding(coords_alpha, coords_beta, aas, key_padding_mask, no_aa=True)
-            wf = wf_no_aa
+	canonical_aas = ['A', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'K', 'L', 'M', 'N', 'P', 'Q', 'R', 'S', 'T', 'V', 'W', 'Y']
 
-            latent_wf = model.wf_encoding.encode(wf, coords_alpha, key_padding_mask=key_padding_mask, wf_no_aa=wf_no_aa)
-            print(latent_wf)
+	seq_sims = []
+	seqs = []
+	true_seqs = []
 
-            decode_wf_nonoise = model.wf_decoding(latent_wf, coords_alpha, key_padding_mask=key_padding_mask, wf_no_aa=wf_no_aa)
-            output_nonoise = model.wf_extraction.extract(decode_wf_nonoise, coords_alpha, key_padding_mask, wf_no_aa=wf_no_aa)
-            seq_sim_nonoise, matches, valid = get_seq_sim(output_nonoise, label_batch, key_padding_mask)
-            
-            t = 5
+	for out, lbl, chain, mask1 in zip(output, labels, chains, mask):
+		valid = (~mask1).sum()
+		matches = ((out == lbl) & (~mask1)).sum()
+		seq_sim = matches / valid
 
-            t_tensor = torch.tensor([t], device=wf.device).unsqueeze(0).unsqueeze(1).expand(wf.size(0), 1, 1)
-            abar, _ = model.wf_diffusion.noise_scheduler(t_tensor)
+		seq = "".join([canonical_aas[i] for i in out[~mask1]])
+		true_seq = "".join([canonical_aas[i] for i in lbl[~mask1]])
 
-            latent_noise, noise = model.wf_diffusion.noise(latent_wf, t)
-            noise_pred = model.wf_diffusion(latent_noise, coords_alpha, t_tensor, key_padding_mask=key_padding_mask)
-            # print((noise_pred-noise)**2)
-            latent_wf = model.wf_diffusion.denoise(latent_noise, coords_alpha, t, key_padding_mask=key_padding_mask, wf_no_aa=wf_no_aa)
+		seq_sims.append(seq_sim.item())
+		seqs.append(":".join(seq[i:j] for i,j in chain))
+		true_seqs.append(":".join(true_seq[i:j] for i,j in chain))
 
-            decode_wf = model.wf_decoding(latent_wf, coords_alpha, key_padding_mask=key_padding_mask, wf_no_aa=wf_no_aa)
-            output = model.wf_extraction.extract(decode_wf, coords_alpha, key_padding_mask, wf_no_aa=wf_no_aa)
+	return seq_sims, seqs, true_seqs
 
-            wf = model.wf_embedding(coords_alpha, coords_beta, output, key_padding_mask)
-            latent_wf = model.wf_encoding.encode(wf, coords_alpha, key_padding_mask=key_padding_mask, wf_no_aa=wf_no_aa)
-
-            seq_sim, matches, valid = get_seq_sim(output, label_batch, key_padding_mask)
-
-            print(seq_sim, seq_sim_nonoise, abar.mean().item())
-
-
-
-
-            # noised_wf, noise = model.wf_diffusion.noise(true, t=t)
-
-            # pred_wf = model.wf_diffusion.denoise(noised_wf, coords_alpha, t_start=t, key_padding_mask=key_padding_mask)
-            # pred_wf = pred_wf.masked_fill(key_padding_mask.unsqueeze(2), 0)
-            # true = true.masked_fill(key_padding_mask.unsqueeze(2), 0)
-            # # pred_wf = norm(pred_wf, key_padding_mask)
-
-            # loss = (true-pred_wf)**2
-            # baseloss = (true-noised_wf)**2
-
-            # # print(pred_wf, true)
-
-            # print(loss.sum() / (512*(~key_padding_mask).sum()))
-            # print(baseloss.sum() / (512*(~key_padding_mask).sum()))
-
-            # # print(loss.sqrt() / true)
-
-            # output = model.wf_extraction.extract(pred_wf, coords_alpha, key_padding_mask, temp=1e-6)
-
-            # # run the model
-            # output = model(coords_alpha=coords_alpha, coords_beta=coords_beta, aas=aas, key_padding_mask=key_padding_mask,
-            #                 inference=True, t=t,
-            #                 cycles=1, 
-            #                 temp=1e-6
-            #                 )
-
-            # compute seq sims
-
-            # seq_sims.append(seq_sim)
-            # all_matches += matches
-            # all_valid += valid
-            # outputs.append(output)
-            # labels.append(label_batch)
-            # coords.append(coords_batch)
-            # chain_idxs_all.append(chain_idxs)
-            # pbar.update(1)
-
-            # break
-
-    
-    seq_sims = torch.tensor(seq_sims)
-
-    print(seq_sims, seq_sims.mean(), seq_sims.min(), seq_sims.max(), seq_sims.std())
-    print(all_matches/all_valid)
-    best = torch.argmax(seq_sims)
-    best_sample = outputs[best].argmax(dim=2)
-    best_labels = labels[best]
-    best_chains = chain_idxs_all[best]
-
-    best_prot = ((best_sample == best_labels).sum(dim=1) / (best_labels!=-1).sum(dim=1))
-
-    print(best_prot)
-
-    best_pred = best_sample[best_prot.argmax(dim=0)]
-    best_prot_lbl = best_labels[best_prot.argmax(dim=0)]
-    best_chains = best_chains[best_prot.argmax(dim=0)]
-
-    canonical_aas = ['A', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'K', 'L', 'M', 'N', 'P', 'Q', 'R', 'S', 'T', 'V', 'W', 'Y']
-    seq = "".join([canonical_aas[i] for i in best_pred[best_prot_lbl!=-1]])
-    true_seq = "".join([canonical_aas[i] for i in best_prot_lbl[best_prot_lbl!=-1]])
-    print(best_chains, len(seq))
-    print(seq, true_seq)
-
-def get_seq_sim(output, labels, mask):
-    mask_flat = mask.view(-1)
-    labels_flat = labels.view(-1)[~mask_flat]
-    output_flat = output.view(-1)[~mask_flat]
-
-    matches = torch.sum(output_flat == labels_flat) 
-    valid = (~mask_flat).sum()
-
-    seq_sim = matches / valid
-
-    return seq_sim, matches, valid
 
 if __name__ == "__main__":
-    main()
+	main()

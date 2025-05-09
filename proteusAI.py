@@ -30,38 +30,39 @@ class proteusAI(nn.Module):
 	
 	def __init__(self, 	# model dimension and number of amino acid classes, plus option to run old model, 
 						# which is just embedding with no aa info + extraction 
-						d_model=256, d_latent=512, N_latent=64, num_aas=20, old=False,
+						d_model=256, d_latent=256, d_wf=256, num_aas=20, 
+						
+						# legacy
+						old=False,
+						mlm=False,
 
 						# wf embedding params, everything is learnable, so not included
 
 						# wf encoder params
 						encoding_d_hidden_pre=1024, encoding_hidden_layers_pre=0,
 						encoding_d_hidden_post=2048, encoding_hidden_layers_post=1, 
-						encoding_encoder_self_layers=4, encoding_self_heads=8, 
-						encoding_self_d_hidden_attn=1024, encoding_self_hidden_layers_attn=0,
-						encoding_encoder_cross_layers=4, encoding_cross_heads=8, 
-						encoding_cross_d_hidden_attn=1024, encoding_cross_hidden_layers_attn=0,
+						encoding_encoder_layers=4, encoding_heads=8, 
+						encoding_d_hidden_attn=1024, encoding_hidden_layers_attn=0,
 
 						# wf diffusion params
 						diffusion_alpha_bar_min=0.0,
 						diffusion_noise_schedule_type="linear", diffusion_t_max=100,
-						diffusion_d_in_timestep=256, diffusion_d_hidden_timestep=1024, diffusion_hidden_layers_timestep=1,
+						diffusion_d_in_timestep=256, diffusion_d_hidden_timestep=1024, diffusion_hidden_layers_timestep=0,
 						diffusion_d_hidden_post=1024, diffusion_hidden_layers_post=0,
-						diffusion_encoder_layers=4, diffusion_heads=4, 
+						diffusion_encoder_layers=4, diffusion_heads=8, 
 						diffusion_d_hidden_attn=1024, diffusion_hidden_layers_attn=0,
 
 						# wf decoder params
 						decoding_d_hidden_pre=1024, decoding_hidden_layers_pre=0,
 						decoding_d_hidden_post=1024, decoding_hidden_layers_post=0,
-						decoding_encoder_self_layers=4, decoding_self_heads=8, 
-						decoding_self_d_hidden_attn=1024, decoding_self_hidden_layers_attn=0,
-						decoding_encoder_cross_layers=4, decoding_cross_heads=8, 
-						decoding_cross_d_hidden_attn=1024, decoding_cross_hidden_layers_attn=0,
-
+						decoding_encoder_layers=4, decoding_heads=8, 
+						decoding_d_hidden_attn=1024, decoding_hidden_layers_attn=0,
+						
 						# wf extraction params
+						extraction_bins=32, extraction_dk=8,  # for distogram auxiliary loss
 						extraction_d_hidden_pre=1024, extraction_hidden_layers_pre=0, 
 						extraction_d_hidden_post=1024, extraction_hidden_layers_post=0,
-						extraction_encoder_layers=4, extraction_heads=8, 
+						extraction_encoder_layers=4, extraction_heads=8, extraction_min_rbf=0.001,
 						extraction_d_hidden_attn=1024, extraction_hidden_layers_attn=0,
 
 						# dropout params
@@ -71,20 +72,20 @@ class proteusAI(nn.Module):
 		super(proteusAI, self).__init__()
 
 		self.num_aas = num_aas
+		self.mlm = mlm
 
-		self.wf_embedding = WaveFunctionEmbedding(d_model=d_model, num_aas=num_aas, old=old)
+		# have num_aa + 1 for mask token in MLM
+		self.wf_embedding = WaveFunctionEmbedding(d_model=d_wf, num_aas=num_aas + mlm, old=old)
 
-		self.wf_encoding = WaveFunctionEncoding(	d_model=d_model, d_latent=d_latent, N_latent=N_latent,
+		self.wf_encoding = WaveFunctionEncoding(	d_model=d_model, d_latent=d_latent, d_proj=d_latent,
 													d_hidden_pre=encoding_d_hidden_pre, hidden_layers_pre=encoding_hidden_layers_pre, 
 													d_hidden_post=encoding_d_hidden_post, hidden_layers_post=encoding_hidden_layers_post,						
-													encoder_self_layers=encoding_encoder_self_layers, self_heads=encoding_self_heads, 
-													self_d_hidden_attn=encoding_self_d_hidden_attn, self_hidden_layers_attn=encoding_self_hidden_layers_attn,
-													encoder_cross_layers=encoding_encoder_cross_layers, cross_heads=encoding_cross_heads, 
-													cross_d_hidden_attn=encoding_cross_d_hidden_attn, cross_hidden_layers_attn=encoding_cross_hidden_layers_attn,
+													encoder_layers=encoding_encoder_layers, heads=encoding_heads, 
+													d_hidden_attn=encoding_d_hidden_attn, hidden_layers_attn=encoding_hidden_layers_attn,
 													dropout=dropout
 												)										
 
-		self.wf_diffusion = WaveFunctionDiffusion(	d_model=d_latent, 
+		self.wf_diffusion = WaveFunctionDiffusion(	d_latent=d_latent, d_proj=d_latent,
 													alpha_bar_min=diffusion_alpha_bar_min, noise_schedule_type=diffusion_noise_schedule_type, t_max=diffusion_t_max,
 													d_in_timestep=diffusion_d_in_timestep, d_hidden_timestep=diffusion_d_hidden_timestep, hidden_layers_timestep=diffusion_hidden_layers_timestep,
 													d_hidden_post=diffusion_d_hidden_post, hidden_layers_post=diffusion_hidden_layers_post,					
@@ -93,26 +94,25 @@ class proteusAI(nn.Module):
 													dropout=dropout
 												)
 
-		self.wf_decoding = WaveFunctionDecoding(	d_model=d_model, d_latent=d_latent,
+		self.wf_decoding = WaveFunctionDecoding(	d_model=d_model, d_latent=d_latent, d_proj=d_latent,
 													d_hidden_pre=decoding_d_hidden_pre, hidden_layers_pre=decoding_hidden_layers_pre, 
 													d_hidden_post=decoding_d_hidden_post, hidden_layers_post=decoding_hidden_layers_post,						
-													encoder_self_layers=decoding_encoder_self_layers, self_heads=decoding_self_heads, 
-													self_d_hidden_attn=decoding_self_d_hidden_attn, self_hidden_layers_attn=decoding_self_hidden_layers_attn,
-													encoder_cross_layers=decoding_encoder_cross_layers, cross_heads=decoding_cross_heads, 
-													cross_d_hidden_attn=decoding_cross_d_hidden_attn, cross_hidden_layers_attn=decoding_cross_hidden_layers_attn,
+													encoder_layers=decoding_encoder_layers, heads=decoding_heads, 
+													d_hidden_attn=decoding_d_hidden_attn, hidden_layers_attn=decoding_hidden_layers_attn,
 													dropout=dropout
 												)
 
-		self.wf_extraction = WaveFunctionExtraction(	d_model=d_model, num_aas=num_aas, 
+		self.wf_extraction = WaveFunctionExtraction(	d_model=d_model, d_wf=d_wf, num_aas=num_aas,
+														bins=extraction_bins, dk=extraction_dk, # auxiliary loss of predicting distograms
 														d_hidden_pre=extraction_d_hidden_pre, hidden_layers_pre=extraction_hidden_layers_pre,
 														d_hidden_post=extraction_d_hidden_post, hidden_layers_post=extraction_hidden_layers_post,
-														encoder_layers=extraction_encoder_layers, heads=extraction_heads,
+														encoder_layers=extraction_encoder_layers, heads=extraction_heads, min_rbf=extraction_min_rbf,
 														d_hidden_attn=extraction_d_hidden_attn, hidden_layers_attn=extraction_hidden_layers_attn,
 														dropout=dropout,
 													)
 
 	def forward(self, 	coords_alpha=None, coords_beta=None, aas=None, wf=None, wf_no_aa=None, latent=None, t=None, chain_idxs=None, key_padding_mask=None, 
-						embedding=False, encoding=False, diffusion=False, decoding=False, extraction=False, no_aa=False, 
+						embedding=False, encoding=False, diffusion=False, decoding=False, extraction=False, no_aa=False, distogram=False, 
 						inference=False, cycles=10, temp=1e-6 # last row is for inference only
 				):
 
@@ -121,7 +121,10 @@ class proteusAI(nn.Module):
 
 		if inference:
 			assert aas is not None, "aas cannot be NoneType if running inference, must be a tensor of labels of size batch x N"
+			
 			with torch.no_grad():
+				if self.mlm:
+					return self.mlm_inference(coords_alpha, coords_beta, aas, key_padding_mask=key_padding_mask, temp=temp)
 				return self.inference(coords_alpha, coords_beta, aas, key_padding_mask=key_padding_mask, cycles=cycles, temp=temp)
 
 		assert ((embedding ^ encoding) ^ decoding) ^ (diffusion ^ extraction), 	"one of embedding, encoding, diffusion, decoding, OR extraction must be selected for a single\
@@ -136,13 +139,13 @@ class proteusAI(nn.Module):
 		elif diffusion: # run diffusion
 			assert latent is not None, "wf cannot be NoneType if running diffusion, must be a tensor of size batch x N x d_latent"
 			assert t is not None, "t (timestep) cannot be NoneType if running diffusion, must be a tensor of size batch,"
-			wf = self.wf_diffusion(latent, t, key_padding_mask=key_padding_mask)
+			wf = self.wf_diffusion(latent, t, coords_alpha, key_padding_mask=key_padding_mask)
 		elif decoding:
 			assert latent is not None, "wf cannot be NoneType if running decoding, must be a tensor of size batch x N x d_model"
-			wf = self.wf_decoding(wf_no_aa, latent, key_padding_mask=key_padding_mask)
+			wf = self.wf_decoding(latent, wf_no_aa, key_padding_mask=key_padding_mask)
 		elif extraction: # run extraction
 			assert wf is not None, "wf cannot be NoneType if running extraction, must be a tensor of size batch x N x d_model"
-			wf = self.wf_extraction(wf, wf_no_aa, key_padding_mask=key_padding_mask)
+			wf = self.wf_extraction(wf, coords_alpha, key_padding_mask=key_padding_mask, distogram=distogram)
 
 		return wf
 
@@ -185,6 +188,38 @@ class proteusAI(nn.Module):
 
 			# keeping fixed positions as they were for next iteration, 
 			aas = torch.where(fixed_aas, aas, aa_pred)
+
+		return aas
+
+	def mlm_inference(self, coords_alpha, coords_beta, aas, key_padding_mask=None, entropy_increment=0.1, temp=1e-6):
+
+		entropy_threshold = 0.1 # entropy threshold
+		entropies = torch.zeros_like(aas, dtype=torch.float32) + float("inf") # will return this later so user knows confidence
+		fixed = (aas!=-1) | key_padding_mask # if not -1, then should be fixed as context
+		predicted = fixed # to keep track of predicted pos as loop through
+		aas.masked_fill_(~fixed, 20) # add the mask token to non fixed tokens
+
+		while not predicted.all(): # already deals w/ masking
+
+			# get wf
+			wf = self.wf_embedding(coords_alpha, coords_beta, aas, key_padding_mask=key_padding_mask)
+
+			# predict sequence
+			aa_logits = self.wf_extraction(wf, coords_alpha, key_padding_mask=key_padding_mask)
+			pred_aa = self.wf_extraction.sample(aa_logits, temp)
+
+			# compute entropy
+			probs = aa_logits.softmax(dim=2)
+			entropy = torch.sum(-probs*torch.log(probs), dim=2)
+			
+			# update
+			update_aa = (entropy < entropy_threshold) & (entropies == float("inf")) & (~predicted.all(dim=1, keepdim=True)) # dont update already finished samples
+			entropies[update_aa] = entropy[update_aa]
+			aas[update_aa] = pred_aa[update_aa]
+			predicted |= update_aa
+
+			# increment entropy threshold
+			entropy_threshold += entropy_increment
 
 		return aas
 
@@ -244,3 +279,24 @@ class proteusAI(nn.Module):
 
 	def save_WFExtraction_weights(self, weights_path):
 		torch.save(self.wf_extraction.state_dict(), weights_path)
+
+	def turn_off_bias(self):
+		'''
+		i think it would be better for the initial wf embedding to be learned without any bias
+		then, once reach a certain seq sim, freeze wf embedding, and allow the bias to be learnable
+		i see worse performance when training these end to end, so i think that the geo attn relies too
+		much on the bias at the begginging, but then when the features become expressive, it overrides them 
+		with the bias, which stalls learning
+		whenever i start with pretrained wf embedding and fresh encoders, performance is much better,
+		so i am pretty convinced this is the issue
+		'''
+		with torch.no_grad():
+			for encoder in self.wf_extraction.encoders:
+				encoder.attn.beta_weights.fill_(-float('inf')) # learns log of betas, so beta = exp(-inf) = 0. now just keeping it frozen
+				encoder.attn.beta_weights.requires_grad = False
+
+	def turn_on_bias(self):
+		with torch.no_grad():
+			for encoder in self.wf_extraction.encoders:
+				encoder.attn.beta_weights.fill_(0) # init the betas to exp(0) = 1
+				encoder.attn.beta_weights.requires_grad = True

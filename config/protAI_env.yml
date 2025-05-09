@@ -40,4 +40,4 @@ dependencies:
       - triton
       - ninja
 
-# prefix: /scratch/hjc2538/conda/envs/protAI_env
+prefix: /scratch/hjc2538/conda/envs/protAI_env

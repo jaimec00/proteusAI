@@ -16,10 +16,10 @@ hyper_parameters:
   # ----------------------------------------------------------------------------
 
   # main stuff
-  d_model: 256
-  d_latent: 1024 
-  N_latent: 64
-  num_aa: 20
+  d_wf: 256 # d_wf // 2 is the number of wavefunctions defined for each protein, since each wf produces real and imag part
+  d_latent: 256 # for latent diffusion, focusing on mlm rn, but will get back to this over the summer
+  d_model: 256 # d_model, projects d_wf to this before attention
+  num_aa: 20 # number of amino acids
 
   # ----------------------------------------------------------------------------
   
@@ -28,29 +28,23 @@ hyper_parameters:
 
   # ----------------------------------------------------------------------------
 
-  # wf encoder params
+  # wf encoder params, for VAE
   encoding:
     pre_process:
       d_hidden: 1024
       hidden_layers: 0
     post_process:
-      d_hidden: 2048
+      d_hidden: 1024
       hidden_layers: 1
     encoders:
-      self_attn:
-        layers: 2
-        heads: 8
-        d_hidden_attn: 1024
-        hidden_layers_attn: 0
-      cross_attn:
-        layers: 2
-        heads: 16
-        d_hidden_attn: 2048
-        hidden_layers_attn: 0
+      layers: 4
+      heads: 8
+      d_hidden_attn: 2048
+      hidden_layers_attn: 0
 
   # ----------------------------------------------------------------------------
 
-  # wf diffusion params
+  # wf diffusion params, for latent diffusion, will come back to this
   diffusion:
     scheduler:
       alpha_bar_min: 0.00
@@ -64,37 +58,36 @@ hyper_parameters:
       d_hidden: 1024
       hidden_layers: 0
     encoders:
-      layers: 2
-      heads: 4
+      layers: 8
+      heads: 8
       d_hidden_attn: 1024
       hidden_layers_attn: 0
 
   # ----------------------------------------------------------------------------
 
-  # wf decoder params
+  # wf decoder params, for VAE
   decoding:
     pre_process:
       d_hidden: 1024
       hidden_layers: 0
     post_process:
       d_hidden: 1024
-      hidden_layers: 0
+      hidden_layers: 1
     encoders:
-      self_attn:
-        layers: 2
-        heads: 8
-        d_hidden_attn: 1024
-        hidden_layers_attn: 0
-      cross_attn:
-        layers: 2
-        heads: 16
-        d_hidden_attn: 1024
-        hidden_layers_attn: 0
+      layers: 4
+      heads: 8
+      d_hidden_attn: 2048
+      hidden_layers_attn: 0
 
   # ----------------------------------------------------------------------------
 
-  # wf extraction params
+  # wf extraction params, used in every model (latent diffusion, old/vanilla, and mlm), but focusing on mlm and old rn
   extraction:
+    distogram: # used for auxiliary task of predicting distograms, can turn off in loss sectino below
+      bins: 32
+      dk: 8
+      min_dist: 2.0
+      max_dist: 22.0
     pre_process:
       d_hidden: 1024
       hidden_layers: 0
@@ -104,6 +97,7 @@ hyper_parameters:
     encoders:
       layers: 4
       heads: 8
+      min_rbf: 0.000 # not using this
       d_hidden_attn: 1024
       hidden_layers_attn: 0
 
@@ -112,7 +106,7 @@ hyper_parameters:
 # training params
 training_parameters:
 
-  train_type: "extraction_finetune"  # options are:
+  train_type: "old"  # options are:
                             #   extraction:
                             #     train embedding and extraction together, defines the wf space. everything else is frozen
                             #   vae:
@@ -123,17 +117,45 @@ training_parameters:
                             #     train diffusion on encoder output (latent wf). only diffusion is not frozen
                             #   old:
                             #     old vanilla model, consists of embedder and extractor only, but embedder only encodes struct info, no aa specific scaling factors
+                            #   mlm:
+                            #     embedding+extraction, but bakes aa info into wf embedding, including learned mask token scaling factor. allows for iterative updates
 
-  epochs: 100  # number of epochs
+  single_chain: False # single chain or multichain model, automatically chooses the correct dataset from this, as long as defined below
+  ca_only_model: True # Ca only or full backbone model, haven't tested full backbone yet
+
+  epochs: 1000  # number of epochs, training until convergence
 
   # for pre-training
   weights:
+    # only thing to configure is after reach a certain seq sim to freeze the wf embedding weights, 
+    # as after get a stable set of values, better to keep it constant for the encoders to learn this representaion,
+    # especiallly in mlm, where small changes in aa magnitudes produce big changes in the wf
+    embedding: # no freezing
+      freeze_at_seq_sim: 100.0 # once validation reaches this, wavenumbers and aa magnitudes are frozen. set to 0 to freeze immediately, >=100 to never freeze
+    geo_attn:
+      init_bias_off: False # start with no spatial bias, until reach a certain seq sim, which means the features are now useful
+      turn_bias_on_at_seq_sim: 20.0
+
     use_model: ""
-    use_embedding_weights: "/scratch/hjc2538/projects/proteusAI/models/extraction_5_w_normed_wf/model_parameters_embedding.pth"
-    use_encoding_weights: "/scratch/hjc2538/projects/proteusAI/models/VAE_protein_latent4_1emin6beta_sqrtsched_wtanh_1024dl/tmp/model_parameters_encoding.pth"
+    # use_model: "/scratch/hjc2538/projects/proteusAI/models/mlm_from_scratch_pure_attn/ctd_maskedchain/model_parameters_e469_s2.21.pth"
+    # use_model: "/scratch/hjc2538/projects/proteusAI/models/mlm_from_scratch/model_parameters_e119_s2.25.pth" # training mlm w/ geo attn
+    # use_model: "/scratch/hjc2538/projects/proteusAI/models/mlm_from_scratch_pure_attn/model_parameters_e149_s2.59.pth" # training mlm w/ pure attn, got canceled for time limit, setting to 72 hours now
+    # use_model: "/scratch/hjc2538/projects/proteusAI/models/geo_attn_old_4enc_adaptivebias/model_parameters.pth"
+    # use_model: "/scratch/hjc2538/projects/proteusAI/models/geo_attn_old_4enc_adaptivebias/model_parameters.pth"
+    # use_model: "/scratch/hjc2538/projects/proteusAI/models/mlm_w_ADAgeoattn_large/model_parameters.pth"
+    use_embedding_weights: ""
+    # use_embedding_weights: "/scratch/hjc2538/projects/proteusAI/models/extraction_5_w_normed_wf/model_parameters_embedding.pth"
+    # use_embedding_weights: "/scratch/hjc2538/projects/proteusAI/models/geo_attn_old/tmp/model_parameters_embedding.pth"
+    # use_embedding_weights: "/scratch/hjc2538/projects/proteusAI/models/mlm/tmp/model_parameters_embedding.pth"
+    # use_embedding_weights: "/scratch/hjc2538/projects/proteusAI/models/geo_attn_old/tmp/model_parameters_embedding.pth"
+    # use_encoding_weights: "/scratch/hjc2538/projects/proteusAI/models/vae_noaa_loss/model_parameters_encoding.pth"
+    use_encoding_weights: ""
     use_diffusion_weights: ""
-    use_decoding_weights: "/scratch/hjc2538/projects/proteusAI/models/VAE_protein_latent4_1emin6beta_sqrtsched_wtanh_1024dl/tmp/model_parameters_decoding.pth"
-    use_extraction_weights: "/scratch/hjc2538/projects/proteusAI/models/extraction_5_w_normed_wf/model_parameters_extraction.pth"
+    # use_decoding_weights: "/scratch/hjc2538/projects/proteusAI/models/vae_noaa_loss/model_parameters_decoding.pth"
+    use_decoding_weights: ""
+    # use_extraction_weights: "/scratch/hjc2538/projects/proteusAI/models/extraction_5_w_normed_wf/model_parameters_extraction.pth"
+    use_extraction_weights: ""
+    # use_extraction_weights: "/scratch/hjc2538/projects/proteusAI/models/mlm/tmp/model_parameters_extraction.pth"
   inference:
     temperature: !!float 1e-6
     cycles: 10
@@ -141,7 +163,7 @@ training_parameters:
   # convergence criteria
   early_stopping:
     thresh: 0.00 # delta validation sequence similarity, if below this value, training is stopped. negative values mean the seq sim must decrease before stopping
-    tolerance: 15 # how many epochs to consider when calculating delta seq sim for early stopping. takes the max delta seq sim between current epoch and last n epochs, and decides based on this
+    tolerance: 100 # how many epochs to consider when calculating delta seq sim for early stopping. takes the max delta seq sim between current epoch and last n epochs, and decides based on this
   
   adam:
     beta1: 0.9  # for adam optim 
@@ -149,14 +171,18 @@ training_parameters:
     epsilon: !!float 10e-9  # for adam optim (!!float lets PyYAML know this is a float, not str)
   
   regularization:
-    dropout: 0.00  # percentage of dropout
+    dropout: 0.1  # percentage of dropout
     wf_dropout: 0.00 # dropout for wf embedding, drops out this pct of sources, diff sources dropped for diff wavenumbers
-    noise_coords_std: 0.00 # stdev of noise injection into coordinates during training
+    noise_coords_std: 0.1 # stdev of noise injection into coordinates during training
     use_chain_mask: True # whether to mask all chains except the sequence cluster representative in loss computation, all chains still used for fwd pass as context though
 
   loss:
     # i think grad accum is v important for diffusion, will see if this helps
-    accumulation_steps: 4  # grad accumulation; how many batches to process before learning step
+    accumulation_steps: 16  # grad accumulation; how many batches to process before learning step. i think mlm needs better grad approx, will see
+    distogram: 
+      label_smoothing: 0.1 # label smoothing on the distogram auxiliary loss
+      beta: 0.0 # weight of distogram cel, set to 0.0 to skip
+    
     cel:
       label_smoothing: 0.0
     kl:
@@ -171,14 +197,22 @@ training_parameters:
   lr:
     lr_type: "attn"
     lr_step: !!float 1e-3 # max lr, ramps up to this val before decreasing  
-    warmup_steps: 6000 # number of warmup steps before decreasing
-  
+    warmup_steps: 8000 # number of warmup steps before decreasing
+    start_from_step: 0
+    # start_from_step: 24200  # for mlm w/ geo
+    # start_from_step: 15200  # in case you want to continue where you left off, eg time limit on hpc cancels job, 
+                            # start from a specific step number, set to 0 to start from beginning. 
+                            # also useful if you want slow decrease in lr without running the full large number of warmup steps
+    # (150 epochs) * (approx. 3,270 batches per epoch) / (32 batches per step) =  15328.125 steps (for mlm pure attn run)
+    # (119 epochs) * (approx. 3,270 batches per epoch) / (16 batches per step) =  24320.625 steps (for mlm geo attn run)
+
 # ------------------------------------------------------------------------------
 
 # dataset configs
 data:
 
-  data_path: "/scratch/hjc2538/projects/proteusAI/pdb_2021aug02_filtered"  # path to data for uncw hpc
+  multi_chain_data_path: "/scratch/hjc2538/projects/proteusAI/data/multi_chain/processed"  # path to data for multi-chain model (dataset from Dapauras et. al.)
+  single_chain_data_path: "/scratch/hjc2538/projects/proteusAI/data/single_chain/processed"  # path to data for single chain model (dataset from Ingraham et. al.)
 
   num_train: -1  # number of training samples to use; -1 means all available
   num_val: -1  # number of validation samples to use; -1 means all available
@@ -189,7 +223,7 @@ data:
   # DataHolder class sorts samples by sequence length and splits into max_batch_size batches one time to reduce masking (avoid small seqs being grouped with large seqs), 
   # then recursively randomizes order of samples within batch, splits into two, and continues until batches are <= batch_tokens
   max_batch_size: 256  # maximum samples per batch
-  min_seq_size: 64 # minimum sequence length, shorter is padded to this length
+  min_seq_size: 16 # minimum sequence length, shorter is padded to this length
   max_seq_size: 8192 # max sequence lengths, longer samples not included
   batch_tokens: 8192 # number of valid tokens per batch (including non-representative chains, basically the tokens used in computation, not necessarily in loss)
   max_resolution: 3.5 # max_resolution of PDBs
@@ -198,7 +232,10 @@ data:
 
 # Output
 output:
-  out_path: "/scratch/hjc2538/projects/proteusAI/models/extraction_finetune_protlatent"  # path to store output, such as plots and weights file. for uncw hpc
+  out_path: "/scratch/hjc2538/projects/proteusAI/models/old_bias_4enc_noisecoords_nomask"
+  # out_path: "/scratch/hjc2538/projects/proteusAI/models/mlm_from_scratch_pure_attn/ctd_maskedchain/ctd_regularize"  # path to store output, such as plots and weights file. for uncw hpc
+  # out_path: "/scratch/hjc2538/projects/proteusAI/models/old_pure_attn_last_chance"  # path to store output, such as plots and weights file. for uncw hpc
+  # will get rid of these later and just hard code plots to these names, no point in customizing them, just save them all in out_path
   cel_plot: "cel_vs_epoch.png"  # path to save plot of loss vs epochs after training
   mse_plot: "mse_vs_epoch.png"  # path to save plot of loss vs epochs after training
   kldiv_plot: "kldiv_vs_epoch.png"  # path to save plot of loss vs epochs after training
