@@ -18,24 +18,21 @@ import sys
 
 class Output():
 
-	def __init__(self, 	out_path, 
-						cel_plot="cel_plot.png", seq_plot="seq_sim_plot.png", 
-						mse_plot="mse_plot.png", kldiv_plot="kldiv_plot.png", 
-						vae_plot="vae_plot.png",
-						test_plot="test_plot.png", 
-						weights_path=Path("model_parameters.pth"), model_checkpoints=10
-					):
+	def __init__(self, out_path, model_checkpoints=10, rank=0, world_size=1):\
+
+		self.rank = rank # deal with the loggin logic here
+		self.world_size = world_size
 
 		self.out_path = Path(out_path)
 		self.out_path.mkdir(parents=True, exist_ok=True)
 
-		self.cel_plot = self.out_path / Path(cel_plot)
-		self.mse_plot = self.out_path / Path(mse_plot)
-		self.kldiv_plot = self.out_path / Path(kldiv_plot)
-		self.seq_plot = self.out_path / Path(seq_plot)
-		self.vae_plot = self.out_path / Path(vae_plot)
-		self.test_plot = self.out_path / Path(test_plot)
-		self.weights_path = self.out_path / Path(weights_path)
+		self.cel_plot = self.out_path / Path("cel_plot.png")
+		self.mse_plot = self.out_path / Path("mse_plot.png")
+		self.kldiv_plot = self.out_path / Path("kldiv_plot.png")
+		self.seq_plot = self.out_path / Path("seq_plot.png")
+		self.vae_plot = self.out_path / Path("vae_plot.png")
+		self.test_plot = self.out_path / Path("test_plot.png")
+		self.weights_path = self.out_path / Path("model_parameters.pth")
 		self.log = self.setup_logging(self.out_path / Path("log.txt"))
 		self.model_checkpoints = model_checkpoints
 
@@ -190,82 +187,83 @@ class Output():
 		output directory: {self.out_path}
 		''')
 
-		self.log.info(log)
+		if self.rank==0:
+			self.log.info(log)
 
 	def log_epoch(self, epoch, current_lr):
 
-		self.log.info(textwrap.dedent(f'''
-		
-			{'-'*80}
-			epoch {epoch}: 
-			{'-'*80}
+		if self.rank==0:
+			self.log.info(textwrap.dedent(f'''
 			
-			current learning rate: {current_lr}
-		''')
+				{'-'*80}
+				epoch {epoch}: 
+				{'-'*80}
+				
+				current learning rate: {current_lr}
+			''')
+			)
+
+	def log_losses(self, losses, train_type, mode):
+
+		# workers pickle their loss objects, send to master, master extends the loss
+		if self.rank == 0:
+			loss_list = [None for _ in range(self.world_size)]
+		else:
+			loss_list = None
+
+
+		torch.distributed.gather_object(
+			obj=losses.tmp,
+			object_gather_list=loss_list,
+			dst=0,
+			group=None
 		)
 
-	def log_epoch_losses(self, losses, train_type):
+		if self.rank!=0: 
+			return # workers are done after gather
+
+		for worker_loss in loss_list[1:]: # exclude the master loss object, as that is what we are extending
+			losses.tmp.extend_losses(worker_loss) 
+
+		tmp_losses = []
+
 		if train_type in ["extraction", "extraction_finetune", "old", "mlm"]:
 			cel, dist_cel, full_loss, seq_sim = losses.tmp.get_avg()
-			self.log.info(f"train cross entropy loss per token: {str(cel)}")
-			self.log.info(f"train distogram cross entropy loss per token: {str(dist_cel)}")
-			self.log.info(f"train full cross entropy loss per token: {str(full_loss)}")
-			self.log.info(f"train sequence similarity per token: {str(seq_sim)}\n")		
-			losses.train.add_losses(cel, dist_cel, full_loss, seq_sim)
+			self.log.info(f"{mode} cross entropy loss per token: {str(cel)}")
+			self.log.info(f"{mode} distogram cross entropy loss per token: {str(dist_cel)}")
+			self.log.info(f"{mode} full cross entropy loss per token: {str(full_loss)}")
+			self.log.info(f"{mode} sequence similarity per token: {str(seq_sim)}\n")	
+			tmp_losses.extend([cel, dist_cel, full_loss, seq_sim])
 		elif train_type == "vae":
 			kl_div, reconstruction, kl_div_no_aa, reconstruction_no_aa, loss = losses.tmp.get_avg()
-			self.log.info(f"train kl divergence per token: {str(kl_div)}")
-			self.log.info(f"train squared error per token: {str(reconstruction)}")
-			self.log.info(f"train kl divergence no_aa per token: {str(kl_div_no_aa)}")
-			self.log.info(f"train squared error no_aa per token: {str(reconstruction_no_aa)}")
-			self.log.info(f"train full loss per token: {str(loss)}\n")
-			losses.train.add_losses(kl_div, reconstruction, kl_div_no_aa, reconstruction_no_aa, loss)
+			self.log.info(f"{mode} kl divergence per token: {str(kl_div)}")
+			self.log.info(f"{mode} squared error per token: {str(reconstruction)}")
+			self.log.info(f"{mode} kl divergence no_aa per token: {str(kl_div_no_aa)}")
+			self.log.info(f"{mode} squared error no_aa per token: {str(reconstruction_no_aa)}")
+			self.log.info(f"{mode} full loss per token: {str(loss)}\n")
+			tmp_losses.extend(cel, dist_cel, full_loss, seq_sim)
 		elif train_type == "diffusion":
 			squared_error, total_loss = losses.tmp.get_avg()
-			self.log.info(f"train squared error per token: {str(squared_error)}")
-			self.log.info(f"train full loss per token: {str(total_loss)}\n")
-			losses.train.add_losses(squared_error, total_loss)
+			self.log.info(f"{mode} squared error per token: {str(squared_error)}")
+			self.log.info(f"{mode} full loss per token: {str(total_loss)}\n")
+			tmp_losses.extend([squared_error, total_loss])
+
+		if mode == "testing":
+			losses.train.add_losses(*tmp_losses)
+		elif mode == "validation":	
+			losses.val.add_losses(*tmp_losses)
+		else: # testing
+			losses.test.extend_losses(losses.tmp)
+
+
+	def log_epoch_losses(self, losses, train_type):
+		self.log_losses(losses, train_type, "train")
 
 	def log_val_losses(self, losses, train_type):
-		if train_type in ["extraction", "extraction_finetune", "old", "mlm"]:
-			cel, dist_cel, full_loss, seq_sim = losses.tmp.get_avg()
-			self.log.info(f"validation cross entropy loss per token: {str(cel)}")
-			self.log.info(f"validation distogram cross entropy loss per token: {str(dist_cel)}")
-			self.log.info(f"validation full cross entropy loss per token: {str(full_loss)}")
-			self.log.info(f"validation sequence similarity per token: {str(seq_sim)}\n")		
-			losses.val.add_losses(cel, dist_cel, full_loss, seq_sim)
-		elif train_type == "vae":
-			kl_div, reconstruction, kl_div_no_aa, reconstruction_no_aa, loss = losses.tmp.get_avg()
-			self.log.info(f"validation kl divergence per token: {str(kl_div)}")
-			self.log.info(f"validation squared error per token: {str(reconstruction)}")
-			self.log.info(f"validation kl divergence no_aa per token: {str(kl_div_no_aa)}")
-			self.log.info(f"validation squared error no_aa per token: {str(reconstruction_no_aa)}")
-			self.log.info(f"validation full loss per token: {str(loss)}\n")
-			losses.val.add_losses(kl_div, reconstruction, kl_div_no_aa, reconstruction_no_aa, loss)
-		elif train_type == "diffusion":
-			squared_error,  total_loss = losses.tmp.get_avg()
-			self.log.info(f"validation squared error per token: {str(squared_error)}")
-			self.log.info(f"validation full loss per token: {str(total_loss)}\n")
-			losses.val.add_losses(squared_error, total_loss)
+		self.log_losses(losses, train_type, "validation")
 
 	def log_test_losses(self, losses, train_type):
-		if train_type in ["extraction", "extraction_finetune", "old", "mlm"]:
-			cel, dist_cel, full_loss, seq_sim = losses.tmp.get_avg()
-			self.log.info(f"test cross entropy loss per token: {str(cel)}")
-			self.log.info(f"test distogram cross entropy loss per token: {str(dist_cel)}")
-			self.log.info(f"test full cross entropy loss per token: {str(full_loss)}")
-			self.log.info(f"test sequence similarity per token: {str(seq_sim)}\n")		
-		elif train_type == "vae":
-			kl_div, reconstruction, kl_div_no_aa, reconstruction_no_aa, loss = losses.tmp.get_avg()
-			self.log.info(f"test kl divergence per token: {str(kl_div)}")
-			self.log.info(f"test squared error per token: {str(reconstruction)}")
-			self.log.info(f"test kl divergence no_aa per token: {str(kl_div_no_aa)}")
-			self.log.info(f"test squared error no_aa per token: {str(reconstruction_no_aa)}")
-			self.log.info(f"test full loss per token: {str(loss)}\n")
-		elif train_type == "diffusion":
-			seq_sim, _ = losses.tmp.get_avg(is_inference=True) # seq sims stored in squared errors
-			self.log.info(f"test sequence similarity per token: {str(seq_sim)}\n")
-		losses.test.extend_losses(losses.tmp) # include all test losses to make a histogram (per batch seq sims), not implemented
+		self.log_losses(losses, train_type, "test")
 
 	def plot_training(self, losses, training_type):
 
@@ -409,6 +407,7 @@ class Output():
 		self.log.info(f"histogram of test seq_sims saved to {self.test_plot}")
 
 	def save_model(self, model, train_type="", appended_str=""):
+
 		if appended_str:
 			weights_path = self.weights_path.parent / Path(f"{'.'.join(self.weights_path.name.split(".")[:-1])}_{appended_str}.{self.weights_path.name.split(".")[-1]}") 
 		else:

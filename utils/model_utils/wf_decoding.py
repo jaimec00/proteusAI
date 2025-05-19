@@ -13,6 +13,7 @@ class WaveFunctionDecoding(nn.Module):
 						d_hidden_pre=2048, hidden_layers_pre=0, 
 						d_hidden_post=2048, hidden_layers_post=0,
 						encoder_layers=4, heads=8,
+						use_bias=False, min_rbf=0.000,
 						d_hidden_attn=1024, hidden_layers_attn=0,
 						dropout=0.10,
 					):
@@ -26,6 +27,7 @@ class WaveFunctionDecoding(nn.Module):
 		self.space_enc = MLP(d_in=d_model, d_out=d_proj, d_hidden=d_hidden_pre, hidden_layers=hidden_layers_pre, dropout=dropout) 
 
 		self.encoders = nn.ModuleList([ Encoder(	d_model=d_proj, d_other=d_proj, heads=heads, 
+													bias=use_bias, min_rbf=min_rbf,
 													d_hidden=d_hidden_attn, hidden_layers=hidden_layers_attn, 
 													dropout=dropout
 												)

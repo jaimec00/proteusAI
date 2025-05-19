@@ -19,9 +19,9 @@ class ExtractionOutput():
 		self.seq_pred = seq_pred # seq pred from wf output
 
 		# valid tokens for averaging
-		self.valid_toks = (batch_parent.labels!=-1).sum()
+		self.valid_toks = (batch_parent.labels!=-1).sum().item()
 
-		self.valid_samples = (batch_parent.labels!=-1).any(dim=1).sum()
+		self.valid_samples = (batch_parent.labels!=-1).any(dim=1).sum().item()
 
 		self.dist_pred = dist_pred
 

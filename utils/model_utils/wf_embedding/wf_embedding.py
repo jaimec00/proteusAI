@@ -22,14 +22,13 @@ from utils.model_utils.base_modules.base_modules import StaticLayerNorm
 
 class WaveFunctionEmbedding(nn.Module):
 
-	def __init__(self, 	d_model=512, num_aas=20, old=False):
+	def __init__(self, d_model=512, min_wl=4.0, max_wl=35.0, base_wl=20.0, learn_wl=False, num_aas=20, old=False):
 
 		super(WaveFunctionEmbedding, self).__init__()
 
-		# wl = 4.0 + 16*((torch.logspace(0,1,d_model//2, 30) - 1)/29)
-		# wn = torch.log(torch.pi*2/wl)
-
-		self.wavenumbers = nn.Parameter(torch.zeros(d_model//2)) # learns log of wavenumbers, initialized so all dmodel dims start w/ corresponding wavelength of 2pi
+		wl = min_wl + (max_wl-min_wl)*((torch.logspace(0,1,d_model//2, base_wl) - 1)/(base_wl-1))
+		wn = torch.log(torch.pi*2/wl)
+		self.wavenumbers = nn.Parameter(wn, requires_grad=learn_wl) # learns log of wavenumbers, initialized so all dmodel dims start w/ corresponding wavelength of 2pi
 		self.num_aas = num_aas
 
 		# initialize aa magnitudes (overwritten by proteusAI if specified)
@@ -48,17 +47,17 @@ class WaveFunctionEmbedding(nn.Module):
 	def forward(self, coords_alpha, coords_beta, aa_labels, key_padding_mask=None, no_aa=False):
 
 		if self.old: 
-			return self.norm(wf_embedding_learnCB(coords_alpha, coords_beta, self.aa_magnitudes, self.get_wavenumbers(), mask=key_padding_mask))
-			# return wf_embedding_learnCB(coords_alpha, coords_beta, self.aa_magnitudes, self.get_wavenumbers(), mask=key_padding_mask)
+			wf = wf_embedding_learnCB(coords_alpha, coords_beta, self.aa_magnitudes, self.get_wavenumbers(), mask=key_padding_mask)
 
-		if no_aa: # compute the anisotropic wavefunction, but using the mean magnitude for each wavenumber so that the aa info is ambiguous. 
-			aa_magnitudes = self.aa_magnitudes.mean(dim=1, keepdim=True).repeat(1, self.aa_magnitudes.size(1))
-			wf = wf_embedding_staticAA(coords_alpha, coords_beta, aa_labels, aa_magnitudes, self.get_wavenumbers(), dropout_p=0.0, mask=key_padding_mask)
 		else:
-			if self.aa_magnitudes.requires_grad and torch.is_grad_enabled() and self.training: # learnable AA is much slower (4.5x), avoid it if not tracking grads of AAs
-				wf = wf_embedding_learnAA(coords_alpha, coords_beta, aa_labels, self.aa_magnitudes, self.get_wavenumbers(), mask=key_padding_mask)
+			if no_aa: # compute the anisotropic wavefunction, but using the mean magnitude for each wavenumber so that the aa info is ambiguous. 
+				aa_magnitudes = self.aa_magnitudes.mean(dim=1, keepdim=True).repeat(1, self.aa_magnitudes.size(1))
+				wf = wf_embedding_staticAA(coords_alpha, coords_beta, aa_labels, aa_magnitudes, self.get_wavenumbers(), dropout_p=0.0, mask=key_padding_mask)
 			else:
-				wf = wf_embedding_staticAA(coords_alpha, coords_beta, aa_labels, self.aa_magnitudes, self.get_wavenumbers(), dropout_p=0.0, mask=key_padding_mask)
+				if self.aa_magnitudes.requires_grad and torch.is_grad_enabled() and self.training: # learnable AA is much slower (4.5x), avoid it if not tracking grads of AAs
+					wf = wf_embedding_learnAA(coords_alpha, coords_beta, aa_labels, self.aa_magnitudes, self.get_wavenumbers(), mask=key_padding_mask)
+				else:
+					wf = wf_embedding_staticAA(coords_alpha, coords_beta, aa_labels, self.aa_magnitudes, self.get_wavenumbers(), dropout_p=0.0, mask=key_padding_mask)
 
 		# norming improvves performance, norms each tokens features, no affine transformation, so not layernorm
 		wf = self.norm(wf)

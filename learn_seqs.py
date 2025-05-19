@@ -23,16 +23,7 @@ def main(args):
 
 	# initialize the training run
 	training_run = TrainingRun(args)
-
-	# setup the training
-	training_run.setup_training()
-
-	# train the model
-	training_run.train()
-
-	# test the model
-	training_run.test()
-
+	
 # ----------------------------------------------------------------------------------------------------------------------
 
 if __name__ == "__main__":

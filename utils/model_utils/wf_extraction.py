@@ -19,7 +19,8 @@ class WaveFunctionExtraction(nn.Module):
 						bins=32, dk=8, # auxiliary task of predicting distograms
 						d_hidden_pre=2048, hidden_layers_pre=0,
 						d_hidden_post=2048, hidden_layers_post=0,
-						encoder_layers=4, heads=8, min_rbf=0.001,
+						encoder_layers=4, heads=8, 
+						use_bias=False, min_rbf=0.001,
 						d_hidden_attn=2048, hidden_layers_attn=0,
 						dropout=0.10
 				):
@@ -28,12 +29,13 @@ class WaveFunctionExtraction(nn.Module):
 
 		self.dropout = nn.Dropout(dropout)
 		# self.proj_pre = nn.Linear(d_wf, d_model)
-		self.mlp_pre = MLP(d_in=d_model, d_out=d_model, d_hidden=d_hidden_pre, hidden_layers=hidden_layers_pre, dropout=dropout)
-		self.norm_pre = nn.LayerNorm(d_model)
-		self.mlp_post = MLP(d_in=d_model, d_out=d_model, d_hidden=d_hidden_post, hidden_layers=hidden_layers_post, dropout=dropout)
-		self.norm_post = nn.LayerNorm(d_model)
+		# self.mlp_pre = MLP(d_in=d_model, d_out=d_model, d_hidden=d_hidden_pre, hidden_layers=hidden_layers_pre, dropout=dropout)
+		# self.norm_pre = nn.LayerNorm(d_model)
+		# self.mlp_post = MLP(d_in=d_model, d_out=d_model, d_hidden=d_hidden_post, hidden_layers=hidden_layers_post, dropout=dropout)
+		# self.norm_post = nn.LayerNorm(d_model)
 
-		self.encoders = nn.ModuleList([ Encoder(	d_model=d_model, d_other=d_model, heads=heads, min_rbf=min_rbf,
+		self.encoders = nn.ModuleList([ Encoder(	d_model=d_model, d_other=d_model, heads=heads, 
+													min_rbf=min_rbf, bias=use_bias,
 													d_hidden=d_hidden_attn, hidden_layers=hidden_layers_attn, 
 													dropout=dropout
 												) 
@@ -47,10 +49,13 @@ class WaveFunctionExtraction(nn.Module):
 
 	def forward(self, wf, coords, key_padding_mask=None, distogram=False):
 
-		# non linear tranformation for more intricate features
-		wf = self.norm_pre(wf + self.mlp_pre(wf))
+		# linear projection
+		# wf = self.proj_pre(wf)
 
-		# # geometric attn encoders
+		# non linear tranformation for more intricate features
+		# wf = self.norm_pre(wf + self.mlp_pre(wf))
+
+		# geometric/vanilla attn encoders
 		for encoder in self.encoders:
 			wf = encoder(wf, wf, wf, coords, mask=key_padding_mask)
 

@@ -32,16 +32,18 @@ class proteusAI(nn.Module):
 						# which is just embedding with no aa info + extraction 
 						d_model=256, d_latent=256, d_wf=256, num_aas=20, 
 						
-						# legacy
+						# legacy, these only load embedding and extraction modules. if both false, all modules loaded
 						old=False,
 						mlm=False,
 
 						# wf embedding params, everything is learnable, so not included
+						embedding_min_wl=4.0, embedding_max_wl=35.0, embedding_base_wl=20.0, embedding_learn_wl=True,
 
 						# wf encoder params
 						encoding_d_hidden_pre=1024, encoding_hidden_layers_pre=0,
 						encoding_d_hidden_post=2048, encoding_hidden_layers_post=1, 
 						encoding_encoder_layers=4, encoding_heads=8, 
+						encoding_use_bias=False, encoding_min_rbf=0.000,
 						encoding_d_hidden_attn=1024, encoding_hidden_layers_attn=0,
 
 						# wf diffusion params
@@ -50,19 +52,22 @@ class proteusAI(nn.Module):
 						diffusion_d_in_timestep=256, diffusion_d_hidden_timestep=1024, diffusion_hidden_layers_timestep=0,
 						diffusion_d_hidden_post=1024, diffusion_hidden_layers_post=0,
 						diffusion_encoder_layers=4, diffusion_heads=8, 
+						diffusion_use_bias=False, diffusion_min_rbf=0.000,
 						diffusion_d_hidden_attn=1024, diffusion_hidden_layers_attn=0,
 
 						# wf decoder params
 						decoding_d_hidden_pre=1024, decoding_hidden_layers_pre=0,
 						decoding_d_hidden_post=1024, decoding_hidden_layers_post=0,
 						decoding_encoder_layers=4, decoding_heads=8, 
+						decoding_use_bias=False, decoding_min_rbf=0.000,
 						decoding_d_hidden_attn=1024, decoding_hidden_layers_attn=0,
 						
 						# wf extraction params
 						extraction_bins=32, extraction_dk=8,  # for distogram auxiliary loss
 						extraction_d_hidden_pre=1024, extraction_hidden_layers_pre=0, 
 						extraction_d_hidden_post=1024, extraction_hidden_layers_post=0,
-						extraction_encoder_layers=4, extraction_heads=8, extraction_min_rbf=0.001,
+						extraction_encoder_layers=4, extraction_heads=8, 
+						extraction_use_bias=False, extraction_min_rbf=0.001,
 						extraction_d_hidden_attn=1024, extraction_hidden_layers_attn=0,
 
 						# dropout params
@@ -75,38 +80,48 @@ class proteusAI(nn.Module):
 		self.mlm = mlm
 
 		# have num_aa + 1 for mask token in MLM
-		self.wf_embedding = WaveFunctionEmbedding(d_model=d_wf, num_aas=num_aas + mlm, old=old)
-
-		self.wf_encoding = WaveFunctionEncoding(	d_model=d_model, d_latent=d_latent, d_proj=d_latent,
-													d_hidden_pre=encoding_d_hidden_pre, hidden_layers_pre=encoding_hidden_layers_pre, 
-													d_hidden_post=encoding_d_hidden_post, hidden_layers_post=encoding_hidden_layers_post,						
-													encoder_layers=encoding_encoder_layers, heads=encoding_heads, 
-													d_hidden_attn=encoding_d_hidden_attn, hidden_layers_attn=encoding_hidden_layers_attn,
-													dropout=dropout
-												)										
-
-		self.wf_diffusion = WaveFunctionDiffusion(	d_latent=d_latent, d_proj=d_latent,
-													alpha_bar_min=diffusion_alpha_bar_min, noise_schedule_type=diffusion_noise_schedule_type, t_max=diffusion_t_max,
-													d_in_timestep=diffusion_d_in_timestep, d_hidden_timestep=diffusion_d_hidden_timestep, hidden_layers_timestep=diffusion_hidden_layers_timestep,
-													d_hidden_post=diffusion_d_hidden_post, hidden_layers_post=diffusion_hidden_layers_post,					
-													encoder_layers=diffusion_encoder_layers, heads=diffusion_heads, 
-													d_hidden_attn=diffusion_d_hidden_attn, hidden_layers_attn=diffusion_hidden_layers_attn,
-													dropout=dropout
+		self.wf_embedding = WaveFunctionEmbedding(	d_model=d_wf, 
+													min_wl=embedding_min_wl, max_wl=embedding_max_wl, 
+													base_wl=embedding_base_wl, learn_wl=embedding_learn_wl,
+													num_aas=num_aas + mlm, old=old
 												)
 
-		self.wf_decoding = WaveFunctionDecoding(	d_model=d_model, d_latent=d_latent, d_proj=d_latent,
-													d_hidden_pre=decoding_d_hidden_pre, hidden_layers_pre=decoding_hidden_layers_pre, 
-													d_hidden_post=decoding_d_hidden_post, hidden_layers_post=decoding_hidden_layers_post,						
-													encoder_layers=decoding_encoder_layers, heads=decoding_heads, 
-													d_hidden_attn=decoding_d_hidden_attn, hidden_layers_attn=decoding_hidden_layers_attn,
-													dropout=dropout
-												)
+		if not (old or mlm):
+			
+			self.wf_encoding = WaveFunctionEncoding(	d_model=d_model, d_latent=d_latent, d_proj=d_latent,
+														d_hidden_pre=encoding_d_hidden_pre, hidden_layers_pre=encoding_hidden_layers_pre, 
+														d_hidden_post=encoding_d_hidden_post, hidden_layers_post=encoding_hidden_layers_post,						
+														encoder_layers=encoding_encoder_layers, heads=encoding_heads, 
+														use_bias=encoding_use_bias, min_rbf=encoding_min_rbf,
+														d_hidden_attn=encoding_d_hidden_attn, hidden_layers_attn=encoding_hidden_layers_attn,
+														dropout=dropout
+													)										
+
+			self.wf_diffusion = WaveFunctionDiffusion(	d_latent=d_latent, d_proj=d_latent,
+														alpha_bar_min=diffusion_alpha_bar_min, noise_schedule_type=diffusion_noise_schedule_type, t_max=diffusion_t_max,
+														d_in_timestep=diffusion_d_in_timestep, d_hidden_timestep=diffusion_d_hidden_timestep, hidden_layers_timestep=diffusion_hidden_layers_timestep,
+														d_hidden_post=diffusion_d_hidden_post, hidden_layers_post=diffusion_hidden_layers_post,					
+														encoder_layers=diffusion_encoder_layers, heads=diffusion_heads, 
+														use_bias=diffusion_use_bias, min_rbf=diffusion_min_rbf,
+														d_hidden_attn=diffusion_d_hidden_attn, hidden_layers_attn=diffusion_hidden_layers_attn,
+														dropout=dropout
+													)
+
+			self.wf_decoding = WaveFunctionDecoding(	d_model=d_model, d_latent=d_latent, d_proj=d_latent,
+														d_hidden_pre=decoding_d_hidden_pre, hidden_layers_pre=decoding_hidden_layers_pre, 
+														d_hidden_post=decoding_d_hidden_post, hidden_layers_post=decoding_hidden_layers_post,						
+														encoder_layers=decoding_encoder_layers, heads=decoding_heads, 
+														use_bias=decoding_use_bias, min_rbf=decoding_min_rbf,
+														d_hidden_attn=decoding_d_hidden_attn, hidden_layers_attn=decoding_hidden_layers_attn,
+														dropout=dropout
+													)
 
 		self.wf_extraction = WaveFunctionExtraction(	d_model=d_model, d_wf=d_wf, num_aas=num_aas,
 														bins=extraction_bins, dk=extraction_dk, # auxiliary loss of predicting distograms
 														d_hidden_pre=extraction_d_hidden_pre, hidden_layers_pre=extraction_hidden_layers_pre,
 														d_hidden_post=extraction_d_hidden_post, hidden_layers_post=extraction_hidden_layers_post,
-														encoder_layers=extraction_encoder_layers, heads=extraction_heads, min_rbf=extraction_min_rbf,
+														encoder_layers=extraction_encoder_layers, heads=extraction_heads, 
+														use_bias=extraction_use_bias, min_rbf=extraction_min_rbf,
 														d_hidden_attn=extraction_d_hidden_attn, hidden_layers_attn=extraction_hidden_layers_attn,
 														dropout=dropout,
 													)

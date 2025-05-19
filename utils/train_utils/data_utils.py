@@ -29,7 +29,7 @@ torch.serialization.add_safe_globals([defaultdict, list])
 # ----------------------------------------------------------------------------------------------------------------------
 
 class EpochBioUnits():
-	def __init__(self, batch_tokens, max_batch_size):
+	def __init__(self, batch_tokens, max_batch_size, rank=0, world_size=1):
 		
 		self.batch_tokens = batch_tokens
 		self.max_batch_size = max_batch_size 
@@ -38,6 +38,10 @@ class EpochBioUnits():
 		self.chains = [] # also store chain ids so can create the chain mask
 		self.batches = []
 	
+		self.generator = torch.Generator() # on cpu, doesnt really matter
+		self.rank = rank
+		self.world_size = world_size
+
 	def add_biounit(self, biounit, chain):
 		self.biounits.append(biounit)
 		self.chains.append(chain)
@@ -47,7 +51,7 @@ class EpochBioUnits():
 		self.chains = []
 		self.batches = []
 
-	def batch_data(self):
+	def batch_data(self, rng=0):
 
 		# get a list of the indexes
 		idxs = list(range(len(self.biounits)))
@@ -61,7 +65,7 @@ class EpochBioUnits():
 
 		# shuffle each mini-batch
 		for i in random_idx_batches:
-			random.shuffle(i)
+			random.shuffle(i) # already set the seed for random module so same for all gpus
 
 		# send these initial batches to threads to process in parallel, and split in two recursively until the batches are the target batch size
 		def batch_subset(batch_idxs):
@@ -70,7 +74,6 @@ class EpochBioUnits():
 			starts at max batch dim eg 64, and splits into 2
 			returns a list of lists, each inner list containing sample indexes and corresponding size
 			'''
-			# print(len(batch_idxs), sum(i[1] for i in batch_idxs))
 			if (sum(i[1] for i in batch_idxs) > self.batch_tokens) or (len(batch_idxs) > self.max_batch_size):
 				split = len(batch_idxs) // 2
 				return batch_subset(batch_idxs[:split]) + batch_subset(batch_idxs[split:])
@@ -91,11 +94,23 @@ class EpochBioUnits():
 				if result is not None:  # Ignore failed results
 					self.batches.extend(result)
 
-		# shuffle batches, as mini batches are ordered by number of samples (ascending) due to previous logic
-		random.shuffle(self.batches)
+		# ok, so what i need to do is to have world size clusters that are randomly shuffled
+		# this way, all gpus work on similar sized inputs, and thus are more likely to finish the fwd pass at the same time
+		# first sort so that similar sized batches are next to each other 
+		self.batches = sorted(self.batches, key=lambda x: len(x)) # sort the batches based on size of the batch, approximation for input size, as small batch size is typically large seq length and vice versa
+		self.batches = [self.batches[gpu_rank::self.world_size] for gpu_rank in range(self.world_size)] # create mini batches for each gpu. size is (in tensor format, although not a tensor bc diff dim sizes) gpus x batches x sample x 2 (2 is idx, length)
+		
+		# now need to shuffle the minibatches, but shuffle in the same way for each gpu so that similarly sized batches are still grouped together
+		# thinking of creating random idx list, and permuting each gpus batch this way
+		batch_lengths = [len(batch) for batch in self.batches]
+		shuffle_idxs = torch.randperm(min(batch_lengths), generator=self.generator.manual_seed(rng)) # use the same seed as the other gpus so that the sizes are clustered correctly
+																									# use min so that all gpus have the same number of batches, at worst, drops the last n-1 batches, where n is the number of gpus, 
+																									# equivilant to drop_last=True in torch.DistributedSampler
+																									# introduces bias to exclude batches at tail end (long seq, small samples), but hopefully not too noticeablel, especially once expand dataset for predicted structures
+		self.batches = [[batch[i] for i in shuffle_idxs] for batch in self.batches]
 
 	def __len__(self):
-		return len(self.batches)
+		return sum(len(batch) for batch in self.batches)
 
 	def __getitem__(self, idx):
 		return self.biounits[idx]
@@ -151,6 +166,7 @@ class DataHolder():
 						use_chain_mask=True,
 						max_resolution=3.5,
 						ca_only=True, # return ca only data or full backbone
+						rank=0, world_size=1
 					):
 
 
@@ -166,6 +182,9 @@ class DataHolder():
 		# whether to mask non-cluter-representative chains in the biounit
 		self.use_chain_mask = use_chain_mask
 		self.ca_only = ca_only
+
+		self.rank = rank
+		self.world_size = world_size
 
 		# load the info about clusters
 		pdb_info_path = data_path / Path("list.csv")
@@ -216,14 +235,14 @@ class DataHolder():
 		loads the Data Objects, allowing for the objects to be retrieved afterwards
 		'''
 		if data_type == "train":
-			self.train_data = Data(self.data_path, self.train_pdbs, self.num_train, self.batch_tokens, self.max_batch_size, self.min_seq_size, self.max_seq_size, self.use_chain_mask, self.ca_only)
+			self.train_data = Data(self.data_path, self.train_pdbs, self.num_train, self.batch_tokens, self.max_batch_size, self.min_seq_size, self.max_seq_size, self.use_chain_mask, self.ca_only, self.rank, self.world_size)
 		elif data_type == "val":
-			self.val_data = Data(self.data_path, self.val_pdbs, self.num_val, self.batch_tokens, self.max_batch_size, self.min_seq_size, self.max_seq_size, self.use_chain_mask, self.ca_only)
+			self.val_data = Data(self.data_path, self.val_pdbs, self.num_val, self.batch_tokens, self.max_batch_size, self.min_seq_size, self.max_seq_size, self.use_chain_mask, self.ca_only, self.rank, self.world_size)
 		elif data_type == "test":	
-			self.test_data = Data(self.data_path, self.test_pdbs, self.num_test, self.batch_tokens, self.max_batch_size, self.min_seq_size, self.max_seq_size, self.use_chain_mask, self.ca_only)
+			self.test_data = Data(self.data_path, self.test_pdbs, self.num_test, self.batch_tokens, self.max_batch_size, self.min_seq_size, self.max_seq_size, self.use_chain_mask, self.ca_only, self.rank, self.world_size)
 
 class Data():
-	def __init__(self, data_path, clusters_df, num_samples=None, batch_tokens=16384, max_batch_size=128, min_seq_size=512, max_seq_size=16384, use_chain_mask=True, ca_only=True, device="cpu"):
+	def __init__(self, data_path, clusters_df, num_samples=None, batch_tokens=16384, max_batch_size=128, min_seq_size=512, max_seq_size=16384, use_chain_mask=True, ca_only=True, rank=0, world_size=1, device="cpu"):
 
 		# path to pdbs
 		self.pdb_path = data_path / Path("pdb")
@@ -236,6 +255,9 @@ class Data():
 		self.use_chain_mask = use_chain_mask
 		self.ca_only = ca_only
 
+		self.rank = rank
+		self.world_size = world_size
+
 		# should be cpu
 		self.device = device
 
@@ -244,10 +266,11 @@ class Data():
 		self.biounit_cache = BioUnitCache()
 
 		# data for current epoch
-		self.epoch_biounits = EpochBioUnits(batch_tokens, max_batch_size)
+		self.epoch_biounits = EpochBioUnits(batch_tokens, max_batch_size, rank, world_size)
 
 		# randomly sample the clusters
-		self.rotate_data()
+		self.rng = 0 # start with hardcoded rng, will increment
+		self.rotate_data() # will have the rng seed be updated each 
 
 	def rotate_data(self):
 
@@ -255,10 +278,13 @@ class Data():
 		self.epoch_biounits.clear_biounits()
 
 		# get random cluster representative chains
-		sampled_pdbs = self.clusters_df.groupby("CLUSTER").sample(n=1)
+		sampled_pdbs = self.clusters_df.groupby("CLUSTER").sample(n=1, random_state=self.rng)
 
 		# init progress bar
 		load_pbar = tqdm(total=len(sampled_pdbs), desc="data loading progress", unit="step")
+
+		# set random module seed
+		random.seed(a=self.rng)
 
 		# define the function for loading pdbs
 		def process_pdb(pdb):
@@ -288,7 +314,10 @@ class Data():
 
 				load_pbar.update(1)
 
-		self.epoch_biounits.batch_data()
+		self.epoch_biounits.batch_data(self.rng)
+
+		# update rng
+		self.rng += 1
 
 	def add_data(self, biounit_id):
 
@@ -331,7 +360,7 @@ class Data():
 		return pad_and_batched
 
 	def __iter__(self):
-		for batch in self.epoch_biounits.batches:
+		for batch in self.epoch_biounits.batches[self.rank]: # get the batches for this gpu
 			
 			
 			# seq size are powers of two, unless it is between 2^n-1 and 2^(n-1 + 1/2)

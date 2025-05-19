@@ -19,16 +19,18 @@ class Epoch():
 		'''
 
 		# make sure in training mode
-		self.train(self.training_run_parent.model)
+		self.train(self.training_run_parent.model.module)
 
 		# setup the epoch
-		self.training_run_parent.output.log_epoch(self.epoch, self.training_run_parent.scheduler.get_last_lr()[0])
+		if self.training_run_parent.rank==0:
+			self.training_run_parent.output.log_epoch(self.epoch, self.training_run_parent.scheduler.get_last_lr()[0])
 
 		# clear temp losses
 		self.training_run_parent.losses.clear_tmp_losses()
 
 		# init epoch pbar
-		epoch_pbar = tqdm(total=len(self.training_run_parent.data.train_data), desc="epoch_progress", unit="step")
+		if self.training_run_parent.rank==0:
+			epoch_pbar = tqdm(total=len(self.training_run_parent.data.train_data), desc="epoch_progress", unit="step")
 
 		# loop through batches
 		for b_idx, (coords, labels, chain_idxs, chain_mask, key_padding_mask) in enumerate(self.training_run_parent.data.train_data):
@@ -40,7 +42,8 @@ class Epoch():
 			batch.batch_learn()
 
 			# update pbar
-			epoch_pbar.update(1)
+			if self.training_run_parent.rank==0:
+				epoch_pbar.update(self.training_run_parent.world_size)
 		
 		# log epoch losses and save avg
 		self.training_run_parent.output.log_epoch_losses(self.training_run_parent.losses, self.training_run_parent.training_parameters.train_type)
@@ -50,7 +53,8 @@ class Epoch():
 
 		# switch representative cluster samples
 		if self.epoch < (self.epochs - 1):
-			self.training_run_parent.output.log.info("loading next epoch's training data...")
+			if self.training_run_parent.rank==0:
+				self.training_run_parent.output.log.info("loading next epoch's training data...")
 			self.training_run_parent.data.train_data.rotate_data()
 			self.training_run_parent.data.val_data.rotate_data()
 
@@ -58,10 +62,10 @@ class Epoch():
 
 		if self.training_run_parent.training_parameters.train_type in ["extraction", "old", "mlm"]:
 			model.wf_embedding.train()
-			# model.wf_embedding.eval()# for quick testing on pretrained
-			model.wf_encoding.eval()
-			model.wf_diffusion.eval()
-			model.wf_decoding.eval()
+			if self.training_run_parent.training_parameters.train_type == "extraction":
+				model.wf_encoding.eval()
+				model.wf_diffusion.eval()
+				model.wf_decoding.eval()
 			model.wf_extraction.train()
 		if self.training_run_parent.training_parameters.train_type == "vae":
 			model.wf_embedding.eval()
@@ -103,6 +107,9 @@ class Batch():
 		self.temp = temp
 		self.cycles = cycles
 
+		self.world_size = epoch.training_run_parent.world_size
+		self.rank = epoch.training_run_parent.rank
+
 	def move_to(self, device):
 
 		self.aas = self.aas.to(device)
@@ -110,6 +117,7 @@ class Batch():
 		self.coords = self.coords.to(device)
 		self.chain_mask = self.chain_mask.to(device)
 		self.key_padding_mask = self.key_padding_mask.to(device)
+
 
 	def batch_learn(self):
 		'''
@@ -152,8 +160,8 @@ class Batch():
 		# whether to take a step
 		learn_step = (self.b_idx + 1) % accumulation_steps == 0
 
-		# get last loss
-		loss = self.epoch_parent.training_run_parent.losses.tmp.get_last_loss() # no scaling by accumulation steps, as already handled by grad clipping and scaling would introduce batch size biases
+		# get last loss (ddp avgs the gradients, i want the sum, so mult by world size)
+		loss = self.epoch_parent.training_run_parent.losses.tmp.get_last_loss() * self.epoch_parent.training_run_parent.world_size # no scaling by accumulation steps, as already handled by grad clipping and scaling would introduce batch size biases
 
 		# perform backward pass to accum grads
 		loss.backward()
@@ -190,7 +198,7 @@ class Batch():
 		'''
 
 		# get alpha carbon and beta carbon coords, done here rather than in init so can add noise to coords if specified
-		self.coords_alpha, self.coords_beta = self.epoch_parent.training_run_parent.model.wf_embedding.get_CaCb_coords(self.coords, self.chain_idxs)
+		self.coords_alpha, self.coords_beta = self.epoch_parent.training_run_parent.model.module.wf_embedding.get_CaCb_coords(self.coords, self.chain_idxs)
 
 		# run model depending on training type
 		match self.epoch_parent.training_run_parent.training_parameters.train_type:

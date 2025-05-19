@@ -13,6 +13,7 @@ class WaveFunctionEncoding(nn.Module):
 						d_hidden_pre=1024, hidden_layers_pre=0,
 						d_hidden_post=2048, hidden_layers_post=1,
 						encoder_layers=4, heads=8,
+						use_bias=False, min_rbf=0.000,
 						d_hidden_attn=1024, hidden_layers_attn=0,
 						dropout=0.10
 				):
@@ -27,6 +28,7 @@ class WaveFunctionEncoding(nn.Module):
 
 		# self attention on wf
 		self.encoders = nn.ModuleList([ 	Encoder(d_model=d_proj, d_other=d_proj, heads=heads, 
+													min_rbf=min_rbf, bias=use_bias,
 													d_hidden=d_hidden_attn, hidden_layers=hidden_layers_attn, 
 													dropout=dropout)
 											for _ in range(encoder_layers)

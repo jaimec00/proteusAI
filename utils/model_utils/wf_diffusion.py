@@ -20,6 +20,7 @@ class WaveFunctionDiffusion(nn.Module):
 						d_in_timestep=256, d_hidden_timestep=1024, hidden_layers_timestep=1,
 						d_hidden_post=1024, hidden_layers_post=0,
 						encoder_layers=4, heads=8,
+						use_bias=False, min_rbf=0.000,
 						d_hidden_attn=2048, hidden_layers_attn=0,
 						dropout=0.10
 				):
@@ -35,7 +36,8 @@ class WaveFunctionDiffusion(nn.Module):
 
 		self.encoders = nn.ModuleList([ DiTEncoder(	d_model=d_proj, heads=heads, 
 													d_hidden=d_hidden_attn, hidden_layers=hidden_layers_attn, 
-													d_in_t=d_in_timestep, d_hidden_t=d_hidden_timestep, hidden_layers_t=hidden_layers_timestep,										 
+													d_in_t=d_in_timestep, d_hidden_t=d_hidden_timestep, hidden_layers_t=hidden_layers_timestep,		
+													min_rbf=min_rbf, bias=use_bias,
 													dropout=dropout,
 												)
 										for _ in range(encoder_layers)

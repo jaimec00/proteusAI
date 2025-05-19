@@ -44,13 +44,16 @@ class DiTEncoder(nn.Module):
 	'''
 	def __init__(self, 	d_model=512, heads=8, 
 						d_hidden=2048, hidden_layers=0, dropout=0.0,
+						bias=False, min_rbf=0.000,
 						d_in_t=512, d_hidden_t=2048, hidden_layers_t=512
 					):
 		super(DiTEncoder, self).__init__()
 
 		# Self-attention layers
-		# self.attn = Attention(d_model=d_model, d_other=d_model, heads=heads)
-		self.attn = GeoAttention(d_model=d_model, heads=heads)
+		if bias:
+			self.attn = GeoAttention(d_model=d_model, heads=heads, min_rbf=min_rbf)
+		else:
+			self.attn = Attention(d_model=d_model, d_other=d_model, heads=heads)
 
 		# adaptive layernorm
 		self.static_norm = StaticLayerNorm(d_model)

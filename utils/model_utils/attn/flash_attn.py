@@ -18,6 +18,30 @@ import triton.language as tl
 import os
 import random
 
+# hlper functions for dropout
+@triton.jit
+def hash5(a, b, c, d, seed):
+	# PCG-XSH-RR based hash algorithm used for dropout
+    h = seed
+    h ^= (a * 0x85ebca6b) + 0x9e3779b9
+    h ^= (b * 0xc2b2ae35) + 0x165667b1
+    h ^= (c * 0x27d4eb2f) + 0xd6e8feb8
+    h ^= (d * 0x85ebca6b) + 0x1b873593
+    h = (h ^ (h >> 16)) * 0x85ebca6b
+    h ^= (h >> 13)
+    h = (h ^ (h >> 16)) * 0xc2b2ae35
+    h ^= (h >> 16)
+    return h
+
+@triton.jit
+def dropout(int Z, H, I, J, seed, dropout_prob):
+	# uses light hash algorithm for dropout to avoid cuda built in RNG
+	# reproducible, but not necessary, since bwd tensor is precomputed in fwd
+    h = hash5(Z, H, I, J, seed)
+    normalized = h / (2**32) # Convert to [0,1]
+    return normalized >= dropout_prob
+
+
 # define configurations for autotuning
 configs = [	triton.Config({"BLOCK_I": i, "BLOCK_J": j}, num_warps=w)
 			for i in [16, 32, 64]
@@ -60,6 +84,8 @@ def _attn_fwd(
 	tot_Nq: tl.constexpr, tot_Nkv: tl.constexpr, tot_Z: tl.constexpr, 
 	nheads: tl.constexpr, d_k: tl.constexpr, min_d_k: tl.constexpr,
 	softmax_scale: tl.constexpr, 
+
+	rng_ptr, dropout_p: tl.constexpr,
 
 	BLOCK_I: tl.constexpr, # block sizes
 	BLOCK_J: tl.constexpr,
@@ -124,6 +150,10 @@ def _attn_fwd(
 	li = tl.zeros((BLOCK_I, ), dtype=tl.float32)
 	inf = float("inf") # convenience
 	mi = (tl.zeros_like(li) - inf)
+	rng = tl.load(rng_ptr)
+
+	# compute offsets based on batch, head, i, and j. j is updated in the loop
+	offsets = 
 
 	# loop through columns of K and V
 	for j in tl.range(0, triton.cdiv(tot_Nkv, BLOCK_J), 1, loop_unroll_factor=1): # no loop unrolling
@@ -133,6 +163,8 @@ def _attn_fwd(
 
 		# set masked positions to -inf, include out of range dists in mask
 		attn_mask = tl.load(mask_ptr, boundary_check=(0, ), padding_option="zero").to(tl.int1)[None, :] # N x N
+
+		# update attn mask based on rng
 
 		# scale attention logits by Rij and mask invalid pairs
 		Sij = tl.where(attn_mask, Sij, -inf) # N x N (fp32)
@@ -210,6 +242,8 @@ def _attn_bwd(
 	
 	tot_Z: tl.constexpr, tot_Nq: tl.constexpr, tot_Nkv: tl.constexpr, nheads: tl.constexpr, 
 	d_k: tl.constexpr, min_d_k: tl.constexpr, softmax_scale: tl.constexpr,
+
+	rng_ptr, dropout_p: tl.constexpr,
 
 	BLOCK_I: tl.constexpr, BLOCK_J: tl.constexpr
 ):
@@ -374,15 +408,15 @@ def _attn_bwd(
 	tl.store(dKj_block_ptr, dKj, boundary_check=(0,1))
 	tl.store(dVj_block_ptr, dVj, boundary_check=(0,1))
 
-def flash_attn(Q, K, V, mask=None):
+def flash_attn(Q, K, V, mask=None, dropout_p=0.0):
 	'''wrapper for attn so can call it with kwargs'''
 
-	return _flash_attn.apply(Q, K, V, mask)
+	return _flash_attn.apply(Q, K, V, mask, dropout_p)
 
 class _flash_attn(torch.autograd.Function):
 
 	@staticmethod
-	def forward(ctx, Q, K, V, mask):
+	def forward(ctx, Q, K, V, mask, dropout_p):
 		
 		# checks
 		assert K.shape == V.shape, f"K, and V projection shapes must match, but got {K.shape=}, {V.shape=}"
@@ -408,6 +442,8 @@ class _flash_attn(torch.autograd.Function):
 								1
 							)
 
+		rng = torch.randint(0, 2**32-1, (1, )) # as a tensor to avoid recompilation
+
 		# run the kernel
 		_attn_fwd[grid](  	out, out.stride(0), out.stride(1), out.stride(2), out.stride(3), # batch x nheads x Nkv x d_k
 							Q, Q.stride(0), Q.stride(1), Q.stride(2), Q.stride(3), # batch x nhead x Nq x d_k
@@ -416,10 +452,11 @@ class _flash_attn(torch.autograd.Function):
 							L, L.stride(0), L.stride(1), L.stride(2), # batch x nhead x Nq
 							mask, mask.stride(0), mask.stride(1),
 							Nq, Nkv, batch, nheads, d_k, max(d_k, 16), softmax_scale,
+							rng, dropout_p
 						)
 
 		# for backwards pass
-		ctx.save_for_backward(Q, K, V, out, L, mask)
+		ctx.save_for_backward(Q, K, V, out, L, mask, rng)
 		ctx.softmax_scale = softmax_scale
 
 		return out
@@ -428,7 +465,7 @@ class _flash_attn(torch.autograd.Function):
 	def backward(ctx, dO):
 
 		# load saved tensors (should all be float32, expect masks). also should all be contiguous from fwd
-		Q, K, V, O, L, mask = ctx.saved_tensors
+		Q, K, V, O, L, mask, rng = ctx.saved_tensors
 
 		# compute D for dSR calculation
 		D = torch.sum(O*dO, dim=3).to(torch.float16) # Z x H x N x D -> Z x H x N
@@ -464,6 +501,7 @@ class _flash_attn(torch.autograd.Function):
 							L, L.stride(0), L.stride(1), L.stride(2),
 							mask, mask.stride(0), mask.stride(1),
 							batch, Nq, Nkv, nheads, d_k, max(d_k, 16), ctx.softmax_scale,
+							rng, dropout_p
 						 )
 
 		# return the gradients

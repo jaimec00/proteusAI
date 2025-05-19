@@ -47,13 +47,13 @@ class ExtractionLosses():
 		self.matches = [] # number of matches from greedy selection of aa, just for logging
 
 		# to scale losses for logging, does not affect backprop
-		self.valid_toks = torch.tensor([0]) # valid tokens to compute avg per token per cha
+		self.valid_toks = 0 # valid tokens to compute avg per token per cha
 
 
 	def get_avg(self):
 		'''this method is just for logging purposes, does not rescale loss used in bwd pass'''
 
-		valid_toks = self.valid_toks.item()
+		valid_toks = self.valid_toks
 		avg_cel = sum(cel.item() for cel in self.cel if cel) / valid_toks
 		avg_dist_cel = sum(dist_cel.item() for dist_cel in self.dist_cel if dist_cel) / valid_toks
 		avg_loss = sum(loss.item() for loss in self.full_loss if loss) / valid_toks
