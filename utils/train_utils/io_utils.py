@@ -190,13 +190,13 @@ class Output():
 		if self.rank==0:
 			self.log.info(log)
 
-	def log_epoch(self, epoch, current_lr):
+	def log_epoch(self, epoch, step, current_lr):
 
 		if self.rank==0:
 			self.log.info(textwrap.dedent(f'''
 			
 				{'-'*80}
-				epoch {epoch}: 
+				epoch {epoch}, step {step}: 
 				{'-'*80}
 				
 				current learning rate: {current_lr}

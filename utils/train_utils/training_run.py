@@ -86,6 +86,8 @@ class TrainingRun():
 
 		self.hyper_parameters = args.hyper_parameters
 		self.training_parameters = args.training_parameters
+		self.step = 0 # log the step number
+		self.toks_processed = 0 # log the number of valid tokens used
 		
 		self.data = DataHolder(	(args.data.single_chain_data_path if args.training_parameters.single_chain else args.data.multi_chain_data_path), # single chain or multichain
 								args.data.num_train, args.data.num_val, args.data.num_test, 
@@ -140,7 +142,8 @@ class TrainingRun():
 									old=self.training_parameters.train_type=="old", mlm=self.training_parameters.train_type=="mlm",
 
 								# wf embedding params
-									embedding_min_wl=self.hyper_parameters.embedding.min_wl, embedding_max_wl=self.hyper_parameters.embedding.max_wl, embedding_base_wl=self.hyper_parameters.embedding.base_wl, embedding_learn_wl=self.hyper_parameters.embedding.learn_wl,
+									embedding_min_wl=self.hyper_parameters.embedding.min_wl, embedding_max_wl=self.hyper_parameters.embedding.max_wl, embedding_base_wl=self.hyper_parameters.embedding.base_wl, 
+									embedding_learn_wl=self.hyper_parameters.embedding.learn_wl, embedding_learn_aa=self.hyper_parameters.embedding.learn_aa,
 
 								# wf encoding params
 									encoding_d_hidden_pre=self.hyper_parameters.encoding.pre_process.d_hidden, encoding_hidden_layers_pre=self.hyper_parameters.encoding.pre_process.hidden_layers, # wf pre_process
@@ -195,6 +198,7 @@ class TrainingRun():
 
 								# dropout
 								dropout=self.training_parameters.regularization.dropout,
+								attn_dropout=self.training_parameters.regularization.attn_dropout
 							)
 
 		self.model.to(self.gpu)

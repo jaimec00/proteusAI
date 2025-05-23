@@ -105,3 +105,4 @@ class ModelOutputs():
 
 	def get_losses(self):
 		self.output.batch_parent.epoch_parent.training_run_parent.losses.tmp.add_losses(*self.output.compute_losses(), valid_toks=self.output.valid_toks)
+		self.output.batch_parent.epoch_parent.training_run_parent.toks_processed += self.output.valid_toks

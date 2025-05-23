@@ -8,15 +8,15 @@ class Encoder(nn.Module):
 	'''
 	'''
 	def __init__(self, 	d_model=1024, d_other=256, heads=8, min_rbf=0.001,
-						d_hidden=2048, hidden_layers=0, dropout=0.0, bias=True, # make bias config later
+						d_hidden=2048, hidden_layers=0, dropout=0.10, attn_dropout=0.10, bias=True, # make bias config later
 					):
 		super(Encoder, self).__init__()
 
 		# cross-attention layers
 		if bias:
-			self.attn = GeoAttention(d_model=d_model, heads=heads, min_rbf=min_rbf)
+			self.attn = GeoAttention(d_model=d_model, heads=heads, min_rbf=min_rbf, dropout=attn_dropout)
 		else:
-			self.attn = Attention(d_model=d_model, d_other=d_other, heads=heads)
+			self.attn = Attention(d_model=d_model, d_other=d_other, heads=heads, dropout=attn_dropout)
 
 		self.attn_norm = nn.LayerNorm(d_model)
 	
@@ -99,6 +99,7 @@ class GeoAttention(nn.Module):
 						heads=8, 
 						min_spread=2.0,
 						min_rbf=0.001, max_rbf=1.00, 
+						dropout=0.10 # not used
 					):
 		super(GeoAttention, self).__init__()
 
@@ -180,11 +181,14 @@ class Attention(nn.Module):
 	works for self or cross attention
 	'''
 
-	def __init__(self, d_model=1024, d_other=256, heads=8):
+	def __init__(self, d_model=1024, d_other=256, heads=8, dropout=0.10):
 		super(Attention, self).__init__()
 
 		if d_model % heads != 0: raise ValueError(f"number of dimensions ({d_model}) must be divisible by number of attention heads ({heads})")
 		d_k = d_model // heads # compute dk based on dmodel, dother just has more/less projections to match the numebr of heads
+
+		# attention dropout
+		self.dropout = dropout
 
 		# QKV projection weight and bias matrices
 
@@ -217,7 +221,8 @@ class Attention(nn.Module):
 		V = torch.matmul(v.unsqueeze(1), self.v_proj.unsqueeze(0)) + self.v_bias.unsqueeze(0).unsqueeze(2) # Z x 1 x N x d_other @ 1 x H x d_other x d_k --> Z x H x N x d_k
 
 		# perform attention
-		out = flash_attn(Q, K, V, mask=mask)
+		dropout = self.dropout if self.training else 0.0
+		out = flash_attn(Q, K, V, mask=mask, dropout_p=dropout)
 
 		# cat heads and project through final linear layer
 		out = out.permute(0,2,3,1) # Z x N x d_k x heads

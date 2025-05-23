@@ -37,7 +37,7 @@ class proteusAI(nn.Module):
 						mlm=False,
 
 						# wf embedding params, everything is learnable, so not included
-						embedding_min_wl=4.0, embedding_max_wl=35.0, embedding_base_wl=20.0, embedding_learn_wl=True,
+						embedding_min_wl=4.0, embedding_max_wl=35.0, embedding_base_wl=20.0, embedding_learn_wl=True, embedding_learn_aa=True,
 
 						# wf encoder params
 						encoding_d_hidden_pre=1024, encoding_hidden_layers_pre=0,
@@ -71,7 +71,8 @@ class proteusAI(nn.Module):
 						extraction_d_hidden_attn=1024, extraction_hidden_layers_attn=0,
 
 						# dropout params
-						dropout=0.10
+						dropout=0.10,
+						attn_dropout=0.10
 				):
 
 		super(proteusAI, self).__init__()
@@ -82,7 +83,7 @@ class proteusAI(nn.Module):
 		# have num_aa + 1 for mask token in MLM
 		self.wf_embedding = WaveFunctionEmbedding(	d_model=d_wf, 
 													min_wl=embedding_min_wl, max_wl=embedding_max_wl, 
-													base_wl=embedding_base_wl, learn_wl=embedding_learn_wl,
+													base_wl=embedding_base_wl, learn_wl=embedding_learn_wl, learn_aa=embedding_learn_aa,
 													num_aas=num_aas + mlm, old=old
 												)
 
@@ -123,7 +124,7 @@ class proteusAI(nn.Module):
 														encoder_layers=extraction_encoder_layers, heads=extraction_heads, 
 														use_bias=extraction_use_bias, min_rbf=extraction_min_rbf,
 														d_hidden_attn=extraction_d_hidden_attn, hidden_layers_attn=extraction_hidden_layers_attn,
-														dropout=dropout,
+														dropout=dropout, attn_dropout=attn_dropout
 													)
 
 	def forward(self, 	coords_alpha=None, coords_beta=None, aas=None, wf=None, wf_no_aa=None, latent=None, t=None, chain_idxs=None, key_padding_mask=None, 

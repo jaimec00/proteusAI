@@ -22,22 +22,22 @@ class WaveFunctionExtraction(nn.Module):
 						encoder_layers=4, heads=8, 
 						use_bias=False, min_rbf=0.001,
 						d_hidden_attn=2048, hidden_layers_attn=0,
-						dropout=0.10
+						dropout=0.10, attn_dropout=0.10
 				):
 
 		super(WaveFunctionExtraction, self).__init__()
 
 		self.dropout = nn.Dropout(dropout)
 		# self.proj_pre = nn.Linear(d_wf, d_model)
-		# self.mlp_pre = MLP(d_in=d_model, d_out=d_model, d_hidden=d_hidden_pre, hidden_layers=hidden_layers_pre, dropout=dropout)
-		# self.norm_pre = nn.LayerNorm(d_model)
-		# self.mlp_post = MLP(d_in=d_model, d_out=d_model, d_hidden=d_hidden_post, hidden_layers=hidden_layers_post, dropout=dropout)
-		# self.norm_post = nn.LayerNorm(d_model)
+		self.mlp_pre = MLP(d_in=d_model, d_out=d_model, d_hidden=d_hidden_pre, hidden_layers=hidden_layers_pre, dropout=dropout)
+		self.norm_pre = nn.LayerNorm(d_model)
+		self.mlp_post = MLP(d_in=d_model, d_out=d_model, d_hidden=d_hidden_post, hidden_layers=hidden_layers_post, dropout=dropout)
+		self.norm_post = nn.LayerNorm(d_model)
 
 		self.encoders = nn.ModuleList([ Encoder(	d_model=d_model, d_other=d_model, heads=heads, 
 													min_rbf=min_rbf, bias=use_bias,
 													d_hidden=d_hidden_attn, hidden_layers=hidden_layers_attn, 
-													dropout=dropout
+													dropout=dropout, attn_dropout=attn_dropout
 												) 
 										for _ in range(encoder_layers)
 									])
@@ -53,14 +53,14 @@ class WaveFunctionExtraction(nn.Module):
 		# wf = self.proj_pre(wf)
 
 		# non linear tranformation for more intricate features
-		# wf = self.norm_pre(wf + self.mlp_pre(wf))
+		wf = self.norm_pre(wf + self.mlp_pre(wf))
 
 		# geometric/vanilla attn encoders
 		for encoder in self.encoders:
 			wf = encoder(wf, wf, wf, coords, mask=key_padding_mask)
 
 		# # post process #SKIPPING POST MLP, IF OLD DOESNT WORK, add this back
-		# wf = self.norm_post(wf + self.dropout(self.mlp_post(wf)))
+		wf = self.norm_post(wf + self.dropout(self.mlp_post(wf)))
 
 		# map to probability logits
 		aa_logits = self.out_proj(wf)

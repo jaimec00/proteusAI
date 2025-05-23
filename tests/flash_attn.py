@@ -3,7 +3,7 @@ import math
 import torch
 import torch.nn.functional as F
 from utils.test_utils import calculate_error, profile_func, profile_bwd
-from utils.model_utils.attn.cross_attn import flash_attn
+from utils.model_utils.attn.flash_attn import flash_attn
 import os
 
 def main():
@@ -13,7 +13,7 @@ def main():
 	device = torch.device("cuda")
 
 	# prepare inputs
-	batch, nheads, N, d_model = 1, 4, 4096, 512
+	batch, nheads, N, d_model = 1, 8, 4096, 512
 	assert d_model%2==0 and d_model%nheads==0
 	d_k = d_model // nheads
 
@@ -25,23 +25,24 @@ def main():
 	params = [Q, K, V, mask]
 
 	# prepare for recording mem and time
-	torch.cuda.synchronize()  
+	torch.cuda.synchronize()
 	start_event = torch.cuda.Event(enable_timing=True)
 	end_event = torch.cuda.Event(enable_timing=True)
 	atol, rtol = 1e-2, 0
 
 	# autotune triton configs before profiling, allows optimal configs and triton to use cache rather than recompiling
-	# print("autotuning:\n")
+	# need to set ATTN_AUTOTUNE env var to "1" before doing so
+	print("autotuning:\n")
 
-	# # log autotuning
-	# os.environ["TRITON_PRINT_AUTOTUNING"] = "1"
+	# log autotuning
+	os.environ["TRITON_PRINT_AUTOTUNING"] = "1"
 
-	# autotune(flash_attn, params)
+	autotune(flash_attn, params)
 
-	# # zero grads
-	# Q.grad.zero_()
-	# K.grad.zero_()
-	# V.grad.zero_()
+	# zero grads
+	Q.grad.zero_()
+	K.grad.zero_()
+	V.grad.zero_()
 
 	print("forward pass:\n")
 

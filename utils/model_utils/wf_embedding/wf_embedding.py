@@ -22,7 +22,7 @@ from utils.model_utils.base_modules.base_modules import StaticLayerNorm
 
 class WaveFunctionEmbedding(nn.Module):
 
-	def __init__(self, d_model=512, min_wl=4.0, max_wl=35.0, base_wl=20.0, learn_wl=False, num_aas=20, old=False):
+	def __init__(self, d_model=512, min_wl=4.0, max_wl=35.0, base_wl=20.0, learn_wl=False, learn_aa=False, num_aas=20, old=False):
 
 		super(WaveFunctionEmbedding, self).__init__()
 
@@ -34,9 +34,9 @@ class WaveFunctionEmbedding(nn.Module):
 		# initialize aa magnitudes (overwritten by proteusAI if specified)
 		self.old = old # whether running old model w/ no aa info
 		if old: # learn scaling factors independant of aa
-			self.aa_magnitudes = nn.Parameter(torch.ones(d_model//2))
+			self.aa_magnitudes = nn.Parameter(torch.ones(d_model//2), requires_grad=learn_aa)
 		else: # aa specific
-			self.aa_magnitudes = nn.Parameter(torch.ones(d_model//2, num_aas))
+			self.aa_magnitudes = nn.Parameter(torch.ones(d_model//2, num_aas), requires_grad=learn_aa)
 
 		# additional layers
 		self.norm = StaticLayerNorm(d_model)

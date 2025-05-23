@@ -34,19 +34,19 @@ def hash5(a, b, c, d, seed):
     return h
 
 @triton.jit
-def dropout(int Z, H, I, J, seed, dropout_prob):
+def dropout(Z, H, I, J, seed, dropout_prob):
 	# uses light hash algorithm for dropout to avoid cuda built in RNG
 	# reproducible, but not necessary, since bwd tensor is precomputed in fwd
     h = hash5(Z, H, I, J, seed)
-    normalized = h / (2**32) # Convert to [0,1]
-    return normalized >= dropout_prob
+    normalized = h / (0xffffffff) # Convert to [0,1]
+    return normalized < dropout_prob # is dropped
 
 
 # define configurations for autotuning
 configs = [	triton.Config({"BLOCK_I": i, "BLOCK_J": j}, num_warps=w)
 			for i in [16, 32, 64]
 			for j in [16, 32, 64]
-			for w in [1, 2, 4, 8]
+			for w in [4, 8, 16]
 		]
 
 # filter out configs that are too big
@@ -57,7 +57,7 @@ def keep_fwd(conf):
 	if autotune == "1":
 		return (BLOCK_I * BLOCK_J) <= 2048
 	else:
-		return ((BLOCK_I == 32) and (BLOCK_J == 32) and (conf.num_warps==4))
+		return ((BLOCK_I == 64) and (BLOCK_J == 16) and (conf.num_warps==4))
 
 def keep_bwd(conf):
 	autotune = os.environ.get("ATTN_AUTOTUNE")
@@ -66,7 +66,7 @@ def keep_bwd(conf):
 	if autotune == "1":
 		return (BLOCK_I * BLOCK_J) <= 2048
 	else:
-		return ((BLOCK_I == 32) and (BLOCK_J == 32) and (conf.num_warps==4))
+		return ((BLOCK_I == 32) and (BLOCK_J == 64) and (conf.num_warps==8))
 
 
 @triton.autotune(list(filter(keep_fwd, configs)),
@@ -150,10 +150,19 @@ def _attn_fwd(
 	li = tl.zeros((BLOCK_I, ), dtype=tl.float32)
 	inf = float("inf") # convenience
 	mi = (tl.zeros_like(li) - inf)
-	rng = tl.load(rng_ptr)
 
-	# compute offsets based on batch, head, i, and j. j is updated in the loop
-	offsets = 
+	# create initial offsets for hashing
+	# need these to be uint32 for hashing, but i dont think triton has this available for scalars
+	# might need to create IxJ tensors for this, worried itll blow up the register, but not sure about any alternatives
+	# or wait, since Z, H, and RNG are a single element, can have a single element tensor of shape 1x1, so it would be broadcast 
+	# to IXJ when interacting with the I and J tensors
+	# rng = tl.full((1,1), tl.load(rng_ptr), dtype=tl.uint32)
+	# offs_I_for_hash = (tl.arange(0, BLOCK_I) + offs_I).to(tl.uint32)[:, None]
+	# offs_J_for_hash = tl.arange(0, BLOCK_J).to(tl.uint32)[None, :] # incremented in loop
+	# offs_Z_for_hash = tl.full((1,1), offs_Z, dtype=tl.uint32)
+	# offs_H_for_hash = tl.full((1,1), offs_H, dtype=tl.uint32)
+	# BLOCK_J_uint32 = tl.full((1,1), BLOCK_J, dtype=tl.uint32) # for incrementing J
+
 
 	# loop through columns of K and V
 	for j in tl.range(0, triton.cdiv(tot_Nkv, BLOCK_J), 1, loop_unroll_factor=1): # no loop unrolling
@@ -162,9 +171,7 @@ def _attn_fwd(
 		Sij = tl.dot(Qi, tl.load(KjT_block_ptr, boundary_check=(0,1), padding_option="zero")) * softmax_scale # N x N
 
 		# set masked positions to -inf, include out of range dists in mask
-		attn_mask = tl.load(mask_ptr, boundary_check=(0, ), padding_option="zero").to(tl.int1)[None, :] # N x N
-
-		# update attn mask based on rng
+		attn_mask = tl.load(mask_ptr, boundary_check=(0, ), padding_option="zero").to(tl.int1)[None, :] # N x N		
 
 		# scale attention logits by Rij and mask invalid pairs
 		Sij = tl.where(attn_mask, Sij, -inf) # N x N (fp32)
@@ -174,6 +181,10 @@ def _attn_fwd(
 
 		# compute softmax(SRij - mij) = Pij
 		Pij = tl.exp(tl.where(mij[:, None]==-inf, -inf, Sij - mij[:, None])) # N x N (fp32)
+
+		# apply dropout
+		# is_dropped = dropout(offs_Z_for_hash, offs_H_for_hash, offs_I_for_hash, offs_J_for_hash, rng, dropout_p)
+		# Pij = tl.where(is_dropped, 0, Pij / (1-dropout_p))
 
 		# compute alpha
 		alpha = tl.exp(tl.where((mi==-inf) | (mij==-inf), tl.where((mi==-inf) & (mij==-inf), 0, -inf), mi - mij)) # (fp32)
@@ -191,6 +202,7 @@ def _attn_fwd(
 		KjT_block_ptr = tl.advance(KjT_block_ptr, (0, BLOCK_J))
 		Vj_block_ptr = tl.advance(Vj_block_ptr, (BLOCK_J, 0))
 		mask_ptr = tl.advance(mask_ptr, (BLOCK_J, ))
+		# offs_J_for_hash += BLOCK_J_uint32
 
 	# epilogue
 
@@ -337,6 +349,14 @@ def _attn_bwd(
 	KjT = tl.load(KjT_ptr, boundary_check=(0, 1), padding_option="zero")
 	Vj = tl.load(Vj_ptr, boundary_check=(0, 1), padding_option="zero")
 
+	# initialize tensors for the hash
+	# rng = tl.full((1,1), tl.load(rng_ptr), dtype=tl.uint32)
+	# offs_J_for_hash = (tl.arange(0, BLOCK_J) + offs_J).to(tl.uint32)[None, :]
+	# offs_I_for_hash = tl.arange(0, BLOCK_I).to(tl.uint32)[:, None] # incremented in loop
+	# offs_Z_for_hash = tl.full((1,1), offs_Z, dtype=tl.uint32)
+	# offs_H_for_hash = tl.full((1,1), offs_H, dtype=tl.uint32)
+	# BLOCK_I_uint32 = tl.full((1,1), BLOCK_I, dtype=tl.uint32) # for incrementing I
+
 	inf = float("inf") # convenience
 	for i in tl.range(0, triton.cdiv(tot_Nq, BLOCK_I), 1, loop_unroll_factor=1): # no loop unrolling
 
@@ -356,6 +376,10 @@ def _attn_bwd(
 		# = exp(Sij - mi) / li
 		# mi is max for the row pre-softmax (for safe softmax), li is the normalizing term (sum of exponentials for that row)
 		Pij = tl.exp(tl.where(mask[None, :], Sij - Li[:, None], -inf)) # N x N (fp32)
+
+		# apply deterministic dropout
+		# is_dropped = dropout(offs_Z_for_hash, offs_H_for_hash, offs_I_for_hash, offs_J_for_hash, rng, dropout_p)
+		# Pij = tl.where(is_dropped, 0, Pij / (1-dropout_p))
 
 		# load gradient w.r.t output (fp16)
 		dOi = tl.load(dOi_block_ptr, boundary_check=(0, 1), padding_option="zero") # N x d_k
@@ -383,7 +407,7 @@ def _attn_bwd(
 		dOi_block_ptr = tl.advance(dOi_block_ptr, (BLOCK_I, 0))
 		Li_block_ptr = tl.advance(Li_block_ptr, (BLOCK_I, ))
 		Di_block_ptr = tl.advance(Di_block_ptr, (BLOCK_I, ))
-
+		# offs_I_for_hash += BLOCK_I_uint32
 
 	# initialize dK and dV pointers to write output
 	dKj_block_ptr = tl.make_block_ptr( # N x d_k
@@ -442,7 +466,7 @@ class _flash_attn(torch.autograd.Function):
 								1
 							)
 
-		rng = torch.randint(0, 2**32-1, (1, )) # as a tensor to avoid recompilation
+		rng = torch.randint(0, 2**32-1, (1, ), device=Q.device) # as a tensor to avoid recompilation
 
 		# run the kernel
 		_attn_fwd[grid](  	out, out.stride(0), out.stride(1), out.stride(2), out.stride(3), # batch x nheads x Nkv x d_k
@@ -458,6 +482,7 @@ class _flash_attn(torch.autograd.Function):
 		# for backwards pass
 		ctx.save_for_backward(Q, K, V, out, L, mask, rng)
 		ctx.softmax_scale = softmax_scale
+		ctx.dropout_p = dropout_p
 
 		return out
 
@@ -501,8 +526,8 @@ class _flash_attn(torch.autograd.Function):
 							L, L.stride(0), L.stride(1), L.stride(2),
 							mask, mask.stride(0), mask.stride(1),
 							batch, Nq, Nkv, nheads, d_k, max(d_k, 16), ctx.softmax_scale,
-							rng, dropout_p
+							rng, ctx.dropout_p
 						 )
 
 		# return the gradients
-		return dQ, dK, dV, None
+		return dQ, dK, dV, None, None

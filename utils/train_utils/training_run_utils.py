@@ -23,7 +23,7 @@ class Epoch():
 
 		# setup the epoch
 		if self.training_run_parent.rank==0:
-			self.training_run_parent.output.log_epoch(self.epoch, self.training_run_parent.scheduler.get_last_lr()[0])
+			self.training_run_parent.output.log_epoch(self.epoch, self.training_run_parent.step, self.training_run_parent.scheduler.get_last_lr()[0])
 
 		# clear temp losses
 		self.training_run_parent.losses.clear_tmp_losses()
@@ -157,8 +157,8 @@ class Batch():
 		optim = self.epoch_parent.training_run_parent.optim
 		scheduler = self.epoch_parent.training_run_parent.scheduler
 
-		# whether to take a step
-		learn_step = (self.b_idx + 1) % accumulation_steps == 0
+		# whether to take a step, changing so that it is based on number of tokens processed, not number of batches
+		learn_step = (self.epoch_parent.training_run_parent.toks_processed + 1) > accumulation_steps
 
 		# get last loss (ddp avgs the gradients, i want the sum, so mult by world size)
 		loss = self.epoch_parent.training_run_parent.losses.tmp.get_last_loss() * self.epoch_parent.training_run_parent.world_size # no scaling by accumulation steps, as already handled by grad clipping and scaling would introduce batch size biases
@@ -181,6 +181,9 @@ class Batch():
 			optim.step()
 			optim.zero_grad()
 			scheduler.step()
+
+			self.epoch_parent.training_run_parent.step += 1
+			self.epoch_parent.training_run_parent.toks_processed = 0 # reset to 0 once target number of toks processed
 
 	def noise_coords(self):
 
@@ -329,7 +332,7 @@ class Batch():
 		'''
 
 		# get random aa masking percentages
-		rand_aa_pct = torch.rand((self.size(0), 1), device=self.coords.device) * 0.5 # about 50% is the max context it gets
+		rand_aa_pct = torch.rand((self.size(0), 1), device=self.coords.device) * 0.25 # about 25% is the max context it gets
 
 		# apply the random aas (20 is mask token)
 		rand_vals = torch.rand_like(self.aas, dtype=torch.float32)
@@ -340,10 +343,10 @@ class Batch():
 		self.labels = torch.where(is_mask, self.labels, -1)
 
 		# run wf embedding (slow, learnable aa)
-		wf = self.epoch_parent.training_run_parent.model(coords_alpha=self.coords_alpha, coords_beta=self.coords_beta, aas=self.aas, key_padding_mask=self.key_padding_mask, embedding=True)
+		wf = self.epoch_parent.training_run_parent.model.module(coords_alpha=self.coords_alpha, coords_beta=self.coords_beta, aas=self.aas, key_padding_mask=self.key_padding_mask, embedding=True)
 
 		# run wf extraction
-		seq_pred = self.epoch_parent.training_run_parent.model(wf=wf, coords_alpha=self.coords_alpha, key_padding_mask=self.key_padding_mask, extraction=True)
+		seq_pred = self.epoch_parent.training_run_parent.model.module(wf=wf, coords_alpha=self.coords_alpha, key_padding_mask=self.key_padding_mask, extraction=True)
 
 		return ExtractionOutput(self, seq_pred, None, None) # no distogram for now
 	

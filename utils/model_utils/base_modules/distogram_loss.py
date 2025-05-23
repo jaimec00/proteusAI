@@ -18,11 +18,6 @@ configs = [	triton.Config({"BLOCK_I": i, "BLOCK_J": j}, num_warps=w)
 			for w in [1, 2, 4, 8, 16, 32]
 		]
 
-# @triton.jit
-# def pair_mlp(features_i, features_j, linears, act="gelu"):
-# 	tl.
-
-
 # filter out configs that are too big
 def keep_fwd(conf):
 	autotune = os.environ.get("DIST_AUTOTUNE")
