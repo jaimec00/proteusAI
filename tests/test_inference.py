@@ -8,11 +8,11 @@ def main():
 	device = torch.device("cuda")
 
 	# setup model
-	model = proteusAI(old=False, mlm=True, extraction_min_rbf=0.001, extraction_encoder_layers=4)
-	# model_path = "/scratch/hjc2538/projects/proteusAI/models/geo_attn_old_4enc_adaptivebias/model_parameters.pth"
+	model = proteusAI(old=True, mlm=False, extraction_min_rbf=0.001, extraction_encoder_layers=4, extraction_use_bias=True)
+	model_path = "/scratch/hjc2538/projects/proteusAI/models/geo_attn_old_4enc_adaptivebias/model_parameters.pth"
 	# model_path = "/scratch/hjc2538/projects/proteusAI/models/redo_imfuckinglost/model_parameters_e9_s2.26.pth"
 	# model_path = "/scratch/hjc2538/projects/proteusAI/models/mlm_from_scratch_pure_attn/ctd/model_parameters_e59_s1.74.pth"
-	model_path = "/scratch/hjc2538/projects/proteusAI/models/mlm_from_scratch_pure_attn/ctd_maskedchain/model_parameters_e469_s2.21.pth"
+	# model_path = "/scratch/hjc2538/projects/proteusAI/models/mlm_from_scratch_pure_attn/ctd_maskedchain/model_parameters_e469_s2.21.pth"
 	
 	model_weights = torch.load(model_path, map_location=device, weights_only=True)
 	emb_weights = {".".join(i.split(".")[1:]): model_weights[i] for i in model_weights.keys() if i.startswith("wf_embedding")}
@@ -55,9 +55,9 @@ def main():
 			aas = -torch.ones_like(label_batch)
 			# aas = torch.where(chain_mask, label_batch, -1) # mask token
 			# aas = torch.where(chain_mask, -1, -1) # mask token
-			# wf = model.wf_embedding(coords_alpha, coords_beta, aas, key_padding_mask=key_padding_mask)
-			# output = model.wf_extraction(wf, coords_alpha, key_padding_mask=key_padding_mask).argmax(dim=2)
-			output = model(coords_alpha, coords_beta, aas, key_padding_mask=key_padding_mask, inference=True)
+			wf = model.wf_embedding(coords_alpha, coords_beta, aas, key_padding_mask=key_padding_mask)
+			output = model.wf_extraction(wf, coords_alpha, key_padding_mask=key_padding_mask).argmax(dim=2)
+			# output = model(coords_alpha, coords_beta, aas, key_padding_mask=key_padding_mask, inference=True)
 			# print(output.shape, output)
 			seq_sim, seq_pred, seq_true = get_seq_sim(output, label_batch, chain_idxs, key_padding_mask)
 			print(seq_sim)

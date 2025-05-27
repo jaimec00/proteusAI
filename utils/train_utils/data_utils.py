@@ -16,10 +16,11 @@ from threading import Lock
 from pathlib import Path
 from tqdm import tqdm
 import pandas as pd
+import argparse
 import random
+import psutil
 import math
 import os
-import argparse
 
 # ----------------------------------------------------------------------------------------------------------------------
 
@@ -123,10 +124,20 @@ class BioUnitCache():
 
 		self.biounits = {}
 		self.lock = Lock()
+		self.world_size = torch.distributed.get_world_size()
+
+		# check the mem allocated (using slurm env, will have to change if do something else)
+		self.max_mem = int(os.environ.get("SLURM_MEM_PER_NODE")) # in MB
+		self.process = psutil.Process(os.getpid()) # process object to check mem usage
 
 	def add_biounit(self, biounit, biounit_id):
-		with self.lock:
-			self.biounits[biounit_id] = biounit 
+
+		# check current mem allocation, if > 90% of allocated, do not add to biounit cache,
+		# will need to load anything that is not on cache from disk
+		current_mem = self.process.memory_info().rss * self.world_size
+		if current_mem < (self.max_mem * 0.9):
+			with self.lock:
+				self.biounits[biounit_id] = biounit 
 
 	def __getitem__(self, biounit_id):
 		with self.lock:
@@ -166,12 +177,13 @@ class DataHolder():
 						use_chain_mask=True,
 						max_resolution=3.5,
 						ca_only=True, # return ca only data or full backbone
-						rank=0, world_size=1
+						rank=0, world_size=1, rng=0
 					):
 
 
 		# define data path
 		self.data_path = Path(data_path)
+		self.rng = rng
 
 		# define batch and seq sizes
 		self.batch_tokens = batch_tokens # max tokens per batch
@@ -235,14 +247,14 @@ class DataHolder():
 		loads the Data Objects, allowing for the objects to be retrieved afterwards
 		'''
 		if data_type == "train":
-			self.train_data = Data(self.data_path, self.train_pdbs, self.num_train, self.batch_tokens, self.max_batch_size, self.min_seq_size, self.max_seq_size, self.use_chain_mask, self.ca_only, self.rank, self.world_size)
+			self.train_data = Data(self.data_path, self.train_pdbs, self.num_train, self.batch_tokens, self.max_batch_size, self.min_seq_size, self.max_seq_size, self.use_chain_mask, self.ca_only, self.rank, self.world_size, self.rng)
 		elif data_type == "val":
-			self.val_data = Data(self.data_path, self.val_pdbs, self.num_val, self.batch_tokens, self.max_batch_size, self.min_seq_size, self.max_seq_size, self.use_chain_mask, self.ca_only, self.rank, self.world_size)
+			self.val_data = Data(self.data_path, self.val_pdbs, self.num_val, self.batch_tokens, self.max_batch_size, self.min_seq_size, self.max_seq_size, self.use_chain_mask, self.ca_only, self.rank, self.world_size, self.rng)
 		elif data_type == "test":	
-			self.test_data = Data(self.data_path, self.test_pdbs, self.num_test, self.batch_tokens, self.max_batch_size, self.min_seq_size, self.max_seq_size, self.use_chain_mask, self.ca_only, self.rank, self.world_size)
+			self.test_data = Data(self.data_path, self.test_pdbs, self.num_test, self.batch_tokens, self.max_batch_size, self.min_seq_size, self.max_seq_size, self.use_chain_mask, self.ca_only, self.rank, self.world_size, self.rng)
 
 class Data():
-	def __init__(self, data_path, clusters_df, num_samples=None, batch_tokens=16384, max_batch_size=128, min_seq_size=512, max_seq_size=16384, use_chain_mask=True, ca_only=True, rank=0, world_size=1, device="cpu"):
+	def __init__(self, data_path, clusters_df, num_samples=None, batch_tokens=16384, max_batch_size=128, min_seq_size=512, max_seq_size=16384, use_chain_mask=True, ca_only=True, rank=0, world_size=1, rng=0, device="cpu"):
 
 		# path to pdbs
 		self.pdb_path = data_path / Path("pdb")
@@ -269,7 +281,7 @@ class Data():
 		self.epoch_biounits = EpochBioUnits(batch_tokens, max_batch_size, rank, world_size)
 
 		# randomly sample the clusters
-		self.rng = 0 # start with hardcoded rng, will increment
+		self.rng = rng # start with hardcoded rng, will increment
 		self.rotate_data() # will have the rng seed be updated each 
 
 	def rotate_data(self):

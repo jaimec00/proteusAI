@@ -54,6 +54,8 @@ class WaveFunctionExtraction(nn.Module):
 
 		# non linear tranformation for more intricate features
 		wf = self.norm_pre(wf + self.mlp_pre(wf))
+		# wf = self.norm_pre(wf+self.mlp_pre(wf))
+		# wf = self.norm_pre(wf)#+self.mlp_pre(wf))
 
 		# geometric/vanilla attn encoders
 		for encoder in self.encoders:

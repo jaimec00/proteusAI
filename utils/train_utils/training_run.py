@@ -94,7 +94,7 @@ class TrainingRun():
 								args.data.batch_tokens, args.data.max_batch_size, 
 								args.data.min_seq_size, args.data.max_seq_size, 
 								args.training_parameters.regularization.use_chain_mask, args.data.max_resolution,
-								args.training_parameters.ca_only_model, self.rank, self.world_size
+								args.training_parameters.ca_only_model, self.rank, self.world_size, self.training_parameters.rng
 							)
 		
 		self.losses = TrainingRunLosses(	# general
@@ -201,64 +201,63 @@ class TrainingRun():
 								attn_dropout=self.training_parameters.regularization.attn_dropout
 							)
 
+		# parallelize the model
 		self.model.to(self.gpu)
+		self.model = DDP(self.model, device_ids=[self.rank])
 
 		# which pretrained weights to use
 		if self.training_parameters.weights.use_model:
 			pretrained_weights = torch.load(self.training_parameters.weights.use_model, map_location=self.gpu, weights_only=True)
-			self.model.load_state_dict(pretrained_weights, strict=False) # allow modifications of the model in between transfer learning
+			self.model.module.load_state_dict(pretrained_weights, strict=False) # allow modifications of the model in between transfer learning
 		if self.training_parameters.weights.use_embedding_weights:
-			self.model.load_WFEmbedding_weights(self.training_parameters.weights.use_embedding_weights, self.gpu)
+			self.model.module.load_WFEmbedding_weights(self.training_parameters.weights.use_embedding_weights, self.gpu)
 		if self.training_parameters.weights.use_encoding_weights:
-			self.model.load_WFEncoding_weights(self.training_parameters.weights.use_encoding_weights, self.gpu)
+			self.model.module.load_WFEncoding_weights(self.training_parameters.weights.use_encoding_weights, self.gpu)
 		if self.training_parameters.weights.use_diffusion_weights:
-			self.model.load_WFDiffusion_weights(self.training_parameters.weights.use_diffusion_weights, self.gpu)
+			self.model.module.load_WFDiffusion_weights(self.training_parameters.weights.use_diffusion_weights, self.gpu)
 		if self.training_parameters.weights.use_decoding_weights:
-			self.model.load_WFDecoding_weights(self.training_parameters.weights.use_decoding_weights, self.gpu)
+			self.model.module.load_WFDecoding_weights(self.training_parameters.weights.use_decoding_weights, self.gpu)
 		if self.training_parameters.weights.use_extraction_weights:
-			self.model.load_WFExtraction_weights(self.training_parameters.weights.use_extraction_weights, self.gpu)
+			self.model.module.load_WFExtraction_weights(self.training_parameters.weights.use_extraction_weights, self.gpu)
 		
 		# what weights should be frozen depending on training type 
 		if self.training_parameters.train_type in ["extraction", "old", "mlm"]: # train embedding and extraction only
 			if self.training_parameters.weights.embedding.freeze_at_seq_sim == 0.0: # option to freeze embedding right away, only use if have pretrained embedding weights
-				self.model.freeze_WFEmbedding_weights()
+				self.model.module.freeze_WFEmbedding_weights()
 			if self.training_parameters.weights.geo_attn.init_bias_off:
-				self.model.turn_off_bias() # turn off geo attn bias until certain seq sim
+				self.model.module.turn_off_bias() # turn off geo attn bias until certain seq sim
 			if self.training_parameters.train_type == "extraction":
-				self.model.freeze_WFEncoding_weights()
-				self.model.freeze_WFDiffusion_weights()
-				self.model.freeze_WFDecoding_weights()
+				self.model.module.freeze_WFEncoding_weights()
+				self.model.module.freeze_WFDiffusion_weights()
+				self.model.module.freeze_WFDecoding_weights()
 
 		elif self.training_parameters.train_type == "vae": # train encoder and decoder using trained (and frozen) embedding
-			self.model.freeze_WFEmbedding_weights()
-			self.model.freeze_WFDiffusion_weights()
-			self.model.freeze_WFExtraction_weights()
+			self.model.module.freeze_WFEmbedding_weights()
+			self.model.module.freeze_WFDiffusion_weights()
+			self.model.module.freeze_WFExtraction_weights()
 		
 		elif self.training_parameters.train_type == "extraction_finetune": # finetune extractor on decoder outputs, only extractor is not frozen
-			self.model.freeze_WFEmbedding_weights()
-			self.model.freeze_WFEncoding_weights()
-			self.model.freeze_WFDiffusion_weights()
-			self.model.freeze_WFDecoding_weights()
+			self.model.module.freeze_WFEmbedding_weights()
+			self.model.module.freeze_WFEncoding_weights()
+			self.model.module.freeze_WFDiffusion_weights()
+			self.model.module.freeze_WFDecoding_weights()
 
 		elif self.training_parameters.train_type == "diffusion": # train diffusion on encoder outputs, diffusion is the only one not frozen
-			self.model.freeze_WFEmbedding_weights()
-			self.model.freeze_WFEncoding_weights()
-			self.model.freeze_WFDecoding_weights()
-			self.model.freeze_WFExtraction_weights()
+			self.model.module.freeze_WFEmbedding_weights()
+			self.model.module.freeze_WFEncoding_weights()
+			self.model.module.freeze_WFDecoding_weights()
+			self.model.module.freeze_WFExtraction_weights()
 
 		else:
 			raise ValueError(f"invalid train_type selected, {self.training_parameters.train_type=}. options are ['extraction', 'vae', 'extraction_finetune', 'diffusion', 'old', 'mlm']") 
 
 		# get number of parameters for logging
-		self.training_parameters.num_embedding_params = sum(p.numel() for p in self.model.wf_embedding.parameters())
-		self.training_parameters.num_encoding_params = sum(p.numel() for p in self.model.wf_encoding.parameters()) if self.training_parameters.train_type not in ["old", "mlm"] else 0.0
-		self.training_parameters.num_diffusion_params = sum(p.numel() for p in self.model.wf_diffusion.parameters()) if self.training_parameters.train_type not in ["old", "mlm"] else 0.0
-		self.training_parameters.num_decoding_params = sum(p.numel() for p in self.model.wf_decoding.parameters()) if self.training_parameters.train_type not in ["old", "mlm"] else 0.0
-		self.training_parameters.num_extraction_params = sum(p.numel() for p in self.model.wf_extraction.parameters())
+		self.training_parameters.num_embedding_params = sum(p.numel() for p in self.model.module.wf_embedding.parameters())
+		self.training_parameters.num_encoding_params = sum(p.numel() for p in self.model.module.wf_encoding.parameters()) if self.training_parameters.train_type not in ["old", "mlm"] else 0.0
+		self.training_parameters.num_diffusion_params = sum(p.numel() for p in self.model.module.wf_diffusion.parameters()) if self.training_parameters.train_type not in ["old", "mlm"] else 0.0
+		self.training_parameters.num_decoding_params = sum(p.numel() for p in self.model.module.wf_decoding.parameters()) if self.training_parameters.train_type not in ["old", "mlm"] else 0.0
+		self.training_parameters.num_extraction_params = sum(p.numel() for p in self.model.module.wf_extraction.parameters())
 		self.training_parameters.num_params = self.training_parameters.num_embedding_params + self.training_parameters.num_encoding_params + self.training_parameters.num_diffusion_params + self.training_parameters.num_decoding_params +  self.training_parameters.num_extraction_params 
-
-		# parallelize the model
-		self.model = DDP(self.model, device_ids=[self.rank])
 
 		# print gradients at each step if in debugging mode
 		if self.debug.debug_grad: # havent tested with DDP, but might interfere with DDP hooks for grad reduce, will check later, prob not until i need to debug grads lol

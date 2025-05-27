@@ -16,7 +16,7 @@ from utils.model_utils.wf_embedding.anisotropic.aa_scaling.learnable_aa.learnabl
 from utils.model_utils.wf_embedding.anisotropic.aa_scaling.static_aa.cuda.wf_embedding import wf_embedding as wf_embedding_staticAA
 from utils.model_utils.wf_embedding.anisotropic.cb_scaling.learnable_wavenumbers.cuda.wf_embedding import wf_embedding as wf_embedding_learnCB
 from utils.model_utils.base_modules.Cb_utils import get_coords
-from utils.model_utils.base_modules.base_modules import StaticLayerNorm
+from utils.model_utils.base_modules.base_modules import StaticLayerNorm, CrossFeatureNorm
 
 # ----------------------------------------------------------------------------------------------------------------------
 
@@ -36,10 +36,13 @@ class WaveFunctionEmbedding(nn.Module):
 		if old: # learn scaling factors independant of aa
 			self.aa_magnitudes = nn.Parameter(torch.ones(d_model//2), requires_grad=learn_aa)
 		else: # aa specific
-			self.aa_magnitudes = nn.Parameter(torch.ones(d_model//2, num_aas), requires_grad=learn_aa)
+			# do random initialization, in case not learning from scratch
+			aas = torch.rand((d_model//2, num_aas)) * wl.unsqueeze(1) * 0.5 # max aa scaling factor is half the corresponding wavelength
+			self.aa_magnitudes = nn.Parameter(aas, requires_grad=learn_aa)
 
 		# additional layers
-		self.norm = StaticLayerNorm(d_model)
+		# self.norm = StaticLayerNorm(d_model)
+		self.norm = CrossFeatureNorm(d_model)
 
 	def get_wavenumbers(self):
 		return torch.exp(self.wavenumbers) # learns log of wavenumbers, ie log(2pi/lambda) = log(2pi) - log(lambda), log(2pi) is constant, so learning -log(lambda)

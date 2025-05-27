@@ -158,7 +158,8 @@ class Batch():
 		scheduler = self.epoch_parent.training_run_parent.scheduler
 
 		# whether to take a step, changing so that it is based on number of tokens processed, not number of batches
-		learn_step = (self.epoch_parent.training_run_parent.toks_processed + 1) > accumulation_steps
+		# learn_step = (self.epoch_parent.training_run_parent.toks_processed + 1) > accumulation_steps
+		learn_step = ((self.b_idx + 1)*self.world_size) % accumulation_steps == 0
 
 		# get last loss (ddp avgs the gradients, i want the sum, so mult by world size)
 		loss = self.epoch_parent.training_run_parent.losses.tmp.get_last_loss() * self.epoch_parent.training_run_parent.world_size # no scaling by accumulation steps, as already handled by grad clipping and scaling would introduce batch size biases
