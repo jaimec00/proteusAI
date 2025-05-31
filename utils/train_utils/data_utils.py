@@ -16,7 +16,9 @@ from threading import Lock
 from pathlib import Path
 from tqdm import tqdm
 import pandas as pd
+import numpy as np
 import argparse
+import hashlib
 import random
 import psutil
 import math
@@ -35,6 +37,7 @@ class EpochBioUnits():
 		self.batch_tokens = batch_tokens
 		self.max_batch_size = max_batch_size 
 
+		self.biounit_hashes = {} # store hashes of biounit samples so can order them deterministically
 		self.biounits = []
 		self.chains = [] # also store chain ids so can create the chain mask
 		self.batches = []
@@ -44,15 +47,37 @@ class EpochBioUnits():
 		self.world_size = world_size
 
 	def add_biounit(self, biounit, chain):
-		self.biounits.append(biounit)
-		self.chains.append(chain)
+
+		# do it with a dict using the biounit hash
+		self.biounit_hashes[self.hash_biounit(biounit, chain)] = [biounit, chain]
+
+	def hash_biounit(self, biounit, chain):
+
+		biounit_bytes = np.ascontiguousarray(biounit.coords.numpy()).tobytes()
+		chain_bytes = chain.encode("utf-8")
+
+		hasher = hashlib.md5()
+
+		hasher.update(biounit_bytes)
+		hasher.update(chain_bytes)
+
+		digest_bytes = hasher.digest()
+
+		return int.from_bytes(digest_bytes, byteorder="big")
 
 	def clear_biounits(self):
 		self.biounits = []
 		self.chains = []
+		self.biounit_hashes = {}
 		self.batches = []
 
 	def batch_data(self, rng=0):
+
+		# now populate the lists after added through hashing
+		# got race conditions before, this way gurantees ranks see the same order
+		hashes = sorted(self.biounit_hashes.keys())
+		self.biounits = [self.biounit_hashes[hash_val][0] for hash_val in hashes]
+		self.chains = [self.biounit_hashes[hash_val][1] for hash_val in hashes]
 
 		# get a list of the indexes
 		idxs = list(range(len(self.biounits)))
@@ -97,8 +122,9 @@ class EpochBioUnits():
 
 		# ok, so what i need to do is to have world size clusters that are randomly shuffled
 		# this way, all gpus work on similar sized inputs, and thus are more likely to finish the fwd pass at the same time
-		# first sort so that similar sized batches are next to each other 
-		self.batches = sorted(self.batches, key=lambda x: len(x)) # sort the batches based on size of the batch, approximation for input size, as small batch size is typically large seq length and vice versa
+		# first sort so that similar sized batches are next to each other
+		# performs two sorts, first by the first samples index so that tiebreakers are determined this way, main sort is on batch size
+		self.batches = sorted(sorted(self.batches, key=lambda x: x[0][0]), key=lambda x: len(x)) # sort the batches based on size of the batch, approximation for input size, as small batch size is typically large seq length and vice versa
 		self.batches = [self.batches[gpu_rank::self.world_size] for gpu_rank in range(self.world_size)] # create mini batches for each gpu. size is (in tensor format, although not a tensor bc diff dim sizes) gpus x batches x sample x 2 (2 is idx, length)
 		
 		# now need to shuffle the minibatches, but shuffle in the same way for each gpu so that similarly sized batches are still grouped together
@@ -124,7 +150,7 @@ class BioUnitCache():
 
 		self.biounits = {}
 		self.lock = Lock()
-		self.world_size = torch.distributed.get_world_size()
+		self.world_size = torch.cuda.device_count()
 
 		# check the mem allocated (using slurm env, will have to change if do something else)
 		self.max_mem = int(os.environ.get("SLURM_MEM_PER_NODE")) # in MB
@@ -134,8 +160,8 @@ class BioUnitCache():
 
 		# check current mem allocation, if > 90% of allocated, do not add to biounit cache,
 		# will need to load anything that is not on cache from disk
-		current_mem = self.process.memory_info().rss * self.world_size
-		if current_mem < (self.max_mem * 0.9):
+		current_mem = (self.process.memory_info().rss * self.world_size) / (1024**2) # convert to megabytes
+		if current_mem < (self.max_mem * 0.5):
 			with self.lock:
 				self.biounits[biounit_id] = biounit 
 

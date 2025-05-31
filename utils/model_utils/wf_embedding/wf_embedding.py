@@ -41,8 +41,8 @@ class WaveFunctionEmbedding(nn.Module):
 			self.aa_magnitudes = nn.Parameter(aas, requires_grad=learn_aa)
 
 		# additional layers
-		# self.norm = StaticLayerNorm(d_model)
-		self.norm = CrossFeatureNorm(d_model)
+		self.norm1 = CrossFeatureNorm(d_model)
+		self.norm2 = StaticLayerNorm(d_model)
 
 	def get_wavenumbers(self):
 		return torch.exp(self.wavenumbers) # learns log of wavenumbers, ie log(2pi/lambda) = log(2pi) - log(lambda), log(2pi) is constant, so learning -log(lambda)
@@ -63,7 +63,7 @@ class WaveFunctionEmbedding(nn.Module):
 					wf = wf_embedding_staticAA(coords_alpha, coords_beta, aa_labels, self.aa_magnitudes, self.get_wavenumbers(), dropout_p=0.0, mask=key_padding_mask)
 
 		# norming improvves performance, norms each tokens features, no affine transformation, so not layernorm
-		wf = self.norm(wf)
+		wf = self.norm2(self.norm1(wf, key_padding_mask))
 
 		return wf
 

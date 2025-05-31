@@ -287,6 +287,8 @@ class TrainingRun():
 									betas=(self.training_parameters.adam.beta1, self.training_parameters.adam.beta2), 
 									eps=float(self.training_parameters.adam.epsilon))
 		self.optim.zero_grad()
+		if self.training_parameters.adam.use_adam:
+			self.optim.load_state_dict(self.training_parameters.adam.use_adam)
 
 	def setup_scheduler(self):
 		'''
@@ -328,7 +330,7 @@ class TrainingRun():
 	def model_checkpoint(self, epoch_idx):
 		if (epoch_idx+1) % self.output.model_checkpoints == 0: # model checkpointing
 			if self.rank==0:
-				self.output.save_model(self.model, appended_str=f"e{epoch_idx}_s{round(self.losses.val.get_last_loss(),2)}")
+				self.output.save_model(self.model, adam=self.optim, appended_str=f"e{epoch_idx}_s{round(self.losses.val.get_last_loss(),2)}")
 
 	def training_converged(self, epoch_idx):
 

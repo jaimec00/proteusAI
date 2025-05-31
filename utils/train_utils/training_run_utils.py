@@ -159,7 +159,7 @@ class Batch():
 
 		# whether to take a step, changing so that it is based on number of tokens processed, not number of batches
 		# learn_step = (self.epoch_parent.training_run_parent.toks_processed + 1) > accumulation_steps
-		learn_step = ((self.b_idx + 1)*self.world_size) % accumulation_steps == 0
+		learn_step = (self.b_idx + 1) % accumulation_steps == 0
 
 		# get last loss (ddp avgs the gradients, i want the sum, so mult by world size)
 		loss = self.epoch_parent.training_run_parent.losses.tmp.get_last_loss() * self.epoch_parent.training_run_parent.world_size # no scaling by accumulation steps, as already handled by grad clipping and scaling would introduce batch size biases
@@ -240,10 +240,11 @@ class Batch():
 
 		# extract sequence 
 		seq_pred = self.epoch_parent.training_run_parent.model(wf=wf, coords_alpha=self.coords_alpha, key_padding_mask=self.key_padding_mask, distogram=True, extraction=True)
-		dists=None
+
+		# dists = self.epoch_parent.training_run_parent.model.wf_extraction.dist_proj, wf
 
 		# convert to output object
-		return ExtractionOutput(self, seq_pred, dists, self.coords_alpha)
+		return ExtractionOutput(self, seq_pred, None, self.coords_alpha)
 
 	def run_vae_training(self):
 		
@@ -337,7 +338,7 @@ class Batch():
 
 		# apply the random aas (20 is mask token)
 		rand_vals = torch.rand_like(self.aas, dtype=torch.float32)
-		is_mask = rand_vals > rand_aa_pct #& (~self.chain_mask) # give the model sequence info of non representative chains like in pmpnn
+		is_mask = rand_vals > rand_aa_pct 
 		self.aas = torch.where(is_mask, torch.where(torch.rand_like(rand_vals, dtype=torch.float32)<0.1, torch.randint_like(self.aas,0,20), 20), self.aas) 
 
 		# only predict masked vals

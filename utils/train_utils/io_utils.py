@@ -33,6 +33,7 @@ class Output():
 		self.vae_plot = self.out_path / Path("vae_plot.png")
 		self.test_plot = self.out_path / Path("test_plot.png")
 		self.weights_path = self.out_path / Path("model_parameters.pth")
+		self.adam_path = self.out_path / Path("adam.pth")
 		self.log = self.setup_logging(self.out_path / Path("log.txt"))
 		self.model_checkpoints = model_checkpoints
 
@@ -76,7 +77,11 @@ class Output():
 			d_latent: {hyper_parameters.d_latent} 
 			num_aa: {hyper_parameters.num_aa}
 			wave function embedding:
-				none, all are learnable
+				min_wavelength: {hyper_parameters.embedding.min_wl}
+				max_wavelength: {hyper_parameters.embedding.max_wl}
+				base_wavelength: {hyper_parameters.embedding.base_wl}
+				learnable_wavelengths: {hyper_parameters.embedding.learn_wl}
+				learnable_amino_acids: {hyper_parameters.embedding.learn_aa}
 			wave function encoding:
 				wf preprocessing:
 					d_hidden: {hyper_parameters.encoding.pre_process.d_hidden}
@@ -89,6 +94,8 @@ class Output():
 					heads: {hyper_parameters.encoding.encoders.heads}
 					d_hidden_attn: {hyper_parameters.encoding.encoders.d_hidden_attn}
 					hidden_layers_attn: {hyper_parameters.encoding.encoders.hidden_layers_attn}
+					use_bias: {hyper_parameters.encoding.encoders.use_bias}
+					min_rbf (N/A if use_bias is False): {hyper_parameters.encoding.encoders.min_rbf}
 			wave function diffusion:
 				scheduler:
 					alpha_bar_min: {hyper_parameters.diffusion.scheduler.alpha_bar_min}
@@ -106,6 +113,8 @@ class Output():
 					heads: {hyper_parameters.diffusion.encoders.heads}
 					d_hidden_attn: {hyper_parameters.diffusion.encoders.d_hidden_attn}
 					hidden_layers_attn: {hyper_parameters.diffusion.encoders.hidden_layers_attn}
+					use_bias: {hyper_parameters.diffusion.encoders.use_bias}
+					min_rbf (N/A if use_bias is False): {hyper_parameters.diffusion.encoders.min_rbf}
 			wave function decoding:
 				wf preprocessing:
 					d_hidden: {hyper_parameters.decoding.pre_process.d_hidden}
@@ -118,6 +127,8 @@ class Output():
 					heads: {hyper_parameters.decoding.encoders.heads}
 					d_hidden_attn: {hyper_parameters.decoding.encoders.d_hidden_attn}
 					hidden_layers_attn: {hyper_parameters.decoding.encoders.hidden_layers_attn}
+					use_bias: {hyper_parameters.decoding.encoders.use_bias}
+					min_rbf (N/A if use_bias is False): {hyper_parameters.decoding.encoders.min_rbf}
 			wave function extraction:
 				wf preprocessing:
 					d_hidden: {hyper_parameters.extraction.pre_process.d_hidden}
@@ -131,6 +142,8 @@ class Output():
 					min_rbf: {hyper_parameters.extraction.encoders.min_rbf}
 					d_hidden_attn: {hyper_parameters.extraction.encoders.d_hidden_attn}
 					hidden_layers_attn: {hyper_parameters.extraction.encoders.hidden_layers_attn}
+					use_bias: {hyper_parameters.extraction.encoders.use_bias}
+					min_rbf (N/A if use_bias is False): {hyper_parameters.extraction.encoders.min_rbf}
 
 		data:
   			data_path: {data.data_path}
@@ -196,7 +209,7 @@ class Output():
 			self.log.info(textwrap.dedent(f'''
 			
 				{'-'*80}
-				epoch {epoch}, step {step}: 
+				epoch {epoch}, step {step:,}: 
 				{'-'*80}
 				
 				current learning rate: {current_lr}
@@ -241,7 +254,7 @@ class Output():
 			self.log.info(f"{mode} kl divergence no_aa per token: {str(kl_div_no_aa)}")
 			self.log.info(f"{mode} squared error no_aa per token: {str(reconstruction_no_aa)}")
 			self.log.info(f"{mode} full loss per token: {str(loss)}\n")
-			tmp_losses.extend(cel, dist_cel, full_loss, seq_sim)
+			tmp_losses.extend([cel, dist_cel, full_loss, seq_sim])
 		elif train_type == "diffusion":
 			squared_error, total_loss = losses.tmp.get_avg()
 			self.log.info(f"{mode} squared error per token: {str(squared_error)}")
@@ -406,23 +419,29 @@ class Output():
 		plt.savefig(self.test_plot)
 		self.log.info(f"histogram of test seq_sims saved to {self.test_plot}")
 
-	def save_model(self, model, train_type="", appended_str=""):
+	def save_model(self, model, adam=None, train_type="", appended_str=""):
 
 		if appended_str:
 			weights_path = self.weights_path.parent / Path(f"{'.'.join(self.weights_path.name.split(".")[:-1])}_{appended_str}.{self.weights_path.name.split(".")[-1]}") 
+			adam_path = self.adam_path.parent / Path(f"{'.'.join(self.adam_path.name.split(".")[:-1])}_{appended_str}.{self.adam_path.name.split(".")[-1]}") 
 		else:
 			weights_path = self.weights_path
-		torch.save(model.state_dict(), weights_path)
+			adam_path = self.adam_path
+
+		torch.save(model.module.state_dict(), weights_path)
 		self.log.info(f"weights saved to {weights_path}")
+		if adam is not None:
+			torch.save(adam.state_dict(), adam_path)
+			self.log.info(f"AdAM optimizer saved to {adam_path}")
 
 		weights_path = lambda train_type_str: self.weights_path.parent / Path(f"{'.'.join(self.weights_path.name.split(".")[:-1])}_{train_type_str}.{self.weights_path.name.split(".")[-1]}")
 		if train_type == "extraction":
-			model.save_WFEmbedding_weights(weights_path=weights_path("embedding"))
-			model.save_WFExtraction_weights(weights_path=weights_path("extraction"))
+			model.module.save_WFEmbedding_weights(weights_path=weights_path("embedding"))
+			model.module.save_WFExtraction_weights(weights_path=weights_path("extraction"))
 		elif train_type == "vae":
-			model.save_WFEncoding_weights(weights_path=weights_path("encoding"))
-			model.save_WFDecoding_weights(weights_path=weights_path("decoding"))
+			model.module.save_WFEncoding_weights(weights_path=weights_path("encoding"))
+			model.module.save_WFDecoding_weights(weights_path=weights_path("decoding"))
 		elif train_type == "diffusion":
-			model.save_WFDiffusion_weights(weights_path=weights_path("diffusion"))
+			model.module.save_WFDiffusion_weights(weights_path=weights_path("diffusion"))
 
 # ----------------------------------------------------------------------------------------------------------------------

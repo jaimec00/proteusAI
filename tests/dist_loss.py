@@ -7,13 +7,13 @@ def main():
 	device = "cuda"
 	torch.manual_seed(1)
 
-	batch, N, bins, d_k = 1, 4096, 32, 8
+	batch, N, bins, d_model = 1, 4096, 32, 128
 	min_d, max_d = 2., 22.
 	label_smoothing = 0.0
 
 	coords = torch.rand((batch, N, 3), device=device) * 20
-	features = torch.rand((batch, N, d_k), device=device, requires_grad=True) 
-	bin_proj = torch.rand((d_k, bins), device=device, requires_grad=True)
+	features = torch.rand((batch, N, d_model), device=device, requires_grad=True) 
+	bin_proj = torch.rand((d_model, bins), device=device, requires_grad=True)
 	mask = torch.rand((batch, N), device=device) > 0.8
 	bins = torch.cat([torch.tensor([0], device=device), torch.linspace(min_d, max_d, bins-1, device=device), torch.tensor([float("inf")], device=device)])
 
@@ -83,7 +83,7 @@ def distogram_torch(features, coords, bins, bin_proj, mask, label_smoothing):
 	labels_flat = labels.view(-1)
 
 	# get the bin prediction probabilities, by dotting the DK dim for each B
-	pred = torch.matmul(bin_proj[None, None, :, :], features[:, :, None :] + features[:, None, :, :]) # Z x N x N x D @ 1 x 1 x D x B --> Z x N x N x B
+	pred = torch.matmul(features[:, :, None :] + features[:, None, :, :], bin_proj[None, None, :, :]) # Z x N x N x D @ 1 x 1 x D x B --> Z x N x N x B
 	p_pred_flat = pred.view(-1, pred.size(3))
 
 	# compute cel

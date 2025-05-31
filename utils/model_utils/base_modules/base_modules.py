@@ -69,10 +69,10 @@ class CrossFeatureNorm(nn.Module):
 		batch, N, d_model = x.shape
 
 		mask = mask if mask is not None else torch.ones(batch, N, device=x.device, dtype=torch.bool) # Z x N
-		valid = mask.sum(dim=1, keepdim=True).unsqueeze(2).clamp(min=1) # Z x 1 x 1
-		mean = (x*mask.unsqueeze(2)).sum(dim=1, keepdim=True) / valid # Z x 1 x D
+		valid = (~mask).sum(dim=1, keepdim=True).unsqueeze(2).clamp(min=1) # Z x 1 x 1
+		mean = (x*(~mask).unsqueeze(2)).sum(dim=1, keepdim=True) / valid # Z x 1 x D
 		x = x - mean # Z x N x D
-		std = torch.sqrt(x.pow(2).sum(dim=1, keepdim=True)/valid) # Z x 1 x D
+		std = torch.sqrt(torch.where(x.sum(dim=1, keepdim=True)==0, 1, x.pow(2)).sum(dim=1, keepdim=True)/valid) # Z x 1 x D
 		x = x/std # Z x N x D
 		# x = x/(d_model**0.5) # Z x N x D
 

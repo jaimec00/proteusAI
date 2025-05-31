@@ -197,7 +197,9 @@ def _attn_fwd(
 
 		# scale attention logits by Rij and mask invalid pairs
 		Rij_norm = ((2*(Rij-min_rbf)/rbf_range) - 1)
-		SRij = tl.where(attn_mask, Sij + (beta*Rij_norm*tl.abs(Sij)), -inf) # N x N (fp32)
+		# SRij = tl.where(attn_mask, Sij + (beta*Rij_norm*tl.abs(Sij)), -inf) # N x N (fp32)
+		SRij = tl.where(attn_mask, Sij + (beta*Rij_norm*Sij), -inf) # N x N (fp32)
+		# SRij = tl.where(attn_mask, Sij + (beta*Rij_norm), -inf) # N x N (fp32)
 
 		# max of each row
 		mij = tl.maximum(mi, tl.max(SRij, axis=1)) # N,  (fp32)
@@ -435,7 +437,9 @@ def _attn_bwd(
 
 		# scale attention logits by RBFs
 		Rij_norm = ((2*(Rij-min_rbf)/rbf_range) - 1)
-		SRij = tl.where(attn_mask, Sij + beta*Rij_norm*tl.abs(Sij), -inf) # N x N (fp32)
+		# SRij = tl.where(attn_mask, Sij + beta*Rij_norm*tl.abs(Sij), -inf) # N x N (fp32)
+		SRij = tl.where(attn_mask, Sij + beta*Rij_norm*Sij, -inf) # N x N (fp32)
+		# SRij = tl.where(attn_mask, Sij + beta*Rij_norm, -inf) # N x N (fp32)
 
 		# load log sum exp statistics
 		Li = tl.load(Li_block_ptr, boundary_check=(0, ), padding_option="zero") # (fp32)
@@ -458,13 +462,19 @@ def _attn_bwd(
 		dSRij = Pij * (dPij -  tl.load(Di_block_ptr, boundary_check=(0, ), padding_option="zero")[:, None]) # N x N
 
 		# compute dSij, ie grad wrt Sij. 
-		dSij = dSRij* (1 + beta*Rij_norm*tl.where(Sij<0, -1, 1)*(Sij!=0)) # N x N
+		# dSij = dSRij* (1 + beta*Rij_norm*tl.where(Sij<0, -1, 1)*(Sij!=0)) # N x N
+		dSij = dSRij* (1 + beta*Rij_norm) # N x N
+		# dSij = dSRij # N x N
 
 		# compute gradient wrt rbfs. 
-		dRij = dSRij * tl.abs(Sij)*2 * beta / rbf_range
+		# dRij = dSRij * tl.abs(Sij)*2 * beta / rbf_range
+		dRij = dSRij * Sij*2 * beta / rbf_range
+		# dRij = dSRij *2 * beta / rbf_range
 
 		# grads wrt beta, the rbf scaling factor
-		d_beta += tl.sum(dSRij * Rij_norm * tl.abs(Sij)).to(tl.float32)
+		# d_beta += tl.sum(dSRij * Rij_norm * tl.abs(Sij)).to(tl.float32)
+		d_beta += tl.sum(dSRij * Rij_norm * Sij).to(tl.float32)
+		# d_beta += tl.sum(dSRij * Rij_norm ).to(tl.float32)
 
 		# compute the gradient wrt the spread of this head
 		# 		d_rbfs/dspreads  = d/dspreads exp(-(d^2)/(2*sigma^2))

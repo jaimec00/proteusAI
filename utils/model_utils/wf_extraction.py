@@ -27,12 +27,17 @@ class WaveFunctionExtraction(nn.Module):
 
 		super(WaveFunctionExtraction, self).__init__()
 
+		
+		identity = lambda x: x # identity functino to skip computation
+		zero = lambda x: torch.zeros_like(x) # returns zeros tensor, for funcs that are included in skip connection
+
 		self.dropout = nn.Dropout(dropout)
-		# self.proj_pre = nn.Linear(d_wf, d_model)
-		self.mlp_pre = MLP(d_in=d_model, d_out=d_model, d_hidden=d_hidden_pre, hidden_layers=hidden_layers_pre, dropout=dropout)
-		self.norm_pre = nn.LayerNorm(d_model)
-		self.mlp_post = MLP(d_in=d_model, d_out=d_model, d_hidden=d_hidden_post, hidden_layers=hidden_layers_post, dropout=dropout)
-		self.norm_post = nn.LayerNorm(d_model)
+
+		self.proj_pre = nn.Linear(d_wf, d_model) if d_wf!=d_model else identity # skip linear if same dims
+		self.mlp_pre = MLP(d_in=d_model, d_out=d_model, d_hidden=d_hidden_pre, hidden_layers=hidden_layers_pre, dropout=dropout) if hidden_layers_pre!=-1 else zero
+		self.norm_pre = nn.LayerNorm(d_model) if hidden_layers_pre!=-1 else identity
+		self.mlp_post = MLP(d_in=d_model, d_out=d_model, d_hidden=d_hidden_post, hidden_layers=hidden_layers_post, dropout=dropout) if hidden_layers_post!=-1 else zero
+		self.norm_post = nn.LayerNorm(d_model) if hidden_layers_post!=-1 else identity
 
 		self.encoders = nn.ModuleList([ Encoder(	d_model=d_model, d_other=d_model, heads=heads, 
 													min_rbf=min_rbf, bias=use_bias,
@@ -50,28 +55,22 @@ class WaveFunctionExtraction(nn.Module):
 	def forward(self, wf, coords, key_padding_mask=None, distogram=False):
 
 		# linear projection
-		# wf = self.proj_pre(wf)
+		wf = self.proj_pre(wf)
 
 		# non linear tranformation for more intricate features
 		wf = self.norm_pre(wf + self.mlp_pre(wf))
-		# wf = self.norm_pre(wf+self.mlp_pre(wf))
-		# wf = self.norm_pre(wf)#+self.mlp_pre(wf))
 
 		# geometric/vanilla attn encoders
 		for encoder in self.encoders:
 			wf = encoder(wf, wf, wf, coords, mask=key_padding_mask)
 
-		# # post process #SKIPPING POST MLP, IF OLD DOESNT WORK, add this back
+		# # post process
 		wf = self.norm_post(wf + self.dropout(self.mlp_post(wf)))
 
 		# map to probability logits
 		aa_logits = self.out_proj(wf)
 
-		# if distogram: # predicts features for distogram computation
-		# 	space = torch.matmul(wf.unsqueeze(1), self.dist_proj.unsqueeze(0)).permute(0,2,1,3) / (wf.size(2)**0.5)
-		# 	return aa_logits, space
-
-		return aa_logits#, None
+		return aa_logits#, wf # also return the wf before aa projection, since need to run the triton kernel with this
 
 	def sample(self, aa_logits, temp=1e-6):
 
