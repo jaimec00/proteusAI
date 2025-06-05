@@ -288,7 +288,7 @@ class TrainingRun():
 									eps=float(self.training_parameters.adam.epsilon))
 		self.optim.zero_grad()
 		if self.training_parameters.adam.use_adam:
-			self.optim.load_state_dict(self.training_parameters.adam.use_adam)
+			self.optim.load_state_dict(torch.load(self.training_parameters.adam.use_adam, weights_only=True, map_location=self.gpu))
 
 	def setup_scheduler(self):
 		'''
@@ -405,8 +405,8 @@ class TrainingRun():
 			self.model_checkpoint(epoch_idx)
 			if self.training_converged(epoch_idx): break
 			
-			self.check_if_freeze_embedding() # freeze embedding once validation seq sim gets high enough
-			self.check_if_turn_bias_on() # turn geo attn bias on once QKV weights and embedding are well tuned
+			# self.check_if_freeze_embedding() # freeze embedding once validation seq sim gets high enough
+			# self.check_if_turn_bias_on() # turn geo attn bias on once QKV weights and embedding are well tuned
 
 		self.output.plot_training(self.losses, self.training_parameters.train_type)
 		self.output.save_model(self.model, train_type=self.training_parameters.train_type)

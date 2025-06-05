@@ -12,6 +12,7 @@ description:	embeds the structure + sequence into single representation via wave
 
 import torch
 import torch.nn as nn
+from utils.model_utils.wf_embedding.isotropic.cuda.wf_embedding import wf_embedding as wf_embedding_iso
 from utils.model_utils.wf_embedding.anisotropic.aa_scaling.learnable_aa.learnable_wavenumber.cuda.wf_embedding import wf_embedding as wf_embedding_learnAA
 from utils.model_utils.wf_embedding.anisotropic.aa_scaling.static_aa.cuda.wf_embedding import wf_embedding as wf_embedding_staticAA
 from utils.model_utils.wf_embedding.anisotropic.cb_scaling.learnable_wavenumbers.cuda.wf_embedding import wf_embedding as wf_embedding_learnCB
@@ -41,7 +42,7 @@ class WaveFunctionEmbedding(nn.Module):
 			self.aa_magnitudes = nn.Parameter(aas, requires_grad=learn_aa)
 
 		# additional layers
-		self.norm1 = CrossFeatureNorm(d_model)
+		# self.norm1 = CrossFeatureNorm(d_model)
 		self.norm2 = StaticLayerNorm(d_model)
 
 	def get_wavenumbers(self):
@@ -50,6 +51,7 @@ class WaveFunctionEmbedding(nn.Module):
 	def forward(self, coords_alpha, coords_beta, aa_labels, key_padding_mask=None, no_aa=False):
 
 		if self.old: 
+			# wf = wf_embedding_iso(coords_alpha, self.get_wavenumbers(), magnitude_type=1, dropout_p=0.0, mask=key_padding_mask)
 			wf = wf_embedding_learnCB(coords_alpha, coords_beta, self.aa_magnitudes, self.get_wavenumbers(), mask=key_padding_mask)
 
 		else:
@@ -63,7 +65,8 @@ class WaveFunctionEmbedding(nn.Module):
 					wf = wf_embedding_staticAA(coords_alpha, coords_beta, aa_labels, self.aa_magnitudes, self.get_wavenumbers(), dropout_p=0.0, mask=key_padding_mask)
 
 		# norming improvves performance, norms each tokens features, no affine transformation, so not layernorm
-		wf = self.norm2(self.norm1(wf, key_padding_mask))
+		# wf = self.norm2(self.norm1(wf, key_padding_mask))
+		wf = self.norm2(wf)
 
 		return wf
 

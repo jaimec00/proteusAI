@@ -238,8 +238,14 @@ class Batch():
 		# get wf
 		wf = self.epoch_parent.training_run_parent.model(coords_alpha=self.coords_alpha, coords_beta=self.coords_beta, aas=self.aas, key_padding_mask=self.key_padding_mask, embedding=True)
 
-		# extract sequence 
-		seq_pred = self.epoch_parent.training_run_parent.model(wf=wf, coords_alpha=self.coords_alpha, key_padding_mask=self.key_padding_mask, distogram=True, extraction=True)
+		# 
+		positions = [[i for start, stop in batch for i in range(0, stop-start)] for batch in self.chain_idxs]
+		positions_padded_seq = [batch + [0]*(wf.size(1)-len(batch)) for batch in positions]
+		pad_batch = [[0 for _ in range(wf.size(1))]]
+		positions_padded = torch.tensor(positions_padded_seq + pad_batch*(wf.size(0) - len(positions_padded_seq)), device=wf.device)
+
+		# extract sequence
+		seq_pred = self.epoch_parent.training_run_parent.model(wf=wf, coords_alpha=self.coords_alpha, key_padding_mask=self.key_padding_mask, distogram=True, extraction=True, positions=positions_padded)
 
 		# dists = self.epoch_parent.training_run_parent.model.wf_extraction.dist_proj, wf
 

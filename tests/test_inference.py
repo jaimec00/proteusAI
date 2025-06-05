@@ -8,7 +8,7 @@ def main():
 	device = torch.device("cuda")
 
 	# setup model
-	model = proteusAI(old=True, mlm=False, extraction_min_rbf=0.001, extraction_encoder_layers=4, extraction_use_bias=True)
+	model = proteusAI(old=True, mlm=False, extraction_min_rbf=0.001, extraction_encoder_layers=4, extraction_heads=8, extraction_use_bias=True)
 	model_path = "/scratch/hjc2538/projects/proteusAI/models/geo_attn_old_4enc_adaptivebias/model_parameters.pth"
 	# model_path = "/scratch/hjc2538/projects/proteusAI/models/redo_imfuckinglost/model_parameters_e9_s2.26.pth"
 	# model_path = "/scratch/hjc2538/projects/proteusAI/models/mlm_from_scratch_pure_attn/ctd/model_parameters_e59_s1.74.pth"

@@ -89,6 +89,23 @@ class StaticLayerNorm(nn.Module):
 		std = std.masked_fill(std==0, 1)
 		return centered / std
 
+class PositionalEncoding(nn.Module):
+	def __init__(self, d_model=512):
+		super(PositionalEncoding, self).__init__()
+
+		self.d_model = d_model
+		self.register_buffer('wavenumbers', torch.pow(10000, -(torch.arange(0, d_model, 2, dtype=torch.float32) / d_model)))
+
+	def forward(self, pos):
+
+		batch, N = pos.shape
+
+		phase = pos[:, :, None] * self.wavenumbers[None, None, :]
+
+		pe = torch.stack([torch.sin(phase), torch.cos(phase)], dim=3).view(batch, N, self.d_model) # N x d_model
+		
+		return pe
+
 class FiLM(nn.Module):
 	def __init__(self, d_model=512, d_hidden=1024, hidden_layers=0, dropout=0.1):
 		super(FiLM, self).__init__()

@@ -9,7 +9,7 @@ description:	extracts sequence information from wavefunction representation of p
 import torch
 import torch.nn as nn
 from utils.model_utils.base_modules.encoder import Encoder
-from utils.model_utils.base_modules.base_modules import init_xavier, MLP
+from utils.model_utils.base_modules.base_modules import init_xavier, MLP, PositionalEncoding
 
 # ----------------------------------------------------------------------------------------------------------------------
 
@@ -39,6 +39,8 @@ class WaveFunctionExtraction(nn.Module):
 		self.mlp_post = MLP(d_in=d_model, d_out=d_model, d_hidden=d_hidden_post, hidden_layers=hidden_layers_post, dropout=dropout) if hidden_layers_post!=-1 else zero
 		self.norm_post = nn.LayerNorm(d_model) if hidden_layers_post!=-1 else identity
 
+		# self.pe = PositionalEncoding(d_model)
+
 		self.encoders = nn.ModuleList([ Encoder(	d_model=d_model, d_other=d_model, heads=heads, 
 													min_rbf=min_rbf, bias=use_bias,
 													d_hidden=d_hidden_attn, hidden_layers=hidden_layers_attn, 
@@ -52,13 +54,16 @@ class WaveFunctionExtraction(nn.Module):
 		# self.dist_proj = nn.Parameter(torch.rand((d_model, bins))) # project i+j from Nxd to Nxb
 		init_xavier(self.out_proj)
 
-	def forward(self, wf, coords, key_padding_mask=None, distogram=False):
+	def forward(self, wf, coords, key_padding_mask=None, distogram=False, positions=None):
 
 		# linear projection
 		wf = self.proj_pre(wf)
 
 		# non linear tranformation for more intricate features
 		wf = self.norm_pre(wf + self.mlp_pre(wf))
+
+		# testing positional encoding
+		# wf = wf + self.pe(positions)
 
 		# geometric/vanilla attn encoders
 		for encoder in self.encoders:

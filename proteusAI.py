@@ -128,7 +128,7 @@ class proteusAI(nn.Module):
 													)
 
 	def forward(self, 	coords_alpha=None, coords_beta=None, aas=None, wf=None, wf_no_aa=None, latent=None, t=None, chain_idxs=None, key_padding_mask=None, 
-						embedding=False, encoding=False, diffusion=False, decoding=False, extraction=False, no_aa=False, distogram=False, 
+						embedding=False, encoding=False, diffusion=False, decoding=False, extraction=False, no_aa=False, distogram=False, positions=None,
 						inference=False, cycles=10, temp=1e-6 # last row is for inference only
 				):
 
@@ -161,7 +161,7 @@ class proteusAI(nn.Module):
 			wf = self.wf_decoding(latent, wf_no_aa, key_padding_mask=key_padding_mask)
 		elif extraction: # run extraction
 			assert wf is not None, "wf cannot be NoneType if running extraction, must be a tensor of size batch x N x d_model"
-			wf = self.wf_extraction(wf, coords_alpha, key_padding_mask=key_padding_mask, distogram=distogram)
+			wf = self.wf_extraction(wf, coords_alpha, key_padding_mask=key_padding_mask, distogram=distogram, positions=positions)
 
 		return wf
 
