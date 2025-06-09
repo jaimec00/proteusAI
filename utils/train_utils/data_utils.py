@@ -158,12 +158,10 @@ class BioUnitCache():
 
 	def add_biounit(self, biounit, biounit_id):
 
-		return # getting oom errors, and this doesnt even speed it up by that much, also the check below seems to not work
-
 		# check current mem allocation, if > 90% of allocated, do not add to biounit cache,
 		# will need to load anything that is not on cache from disk
 		current_mem = (self.process.memory_info().rss * self.world_size) / (1024**2) # convert to megabytes
-		if current_mem < (self.max_mem * 0.5):
+		if current_mem < (self.max_mem * 0.9):
 			with self.lock:
 				self.biounits[biounit_id] = biounit 
 

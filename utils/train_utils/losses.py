@@ -44,7 +44,9 @@ class ExtractionLosses():
 		self.cel = [] # cel for aa prediction from wf
 		self.dist_cel = [] # cel for aa prediction from wf
 		self.full_loss = [] # cel for aa prediction from wf
-		self.matches = [] # number of matches from greedy selection of aa, just for logging
+		self.matches1 = [] # number of matches from greedy selection of aa, just for logging
+		self.matches3 = [] 
+		self.matches5 = [] 
 
 		# to scale losses for logging, does not affect backprop
 		self.valid_toks = 0 # valid tokens to compute avg per token per cha
@@ -57,43 +59,53 @@ class ExtractionLosses():
 		avg_cel = sum(cel.item() for cel in self.cel if cel) / valid_toks
 		avg_dist_cel = sum(dist_cel.item() for dist_cel in self.dist_cel if dist_cel) / valid_toks
 		avg_loss = sum(loss.item() for loss in self.full_loss if loss) / valid_toks
-		avg_seq_sim = 100*sum(match.item() for match in self.matches if match) / valid_toks
+		avg_seq_sim = 100*sum(match.item() for match in self.matches1 if match) / valid_toks
+		avg_seq_sim3 = 100*sum(match.item() for match in self.matches3 if match) / valid_toks
+		avg_seq_sim5 = 100*sum(match.item() for match in self.matches5 if match) / valid_toks
 		
-		return avg_cel, avg_dist_cel, avg_loss, avg_seq_sim
+		return avg_cel, avg_dist_cel, avg_loss, avg_seq_sim, avg_seq_sim3, avg_seq_sim5
 
-	def add_losses(self, cel, dist_cel, full_loss, matches, valid_toks=1):
+	def add_losses(self, cel, dist_cel, full_loss, matches1, matches3, matches5, valid_toks=1):
 		self.cel.append(cel)
 		self.dist_cel.append(dist_cel)
 		self.full_loss.append(full_loss)
-		self.matches.append(matches)
+		self.matches1.append(matches1)
+		self.matches3.append(matches3)
+		self.matches5.append(matches5)
 		self.valid_toks += valid_toks
 
 	def extend_losses(self, other):
 		self.cel.extend(other.cel)
 		self.dist_cel.extend(other.dist_cel)
 		self.full_loss.extend(other.full_loss)
-		self.matches.extend(other.matches)
+		self.matches1.extend(other.matches1)
+		self.matches3.extend(other.matches3)
+		self.matches5.extend(other.matches5)
 		self.valid_toks += other.valid_toks
 
 	def clear_losses(self):
 		self.cel = []
 		self.dist_cel = []
 		self.full_loss = []
-		self.matches = []
+		self.matches1 = []
+		self.matches3 = []
+		self.matches5 = []
 		self.valid_toks = 0
 
 	def get_last_loss(self):
 		return self.full_loss[-1]
 
 	def get_last_match(self):
-		return self.matches[-1]
+		return self.matches1[-1]
 
 	def to_numpy(self):
 		'''utility when plotting losses w/ matplotlib'''
 		self.cel = [loss.detach().to("cpu").numpy() if isinstance(loss, torch.Tensor) else np.array([loss]) for loss in self.cel]
 		self.dist_cel = [loss.detach().to("cpu").numpy() if isinstance(loss, torch.Tensor) else np.array([loss]) for loss in self.dist_cel]
 		self.full_loss = [loss.detach().to("cpu").numpy() if isinstance(loss, torch.Tensor) else np.array([loss]) for loss in self.full_loss]
-		self.matches = [match.detach().to("cpu").numpy() if isinstance(match, torch.Tensor) else np.array([match]) for match in self.matches]
+		self.matches1 = [match.detach().to("cpu").numpy() if isinstance(match, torch.Tensor) else np.array([match]) for match in self.matches1]
+		self.matches3 = [match.detach().to("cpu").numpy() if isinstance(match, torch.Tensor) else np.array([match]) for match in self.matches3]
+		self.matches5 = [match.detach().to("cpu").numpy() if isinstance(match, torch.Tensor) else np.array([match]) for match in self.matches5]
 
 	def __len__(self):
 		return len(self.cel)
@@ -238,22 +250,32 @@ class ExtractionLossFunction(nn.Module):
 		return cel
 
 	def compute_matches(self, seq_pred, seq_true):
-		'''greedy selection, computed seq sim here for simplicity, will do it with other losses later '''
+		'''
+		greedy selection, computed seq sim here for simplicity, will do it with other losses later 
+		also computes top3 and top5 accuracy
+		'''
 		
-		prediction_flat = seq_pred.softmax(dim=2).argmax(dim=2).view(-1) # batch*N
-		true_flat = seq_true.view(-1) # batch x N --> batch*N,
+		# dont need softmax for topk analysis
+		top1 = torch.argmax(seq_pred, dim=2).view(-1) # Z*N,
+		top3 = torch.topk(seq_pred, 3, 2, largest=True, sorted=False).indices.view(-1, 3) # Z*N x 3
+		top5 = torch.topk(seq_pred, 5, 2, largest=True, sorted=False).indices.view(-1, 5) # Z*N x 5
+
+		true_flat = seq_true.view(-1) # Z x N --> Z*N,
 		valid_mask = true_flat != -1 # batch*N, 
-		matches = ((prediction_flat == true_flat) & (valid_mask)).sum() # 1, 
-		
-		return matches 
+
+		matches1 = ((top1 == true_flat) & (valid_mask)).sum() # 1, 
+		matches3 = ((top3 == true_flat[:, None]).any(dim=1) & (valid_mask)).sum() # 1, 
+		matches5 = ((top5 == true_flat[:, None]).any(dim=1) & (valid_mask)).sum() # 1, 
+
+		return matches1, matches3, matches5
 
 	def forward(self, seq_pred, seq_true, dist_features=None, coords=None, mask=None):
 		cel = self.cel(seq_pred, seq_true)
 		# dist_cel = self.dist_cel(dist_features, coords, mask) if dist_features is not None else 0.0 # seperate mask than labels, since also predicting dists for non repre chains
 		full_loss = cel #+ (self.beta*dist_cel) # divide by number of tokens, since cel is computed on NxN samples, basically sum of avg cel for each other token. this makes cel and dist cel be on same scale 
-		matches = self.compute_matches(seq_pred, seq_true)
+		matches1, matches3, matches5 = self.compute_matches(seq_pred, seq_true)
 
-		return cel, 0.0, full_loss, matches # return all for logging, only full loss used for backprop
+		return cel, 0.0, full_loss, matches1, matches3, matches5 # return all for logging, only full loss used for backprop
 
 class VAELossFunction(nn.Module):
 

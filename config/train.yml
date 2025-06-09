@@ -16,9 +16,9 @@ hyper_parameters:
   # ----------------------------------------------------------------------------
 
   # main stuff
-  d_wf: 256 # d_wf // 2 is the number of wavefunctions defined for each protein, since each wf produces real and imag part
-  d_latent: 256 # for latent diffusion, focusing on mlm rn, but will get back to this over the summer
-  d_model: 256 # d_model, projects d_wf to this before attention
+  d_wf: 512 # d_wf // 2 is the number of wavefunctions defined for each protein, since each wf produces real and imag part
+  d_latent: 512 # for latent diffusion, focusing on mlm rn, but will get back to this over the summer
+  d_model: 512 # d_model, projects d_wf to this before attention
   num_aa: 20 # number of amino acids
 
   # ----------------------------------------------------------------------------
@@ -28,8 +28,8 @@ hyper_parameters:
     min_wl: 3.0
     max_wl: 40.0
     base_wl: 50.0
-    learn_wl: True # learnt the wavenumbers
-    learn_aa: True # learn the scaling factors
+    learn_wl: False # learnt the wavenumbers
+    learn_aa: False # learn the scaling factors
 
   # ----------------------------------------------------------------------------
 
@@ -100,17 +100,17 @@ hyper_parameters:
       min_dist: 2.0
       max_dist: 22.0
     pre_process:
-      d_hidden: 1024
-      hidden_layers: 0 # -1 means skip the mlp
+      d_hidden: 2048
+      hidden_layers: -1 # -1 means skip the mlp
     post_process:
-      d_hidden: 1024
-      hidden_layers: 0
+      d_hidden: 2048
+      hidden_layers: -1
     encoders:
-      layers: 4
+      layers: 8
       heads: 8
-      use_bias: True
-      min_rbf: 0.001
-      d_hidden_attn: 1024
+      use_bias: False
+      min_rbf: 0.000
+      d_hidden_attn: 2048
       hidden_layers_attn: 0
 
 # ------------------------------------------------------------------------------
@@ -118,7 +118,7 @@ hyper_parameters:
 # training params
 training_parameters:
 
-  rng: 80 # for data loading
+  rng: 0 # for data loading
 
   train_type: "old"  # options are:
                             #   extraction:
@@ -148,9 +148,10 @@ training_parameters:
       freeze_at_seq_sim: 100.0 # once validation reaches this, wavenumbers and aa magnitudes are frozen. set to 0 to freeze immediately, >=100 to never freeze
     geo_attn:
       init_bias_off: False # start with no spatial bias, until reach a certain seq sim, which means the features are now useful
-      turn_bias_on_at_seq_sim: 20.0
+      turn_bias_on_at_seq_sim: 100.0
 
-    use_model: "/scratch/hjc2538/projects/proteusAI/models/20drop_256dim/ctd/model_parameters_e39_s2.19.pth"
+    use_model: ""
+    # use_model: "/scratch/hjc2538/projects/proteusAI/models/20drop_256dim/ctd/model_parameters_e39_s2.19.pth"
     # use_model: "/scratch/hjc2538/projects/proteusAI/models/20drop_256dim/model_parameters_e39_s2.27.pth"
     # use_model: "/scratch/hjc2538/projects/proteusAI/models/1pctmask/ctd/model_parameters_e79_s2.25.pth"
     # use_model: "/scratch/hjc2538/projects/proteusAI/models/4enc_nobias_redo/model_parameters_e29_s2.27.pth"
@@ -171,10 +172,11 @@ training_parameters:
   # convergence criteria
   early_stopping:
     thresh: 0.00 # delta validation sequence similarity, if below this value, training is stopped. negative values mean the seq sim must decrease before stopping
-    tolerance: 25 # how many epochs to consider when calculating delta seq sim for early stopping. takes the max delta seq sim between current epoch and last n epochs, and decides based on this
+    tolerance: 1000 # how many epochs to consider when calculating delta seq sim for early stopping. takes the max delta seq sim between current epoch and last n epochs, and decides based on this
   
   adam:
-    use_adam: "/scratch/hjc2538/projects/proteusAI/models/20drop_256dim/ctd/adam_e39_s2.19.pth"
+    use_adam: ""
+    # use_adam: "/scratch/hjc2538/projects/proteusAI/models/20drop_256dim/ctd/adam_e39_s2.19.pth"
     # use_adam: "/scratch/hjc2538/projects/proteusAI/models/20drop_256dim/adam_e39_s2.27.pth"
     # use_adam: "/scratch/hjc2538/projects/proteusAI/models/1pctmask/ctd/adam_e79_s2.25.pth"
     beta1: 0.90  # decay rate of momentum term
@@ -182,16 +184,16 @@ training_parameters:
     epsilon: !!float 10e-9  # for numerical stability in param updates (!!float lets PyYAML know this is a float, not str)
   
   regularization:
-    dropout: 0.20  # percentage of dropout
+    dropout: 0.00  # percentage of dropout
     wf_dropout: 0.00 # dropout for wf embedding, drops out this pct of sources, diff sources dropped for diff wavenumbers
     attn_dropout: 0.00
-    noise_coords_std: 0.00 # stdev of noise injection into coordinates during training
+    noise_coords_std: 0.02 # stdev of noise injection into coordinates during training
     use_chain_mask: True # whether to mask all chains except the sequence cluster representative in loss computation, all chains still used for fwd pass as context though
     # max_crop: 0.20 # randomly remove this pct of residues
 
   loss:
     # i think grad accum is v important for diffusion, will see if this helps
-    accumulation_steps: 8  # grad accumulation; how many batches to process before learning step. i think mlm needs better grad approx, will see
+    accumulation_steps: 16384  # grad accumulation; how many batches to process before learning step. i think mlm needs better grad approx, will see
                             # note that this depends on if doing multi gpu training, if have two gpus with accum=1, then each step occurs after 1 batch per gpu --> 2 batches in this case
     distogram: 
       label_smoothing: 0.0 # label smoothing on the distogram auxiliary loss
@@ -211,7 +213,7 @@ training_parameters:
     lr_type: "attn"
     lr_step: !!float 1e-3 # max lr, ramps up to this val before decreasing  
     warmup_steps: 6000 # number of warmup steps before decreasing
-    start_from_step: 16811
+    start_from_step: 0
 
 # ------------------------------------------------------------------------------
 
@@ -239,7 +241,7 @@ data:
 
 # Output
 output:
-  out_path: "/scratch/hjc2538/projects/proteusAI/models/20drop_256dim/ctd/ctd"
+  out_path: "/scratch/hjc2538/projects/proteusAI/models/just_attn_8h_8enc_512dim_2pctnoise"
   model_checkpoints: 10 # number of epochs to save a checkpoint of the model after
 
 # ------------------------------------------------------------------------------

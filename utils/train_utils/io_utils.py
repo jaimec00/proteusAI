@@ -241,12 +241,14 @@ class Output():
 		tmp_losses = []
 
 		if train_type in ["extraction", "extraction_finetune", "old", "mlm"]:
-			cel, dist_cel, full_loss, seq_sim = losses.tmp.get_avg()
+			cel, dist_cel, full_loss, seq_sim1, seq_sim3, seq_sim5 = losses.tmp.get_avg()
 			self.log.info(f"{mode} cross entropy loss per token: {str(cel)}")
 			self.log.info(f"{mode} distogram cross entropy loss per token: {str(dist_cel)}")
 			self.log.info(f"{mode} full cross entropy loss per token: {str(full_loss)}")
-			self.log.info(f"{mode} sequence similarity per token: {str(seq_sim)}\n")	
-			tmp_losses.extend([cel, dist_cel, full_loss, seq_sim])
+			self.log.info(f"{mode} top1 accuracy per token: {str(seq_sim1)}")	
+			self.log.info(f"{mode} top3 accuracy per token: {str(seq_sim3)}")	
+			self.log.info(f"{mode} top5 accuracy per token: {str(seq_sim5)}\n")	
+			tmp_losses.extend([cel, dist_cel, full_loss, seq_sim1, seq_sim3, seq_sim5])
 		elif train_type == "vae":
 			kl_div, reconstruction, kl_div_no_aa, reconstruction_no_aa, loss = losses.tmp.get_avg()
 			self.log.info(f"{mode} kl divergence per token: {str(kl_div)}")
@@ -261,7 +263,7 @@ class Output():
 			self.log.info(f"{mode} full loss per token: {str(total_loss)}\n")
 			tmp_losses.extend([squared_error, total_loss])
 
-		if mode == "testing":
+		if mode == "train":
 			losses.train.add_losses(*tmp_losses)
 		elif mode == "validation":	
 			losses.val.add_losses(*tmp_losses)
