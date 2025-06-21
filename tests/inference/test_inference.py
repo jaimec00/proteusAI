@@ -2,23 +2,26 @@ import torch
 from tqdm import tqdm
 from proteusAI import proteusAI
 from utils.train_utils.data_utils import DataHolder
+from utils.inference_utils.inference_utils import load_model
+from data.constants import canonical_aas
 
 def main():
 
 	device = torch.device("cuda")
 
 	# setup model
-	model = proteusAI(old=True, mlm=False, extraction_min_rbf=0.001, extraction_encoder_layers=4, extraction_heads=8, extraction_use_bias=True)
-	model_path = "/scratch/hjc2538/projects/proteusAI/models/geo_attn_old_4enc_adaptivebias/model_parameters.pth"
+	# model_path = "/storage/cms/wangyy_lab/hjc2538/proteusAI/models/multichain/ca/32seqsim/model_parameters_e99_s2.16.pth"	
+	# model_path = "/scratch/hjc2538/projects/proteusAI/models/big_test/model_parameters_e69_s2.19.pth"
+	# model_path = "/scratch/hjc2538/projects/proteusAI/models/geo_attn_2kaccum_4h_4enc_256dim_weightdec1pct_001mask_drop10/model_parameters_e119_s2.21.pth"
+	# model_path = "/scratch/hjc2538/projects/proteusAI/models/recycles_d256/model_parameters_e79_s2.2.pth"
+	# model_path = "/scratch/hjc2538/projects/proteusAI/models/norecycle_12enc_d256/model_parameters_e119_s2.15.pth"
 	# model_path = "/scratch/hjc2538/projects/proteusAI/models/redo_imfuckinglost/model_parameters_e9_s2.26.pth"
 	# model_path = "/scratch/hjc2538/projects/proteusAI/models/mlm_from_scratch_pure_attn/ctd/model_parameters_e59_s1.74.pth"
 	# model_path = "/scratch/hjc2538/projects/proteusAI/models/mlm_from_scratch_pure_attn/ctd_maskedchain/model_parameters_e469_s2.21.pth"
+	model_path = "/scratch/hjc2538/projects/proteusAI/models/mlm_selfupdate/model_parameters_e99_s2.2.pth"
 	
 	model_weights = torch.load(model_path, map_location=device, weights_only=True)
-	emb_weights = {".".join(i.split(".")[1:]): model_weights[i] for i in model_weights.keys() if i.startswith("wf_embedding")}
-	ext_weights = {".".join(i.split(".")[1:]): model_weights[i] for i in model_weights.keys() if i.startswith("wf_extraction")}
-	model.wf_embedding.load_state_dict(emb_weights, strict=True)
-	model.wf_extraction.load_state_dict(ext_weights, strict=True)
+	model = load_model(model_weights)
 	model = model.to(device)
 	model.eval()
 
@@ -27,7 +30,7 @@ def main():
 						0, 0, -1, # train, val, test samples
 						8192, 256, # tokens per batch, max batch size
 						64, 8192, # min seq size, max seq size
-						True, 3.5, True # use chain mask, max resolution
+						True, 3.5, True # use chain mask, max resolution, ca only
 					)
 	data.load("test")
 
@@ -44,23 +47,13 @@ def main():
 			key_padding_mask = key_padding_mask.to(device)
 			coords_alpha, coords_beta = model.wf_embedding.get_CaCb_coords(coords_batch, chain_idxs)
 
-			# for old
-			# wf = model.wf_embedding(coords_alpha, coords_beta, label_batch, key_padding_mask=key_padding_mask)
-			# output = model.wf_extraction(wf, coords_alpha, key_padding_mask=key_padding_mask).argmax(dim=2)
-			# seq_sim, seq_pred, seq_true = get_seq_sim(output, label_batch, chain_idxs, key_padding_mask)
-			# print(seq_sim)
-
-			# for mlm
 			# first test one shot prediction
-			aas = -torch.ones_like(label_batch)
-			# aas = torch.where(chain_mask, label_batch, -1) # mask token
-			# aas = torch.where(chain_mask, -1, -1) # mask token
+			aas = torch.full_like(label_batch, 20)
+
 			wf = model.wf_embedding(coords_alpha, coords_beta, aas, key_padding_mask=key_padding_mask)
-			output = model.wf_extraction(wf, coords_alpha, key_padding_mask=key_padding_mask).argmax(dim=2)
-			# output = model(coords_alpha, coords_beta, aas, key_padding_mask=key_padding_mask, inference=True)
-			# print(output.shape, output)
-			seq_sim, seq_pred, seq_true = get_seq_sim(output, label_batch, chain_idxs, key_padding_mask)
-			print(seq_sim)
+			output = model.wf_extraction(wf, coords_alpha, aas, key_padding_mask=key_padding_mask).argmax(dim=2)
+
+			seq_sim, seq_pred, seq_true = get_seq_sim(output, label_batch, chain_idxs, key_padding_mask, chain_mask)
 
 			seq_sims.extend(seq_sim)
 			preds.extend(seq_pred)
@@ -73,17 +66,16 @@ def main():
 		for seq_sim, pred, lbl in zip(seq_sims, preds, labels):
 			f.write(f"{seq_sim},{len(pred)},{pred.count(":")},{pred},{lbl}\n")
 
-def get_seq_sim(output, labels, chains, mask):
-
-	canonical_aas = ['A', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'K', 'L', 'M', 'N', 'P', 'Q', 'R', 'S', 'T', 'V', 'W', 'Y']
+def get_seq_sim(output, labels, chains, mask, chain_mask):
 
 	seq_sims = []
 	seqs = []
 	true_seqs = []
 
-	for out, lbl, chain, mask1 in zip(output, labels, chains, mask):
-		valid = (~mask1).sum()
-		matches = ((out == lbl) & (~mask1)).sum()
+	for out, lbl, chain, mask1, chain_mask1 in zip(output, labels, chains, mask, chain_mask):
+		all_mask = ~(mask1 | chain_mask1)
+		valid = (all_mask).sum()
+		matches = ((out == lbl) & all_mask).sum()
 		seq_sim = matches / valid
 
 		seq = "".join([canonical_aas[i] for i in out[~mask1]])

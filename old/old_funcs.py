@@ -3,6 +3,177 @@
 import torch
 
 
+class VAELosses():
+	'''
+	class to store losses
+	'''
+	def __init__(self): 
+
+		# saved for logging
+		self.kl_div = [] # kl div to match gaussian prior
+		self.reconstruction = [] # reconstruction of the wf
+
+		self.kl_div_no_aa = []
+		self.reconstruction_no_aa = []
+
+		# actual losses
+		self.all_losses = [] # full scaled loss, contains kldiv, reconstruction, and cel
+
+		# to scale losses for logging, does not affect backprop
+		self.valid_toks = 0 # valid tokens to compute avg per token per cha
+
+	def get_avg(self):
+		'''this method is just for logging purposes, does not rescale loss used in bwd pass'''
+
+		valid_toks = self.valid_toks.item()
+		avg_kl_div = sum(kl_div.item() for kl_div in self.kl_div if kl_div) / valid_toks
+		avg_reconstruction = sum(reconstruction.item() for reconstruction in self.reconstruction if reconstruction) / valid_toks
+		avg_kl_div_no_aa = sum(kl_div.item() for kl_div in self.kl_div_no_aa if kl_div) / valid_toks
+		avg_reconstruction_no_aa = sum(reconstruction.item() for reconstruction in self.reconstruction_no_aa if reconstruction) / valid_toks
+		avg_loss = sum(loss.item() for loss in self.all_losses if loss) / valid_toks
+		
+		return avg_kl_div, avg_reconstruction, avg_kl_div_no_aa, avg_reconstruction_no_aa, avg_loss
+
+	def add_losses(self, kl_div, reconstruction, kl_div_no_aa, reconstruction_no_aa, full_loss, valid_toks=1):
+		self.kl_div.append(kl_div)
+		self.reconstruction.append(reconstruction)
+		self.kl_div_no_aa.append(kl_div_no_aa)
+		self.reconstruction_no_aa.append(reconstruction_no_aa)
+		self.all_losses.append(full_loss)
+		self.valid_toks += valid_toks
+
+	def extend_losses(self, other):
+		self.kl_div.extend(other.kl_div)
+		self.reconstruction.extend(other.reconstruction)
+		self.kl_div_no_aa.extend(kl_div_no_aa)
+		self.reconstruction_no_aa.extend(reconstruction_no_aa)
+		self.all_losses.extend(other.all_losses)
+		self.valid_toks += valid_toks
+
+	def clear_losses(self):
+		self.kl_div = []
+		self.reconstruction = []
+		self.kl_div_no_aa = []
+		self.reconstruction_no_aa = []
+		self.all_losses = []
+		self.valid_toks = 0
+
+	def get_last_loss(self):
+		return self.all_losses[-1]
+
+	def to_numpy(self):
+		'''utility when plotting losses w/ matplotlib'''
+		self.kl_div = [loss.detach().to("cpu").numpy() if isinstance(loss, torch.Tensor) else np.array([loss]) for loss in self.kl_div]
+		self.reconstruction = [loss.detach().to("cpu").numpy() if isinstance(loss, torch.Tensor) else np.array([loss]) for loss in self.reconstruction]
+		self.kl_div_no_aa = [loss.detach().to("cpu").numpy() if isinstance(loss, torch.Tensor) else np.array([loss]) for loss in self.kl_div_no_aa]
+		self.reconstruction_no_aa = [loss.detach().to("cpu").numpy() if isinstance(loss, torch.Tensor) else np.array([loss]) for loss in self.reconstruction_no_aa]
+		self.all_losses = [loss.detach().to("cpu").numpy() if isinstance(loss, torch.Tensor) else np.array([loss]) for loss in self.all_losses]
+
+	def __len__(self):
+		return len(self.all_losses)
+
+class DiffusionLosses():
+	def __init__(self):
+		self.squared_errors = []
+		# self.nll = []
+		self.total_loss = [] # squared_err + gamma*nll
+		self.valid_toks = 0
+
+	def get_avg(self, is_inference=False):
+		'''this method is just for logging purposes, does not rescale loss used in bwd pass'''
+		valid_toks = self.valid_toks.item()
+		if is_inference: # store the seq sims in squared errors list, instead of dealing w seperate lists the whole run
+			return 100*sum(match.item() for match in self.squared_errors if match) / valid_toks
+		else:
+			squared_err = sum(loss.item() for loss in self.squared_errors if loss) / valid_toks
+			# nll = sum(loss.item() for loss in self.nll if loss) / valid_toks
+			total_loss = sum(loss.item() for loss in self.total_loss if loss) / valid_toks
+
+			return squared_err, total_loss
+		
+	def add_losses(self, squared_error, total_loss, valid_toks=1):
+		self.squared_errors.append(squared_error)
+		# self.nll.append(nll)
+		self.total_loss.append(total_loss)
+		self.valid_toks += valid_toks
+
+	def extend_losses(self, other):
+		self.squared_errors.extend(other.squared_errors)
+		# self.nll.extend(other.nll)
+		self.total_loss.extend(other.total_loss)
+		self.valid_toks += other.valid_toks
+
+	def clear_losses(self):
+		self.squared_errors = []
+		# self.nll = []
+		self.total_loss = []
+		self.valid_toks = 0
+
+	def get_last_loss(self):
+		return self.total_loss[-1]
+
+	def to_numpy(self):
+		'''utility when plotting losses w/ matplotlib'''
+		self.squared_errors = [loss.detach().to("cpu").numpy() if isinstance(loss, torch.Tensor) else np.array([loss]) for loss in self.squared_errors]
+		# self.nll = [loss.detach().to("cpu").numpy() if isinstance(loss, torch.Tensor) else np.array([loss]) for loss in self.nll]
+		self.total_loss = [loss.detach().to("cpu").numpy() if isinstance(loss, torch.Tensor) else np.array([loss]) for loss in self.total_loss]
+
+	def __len__(self):
+		return len(self.total_loss)
+
+
+class VAELossFunction(nn.Module):
+
+	def __init__(self, beta=1.0, kappa=1.0, midpoint=4000, anneal=True):
+		super(VAELossFunction, self).__init__()
+		self.beta = beta
+		self.kappa = kappa
+		self.midpoint = midpoint
+		self.anneal = anneal
+		self.kl_annealing_step = 0 # for kl annealing
+
+	def kl_div(self, prior_mean_pred, prior_log_var_pred, mask):
+		kl_div = -0.5*torch.sum(1 + prior_log_var_pred - prior_mean_pred.pow(2) - torch.exp(prior_log_var_pred), dim=2) # Z x N
+		
+		return (kl_div*(~mask)).sum() 
+
+	def reconstruction(self, reconstruct_mean_pred, reconstruct_mean_true, mask):
+		return ((reconstruct_mean_true - reconstruct_mean_pred).pow(2) * (~mask).unsqueeze(2)).sum()
+
+	def full_loss(self, kl_div, reconstruction):# cel is typically larger than mse and kldiv, so scale it down so vae focuses on wf reconstruction more
+
+		# beta starts small and gradualy increases	
+		beta = self.beta if not self.anneal else self.beta/(1+math.exp(-self.kappa*(self.kl_annealing_step-self.midpoint)))
+		return ( beta * kl_div) + reconstruction 
+
+	def forward(self, 	prior_mean_pred, prior_log_var_pred,
+						reconstruct_mean_pred, 
+						prior_mean_pred_no_aa, prior_log_var_pred_no_aa,
+						reconstruct_mean_pred_no_aa, 
+						reconstruct_mean_true, mask
+				):
+		kl_div = self.kl_div(prior_mean_pred, prior_log_var_pred, mask)
+		reconstruction = self.reconstruction(reconstruct_mean_pred, reconstruct_mean_true, mask)
+		kl_div_no_aa = self.kl_div(prior_mean_pred_no_aa, prior_log_var_pred_no_aa, mask)
+		reconstruction_no_aa = self.reconstruction(reconstruct_mean_pred_no_aa, reconstruct_mean_true, mask) 
+		full_loss = self.full_loss(kl_div, reconstruction) + self.full_loss(kl_div_no_aa, reconstruction_no_aa)
+
+		return kl_div, reconstruction, kl_div_no_aa, reconstruction_no_aa, full_loss # return all for logging, only full loss used for backprop
+
+class DiffusionLossFunction(nn.Module):
+	def __init__(self, gamma=1.0): # gamma scales the nll term
+		super(DiffusionLossFunction, self).__init__()
+		self.gamma = gamma
+
+	def forward(self, noise_pred, noise_true, abar, mask):
+		'''sum of squared errors plus an NLL term to evaluate the probability of the estimated x0 under encoders mean and var'''
+
+		squared_err = ((noise_true - noise_pred).pow(2)*(~mask)).sum()
+		loss = squared_err #+ self.gamma*nll # testing if nll implicitly improves squared err
+		return squared_err, loss
+
+# ----------------------------------------------------------------------------------------------------------------------
+
 class AminoAcidEmbedding(nn.Module):
 
 	def __init__(self, num_aas=21, d_model=512, esm2_weights_path="utils/model_utils/esm2/esm2_t33_650M_UR50D.pt", d_hidden_aa=1024, hidden_layers_aa=0, learnable_esm=False, dropout=0.0):
@@ -51,6 +222,372 @@ class AminoAcidEmbedding(nn.Module):
 		return aas
 
 
+class DiTEncoder(nn.Module):
+	'''
+	encoder used in DiT w/ timestep conditioning via adaLN(Zero)
+	'''
+	def __init__(self, 	d_model=512, heads=8, 
+						d_hidden=2048, hidden_layers=0, dropout=0.0,
+						bias=False, min_rbf=0.000,
+						d_in_t=512, d_hidden_t=2048, hidden_layers_t=512
+					):
+		super(DiTEncoder, self).__init__()
+
+		# Self-attention layers
+		if bias:
+			self.attn = GeoAttention(d_model=d_model, heads=heads, min_rbf=min_rbf)
+		else:
+			self.attn = Attention(d_model=d_model, d_other=d_model, heads=heads)
+
+		# adaptive layernorm
+		self.static_norm = StaticLayerNorm(d_model)
+		self.attn_adaLN = adaLN(d_in=d_in_t, d_model=d_model, d_hidden=d_hidden_t, hidden_layers=hidden_layers_t, dropout=dropout)
+		self.ffn_adaLN = adaLN(d_in=d_in_t,  d_model=d_model, d_hidden=d_hidden_t, hidden_layers=hidden_layers_t, dropout=dropout)
+
+		# feed forward network
+		self.ffn = MLP(d_in=d_model, d_out=d_model, d_hidden=d_hidden, hidden_layers=hidden_layers, dropout=dropout)
+
+		# dropout
+		self.dropout = nn.Dropout(dropout)
+
+	def forward(self, x, t, coords, key_padding_mask=None):
+	
+		# get the ada ln
+		gamma1, beta1, alpha1 = self.attn_adaLN(t)
+		gamma2, beta2, alpha2 = self.ffn_adaLN(t)
+
+		# attn
+		x2 = gamma1*self.static_norm(x) + beta1
+		x2 = self.attn(x2, x2, x2, coords, mask=key_padding_mask)
+		x = x + self.dropout(x2*alpha1)
+
+		# ffn
+		x2 = gamma2*self.static_norm(x) + beta2
+		x = x + self.dropout(self.ffn(x2)*alpha2)
+
+		return x
+
+
+class WaveFunctionDecoding(nn.Module):
+	def __init__(self,  d_model=256, d_latent=32, d_proj=512,
+						d_hidden_pre=2048, hidden_layers_pre=0, 
+						d_hidden_post=2048, hidden_layers_post=0,
+						encoder_layers=4, heads=8,
+						use_bias=False, min_rbf=0.000,
+						d_hidden_attn=1024, hidden_layers_attn=0,
+						dropout=0.10,
+					):
+
+		super(WaveFunctionDecoding, self).__init__()
+		
+		self.dropout = nn.Dropout(dropout)
+
+		self.d_proj = nn.Linear(d_latent, d_proj)
+		self.norm = nn.LayerNorm(d_proj)
+		self.space_enc = MLP(d_in=d_model, d_out=d_proj, d_hidden=d_hidden_pre, hidden_layers=hidden_layers_pre, dropout=dropout) 
+
+		self.encoders = nn.ModuleList([ Encoder(	d_model=d_proj, d_other=d_proj, heads=heads, 
+													bias=use_bias, min_rbf=min_rbf,
+													d_hidden=d_hidden_attn, hidden_layers=hidden_layers_attn, 
+													dropout=dropout
+												)
+												for _ in range(encoder_layers)
+											])
+
+		self.mlp_post = MLP(d_in=d_proj, d_out=d_model, d_hidden=d_hidden_post, hidden_layers=hidden_layers_post, dropout=0.0)
+
+	def forward(self, wf, wf_no_aa, key_padding_mask=None): # forward generates the mean and stds, so can use them for loss, 
+		
+		# pre-process the wf
+		wf = self.d_proj(wf)
+		wf = self.norm(wf + self.dropout(self.space_enc(wf_no_aa))) # spatial encoding on aa ambiguous wf (cb scale is mean of all aas for each k)
+
+		# self attention on updated wf
+		for encoder in self.encoders:
+			wf = encoder(wf, wf, wf, mask=key_padding_mask)
+
+		# post-process to get final wf
+		wf = self.mlp_post(wf)
+
+		return wf
+
+
+class WaveFunctionDiffusion(nn.Module):
+	
+	def __init__(self, 	d_latent=256, d_proj=256,
+						alpha_bar_min=0.0, noise_schedule_type="linear", t_max=100,
+						d_in_timestep=256, d_hidden_timestep=1024, hidden_layers_timestep=1,
+						d_hidden_post=1024, hidden_layers_post=0,
+						encoder_layers=4, heads=8,
+						use_bias=False, min_rbf=0.000,
+						d_hidden_attn=2048, hidden_layers_attn=0,
+						dropout=0.10
+				):
+
+		super(WaveFunctionDiffusion, self).__init__()
+
+		# compute wavenumbers for sinusoidal embeddings of timesteps
+		self.register_buffer("wavenumbers", 10000**(-torch.arange(0, d_in_timestep, 2) / d_latent))
+		self.noise_scheduler = NoiseScheduler(alpha_bar_min=alpha_bar_min, noise_schedule_type=noise_schedule_type, t_max=t_max)
+
+		d_proj = 512 # testing if projecting to high dim before attn is beneficial, then projecting back to latent
+		self.d_proj = nn.Linear(d_latent, d_proj)
+
+		self.encoders = nn.ModuleList([ DiTEncoder(	d_model=d_proj, heads=heads, 
+													d_hidden=d_hidden_attn, hidden_layers=hidden_layers_attn, 
+													d_in_t=d_in_timestep, d_hidden_t=d_hidden_timestep, hidden_layers_t=hidden_layers_timestep,		
+													min_rbf=min_rbf, bias=use_bias,
+													dropout=dropout,
+												)
+										for _ in range(encoder_layers)
+									])
+
+		# # self.out_norm = nn.LayerNorm(d_latent)
+		self.noise_proj = nn.Linear(d_proj, d_latent, bias=False)
+		init_xavier(self.noise_proj)
+
+	# wf is the noised wf, context is unnoised, but with no aa info, used as kv in cross attention, defaults to self-attention if context is none
+	def forward(self, wf, t, coords_alpha, key_padding_mask=None):
+
+		# featurize the timestep w/ frequency embedding
+		t_features = self.featurize_t(t)
+
+		# testing if projecting to higher dim before attn helps
+		wf = self.d_proj(wf)
+
+		for encoder in self.encoders:
+			wf = encoder(wf, t_features, coords_alpha, key_padding_mask=key_padding_mask)
+
+		# linear projection for noise pred, no bias
+		noise = self.noise_proj(wf)
+
+		# return noise
+		return noise
+
+	def featurize_t(self, t):
+
+		# once in the latent space, add token embedding info
+		# featurize the timestep (shape: batch, -> batch x 1 x d_latent) with  sinusoidal embedding
+		phase = self.wavenumbers.unsqueeze(0).unsqueeze(1)*t.unsqueeze(1).unsqueeze(2)
+		sine = torch.sin(phase) # Z x 1 x K
+		cosine = torch.cos(phase) # Z x 1 x K
+		t_features = torch.stack([sine, cosine], dim=3).view(t.size(0), 1, self.wavenumbers.size(0)*2) # Z x 1 x d_latent
+
+		return t_features
+
+	def get_random_timesteps(self, batch_size, device):
+		return torch.randint(1, self.noise_scheduler.t_max+1, (batch_size,), device=device)
+
+	def noise(self, wf, t):
+
+		if isinstance(t, int):
+			t = torch.full((wf.size(0), 1, 1), t, device=wf.device)
+		elif isinstance(t, torch.Tensor):
+			t = t.unsqueeze(1).unsqueeze(2)
+		alpha_bar_t, _ = self.noise_scheduler(t) 
+		noise = torch.randn_like(wf)
+		wf = (alpha_bar_t**0.5)*wf + ((1-alpha_bar_t)**0.5)*noise
+
+		return wf, noise
+
+	def denoise(self, wf, t_start, key_padding_mask=None): # meant to operate on same t for all samples in batch during inference
+
+		# convert to tensor
+		t_bwd = torch.full((wf.size(0), 1, 1), t_start, device=wf.device)
+			
+		# perform diffusion
+		while (t_bwd>=1).any():
+
+			# compute alpha_bar for t and t-1
+			alpha_bar_t, alpha_bar_tminus1 = self.noise_scheduler(t_bwd) 
+			
+			# predict the noise
+			noise_pred = self.forward(wf, t_bwd.squeeze(1,2), key_padding_mask=key_padding_mask)
+
+			# update wf, use ode flow to deterministically move the wf towards high prob denisty manifold. non-markovian denoising
+			pred_wf_0 = (wf - ((1-alpha_bar_t)**0.5)*noise_pred)/(alpha_bar_t**0.5)
+
+			pred_wf_grad_t = ((1 - alpha_bar_tminus1)**0.5) * noise_pred
+
+			wf = (alpha_bar_tminus1**0.5)*pred_wf_0 + pred_wf_grad_t
+
+			# update t
+			t_bwd -= 1
+
+		return wf
+
+
+class NoiseScheduler(nn.Module):
+	def __init__(self, alpha_bar_min=0.0, noise_schedule_type="linear", t_max=100):
+		super(NoiseScheduler, self).__init__()
+
+		self.alpha_bar_min = alpha_bar_min # 0.0 is full noise , no signal
+		self.noise_scheduler = self.get_scheduler(noise_schedule_type)
+		self.t_max = t_max
+
+	def forward(self, t: torch.Tensor): # Z x 1 x 1
+		return self.noise_scheduler(t) # Z x 1 x 1
+
+	def cosine_scheduler(self, t: torch.Tensor, s=0.008): # s is approx pixel bin width, no direct equivilant for my data, so just start with this and tune
+		f = lambda t_in: self.alpha_bar_min + (1 - self.alpha_bar_min)*(torch.cos((torch.pi/2)*(t_in/self.t_max + s)/(1 + s))**2)
+		f_t = f(t)
+		f_tminus1 = f(t-1) 
+		f_0 = f(torch.zeros_like(t))
+		alpha_bar_t = f_t / f_0
+		alpha_bar_tminus1 = f_tminus1 / f_0
+
+		return alpha_bar_t, alpha_bar_tminus1
+
+	def linear_scheduler(self, t: torch.Tensor):
+
+		# fuck it, im doing a linear abar scheduler instead
+		alpha_bar_t = self.alpha_bar_min + (1 - (t / self.t_max))*(1 - self.alpha_bar_min)
+		alpha_bar_tminus1 = self.alpha_bar_min + (1 - ((t-1) / self.t_max))*(1 - self.alpha_bar_min)
+		
+		return alpha_bar_t, alpha_bar_tminus1
+
+	def get_scheduler(self, schedule_type):
+
+		schedules = {	
+						"cosine": self.cosine_scheduler,
+						"linear": self.linear_scheduler
+					}
+		try:
+			return schedules[schedule_type]
+		except KeyValueError as e:
+			e(f"invalid noise scheduler chosen. valid options are {schedules.keys()}")
+
+
+class WaveFunctionEncoding(nn.Module):
+	def __init__(self,  d_model=256, d_latent=32, d_proj=512,
+						d_hidden_pre=1024, hidden_layers_pre=0,
+						d_hidden_post=2048, hidden_layers_post=1,
+						encoder_layers=4, heads=8,
+						use_bias=False, min_rbf=0.000,
+						d_hidden_attn=1024, hidden_layers_attn=0,
+						dropout=0.10
+				):
+		super(WaveFunctionEncoding, self).__init__()
+
+		self.dropout = nn.Dropout(dropout)
+
+		# pre preocess
+		self.d_proj = nn.Linear(d_model, d_proj)
+		self.mlp_pre = MLP(d_in=d_proj, d_out=d_proj, d_hidden=d_hidden_pre, hidden_layers=hidden_layers_pre, dropout=dropout)
+		self.norm_pre = nn.LayerNorm(d_proj)
+
+		# self attention on wf
+		self.encoders = nn.ModuleList([ 	Encoder(d_model=d_proj, d_other=d_proj, heads=heads, 
+													min_rbf=min_rbf, bias=use_bias,
+													d_hidden=d_hidden_attn, hidden_layers=hidden_layers_attn, 
+													dropout=dropout)
+											for _ in range(encoder_layers)
+										])
+
+		# post process to get mean and log vars
+		self.mlp_post = MLP(d_in=d_proj, d_out=2*d_latent, d_hidden=d_hidden_post, hidden_layers=hidden_layers_post, dropout=0.0) # no dropout on this mlp
+		
+	def forward(self, wf, key_padding_mask=None, a=2.0): # forward generates the mean and log vars, so can use them for loss, use self.encode to directly sample from latent 
+		
+		# preprocess
+		wf = self.d_proj(wf)
+		wf = self.norm_pre(wf + self.dropout(self.mlp_pre(wf)))
+
+		# wf encoders
+		for encoder in self.encoders:
+			wf = encoder(wf, wf, wf, mask=key_padding_mask)
+
+		# get means and logvars
+		latent_stats = self.mlp_post(wf)
+		latent_mean, latent_log_var = torch.chunk(latent_stats, chunks=2, dim=2)
+
+		# map the log var to [-a,a], for numerical stability
+		# latent_log_var = a*torch.tanh(latent_log_var/a)
+
+		return latent_mean, latent_log_var
+
+	def sample(self, latent_mean, latent_log_var):
+		return latent_mean + torch.exp(latent_log_var*0.5)*torch.randn_like(latent_log_var)
+
+	def encode(self, wf, key_padding_mask=None):
+		latent_mean, latent_log_var = self.forward(wf, key_padding_mask=key_padding_mask)
+		protein_latent = self.sample(latent_mean, latent_log_var)
+		return protein_latent
+
+
+def inference(self, coords_alpha, coords_beta, aas, key_padding_mask=None, cycles=10, diffusion_iters=1, temp=1e-6):
+
+	# prep
+	batch, N = aas.shape
+	t_max = self.wf_diffusion.noise_scheduler.t_max
+
+	# fixed position have an AA label, positions to predict are -1, so they are set to random aa. doesnt matter too much, bc starts at white noise
+	fixed_aas = aas!=-1
+	aas = torch.where(fixed_aas, aas, torch.randint_like(aas, 0, self.num_aas))
+
+	wf_no_aa = self.wf_embedding(coords_alpha, coords_beta, aas, key_padding_mask=key_padding_mask, no_aa=True)
+
+	# multiple embedding + encoding + diffusion + decoding + extraction runs, each giving a slightly better guess and thus using less noise
+	for t_fwd in range(t_max, 0, -t_max//cycles):
+
+		# perform embedding
+		wf = self.wf_embedding(coords_alpha, coords_beta, aas, key_padding_mask=key_padding_mask)
+
+		# all of the following modules do not use coords alpha, since replaced geo attn with regular attn + spatial encoding, but leaving it until i am sure geo attn is dead
+
+		# encode from wf space to latent space
+		protein = self.wf_encoding.encode(wf, key_padding_mask=key_padding_mask)
+		
+		for diffusion_iter in range(diffusion_iters): # slight nudge, then denoise, then repeat, nudging latent towards manifold, rather than starting from full gaussian
+			
+			# add gaussian noise to latent space
+			protein_noised, _ = self.wf_diffusion.noise(protein, t_fwd)
+
+			# remove the noise
+			protein = self.wf_diffusion.denoise(protein_noised, t_fwd, key_padding_mask=key_padding_mask)
+
+		# decode from latent space to wf space
+		wf_pred = self.wf_decoding(protein, wf_no_aa, key_padding_mask=key_padding_mask)
+
+		# extract sequence from wf
+		aa_pred = self.wf_extraction.extract(wf_pred, wf_no_aa, key_padding_mask=key_padding_mask)
+
+		# keeping fixed positions as they were for next iteration, 
+		aas = torch.where(fixed_aas, aas, aa_pred)
+
+	return aas
+
+def mlm_inference(self, coords_alpha, coords_beta, aas, key_padding_mask=None, entropy_increment=0.1, temp=1e-6):
+
+	entropy_threshold = 0.1 # entropy threshold
+	entropies = torch.zeros_like(aas, dtype=torch.float32) + float("inf") # will return this later so user knows confidence
+	fixed = (aas!=-1) | key_padding_mask # if not -1, then should be fixed as context
+	predicted = fixed # to keep track of predicted pos as loop through
+	aas.masked_fill_(~fixed, 20) # add the mask token to non fixed tokens
+
+	while not predicted.all(): # already deals w/ masking
+
+		# get wf
+		wf = self.wf_embedding(coords_alpha, coords_beta, aas, key_padding_mask=key_padding_mask)
+
+		# predict sequence
+		aa_logits = self.wf_extraction(wf, coords_alpha, key_padding_mask=key_padding_mask)
+		pred_aa = self.wf_extraction.sample(aa_logits, temp)
+
+		# compute entropy
+		probs = aa_logits.softmax(dim=2)
+		entropy = torch.sum(-probs*torch.log(probs), dim=2)
+		
+		# update
+		update_aa = (entropy < entropy_threshold) & (entropies == float("inf")) & (~predicted.all(dim=1, keepdim=True)) # dont update already finished samples
+		entropies[update_aa] = entropy[update_aa]
+		aas[update_aa] = pred_aa[update_aa]
+		predicted |= update_aa
+
+		# increment entropy threshold
+		entropy_threshold += entropy_increment
+
+	return aas
 
 class Decoder(nn.Module):
 	'''
@@ -302,3 +839,372 @@ def fibonacci_sampling(freq_magnitudes: torch.Tensor, freqs_per_layer: int = 32)
 
 	return freq_vectors
 
+
+	def run_vae_training(self):
+		
+		# get wf
+		wf = self.epoch_parent.training_run_parent.model(coords_alpha=self.coords_alpha, coords_beta=self.coords_beta, aas=self.aas, key_padding_mask=self.key_padding_mask, embedding=True)
+		wf_no_aa = self.epoch_parent.training_run_parent.model(coords_alpha=self.coords_alpha, coords_beta=self.coords_beta, aas=self.aas, key_padding_mask=self.key_padding_mask, embedding=True, no_aa=True)
+		
+		# predict mean and log var
+		wf_encoded_mean, wf_encoded_log_var = self.epoch_parent.training_run_parent.model(wf=wf, key_padding_mask=self.key_padding_mask, encoding=True)
+
+		# sample from the latent space given the mean and var
+		wf_encoded = self.epoch_parent.training_run_parent.model.wf_encoding.sample(wf_encoded_mean, wf_encoded_log_var)
+		
+		# decode from latent space to wf space, only computes mean to make reconstruction loss a simple squared error
+		wf_decoded = self.epoch_parent.training_run_parent.model(latent=wf_encoded, wf_no_aa=wf_no_aa, key_padding_mask=self.key_padding_mask, decoding=True)
+
+		# now for aa ambiguous wf
+		
+		# predict mean and log var
+		wf_encoded_mean_no_aa, wf_encoded_log_var_no_aa = self.epoch_parent.training_run_parent.model(wf=wf_no_aa, key_padding_mask=self.key_padding_mask, encoding=True)
+
+		# sample from the latent space given the mean and var
+		wf_encoded_no_aa = self.epoch_parent.training_run_parent.model.wf_encoding.sample(wf_encoded_mean_no_aa, wf_encoded_log_var_no_aa)
+		
+		# decode from latent space to wf space, only computes mean to make reconstruction loss a simple squared error
+		wf_decoded_no_aa = self.epoch_parent.training_run_parent.model(latent=wf_encoded_no_aa, wf_no_aa=wf_no_aa, key_padding_mask=self.key_padding_mask, decoding=True)
+
+		# convert to output object
+		return VAEOutput(self, wf_encoded_mean, wf_encoded_log_var, wf_decoded, wf_encoded_mean_no_aa, wf_encoded_log_var_no_aa, wf_decoded_no_aa, wf)
+
+	def run_extraction_finetune_training(self):
+		
+		# get wf
+		wf = self.epoch_parent.training_run_parent.model(self.coords_alpha, coords_beta=self.coords_beta, aas=self.aas, key_padding_mask=self.key_padding_mask, embedding=True)
+		wf_no_aa = self.epoch_parent.training_run_parent.model(self.coords_alpha, coords_beta=self.coords_beta, aas=self.aas, key_padding_mask=self.key_padding_mask, embedding=True, no_aa=True)
+
+		# make into latent representation
+		wf_encoded = self.epoch_parent.training_run_parent.model.wf_encoding.encode(wf, key_padding_mask=self.key_padding_mask)
+		
+		# decode from latent space to wf space, only computes mean to make reconstruction loss a simple squared error
+		wf_decoded = self.epoch_parent.training_run_parent.model(latent=wf_encoded, wf_no_aa=wf_no_aa, key_padding_mask=self.key_padding_mask, decoding=True)
+
+		# extract sequence
+		seq_pred = self.epoch_parent.training_run_parent.model(wf=wf_decoded, wf_no_aa=wf_no_aa, key_padding_mask=self.key_padding_mask, extraction=True)
+
+		# convert to output object
+		return ExtractionOutput(self, seq_pred)
+
+	def run_diffusion_training(self):
+		
+		# get clean wavefunction
+		wf = self.epoch_parent.training_run_parent.model(coords_alpha=self.coords_alpha, coords_beta=self.coords_beta, aas=self.aas, key_padding_mask=self.key_padding_mask, embedding=True)
+
+		# get timesteps from uniform distribution, as well as abars for reconstructing x0 for nll loss
+		timesteps = self.epoch_parent.training_run_parent.model.wf_diffusion.get_random_timesteps(wf.size(0), wf.device)
+		abars, _ = self.epoch_parent.training_run_parent.model.wf_diffusion.noise_scheduler(timesteps.unsqueeze(1).unsqueeze(2)) # for loss scaling
+
+		# noise = wf - wf_no_aa # completely shatters assumption of gaussian noise, not score matching anymore, but nothing is working
+		# noised_wf = (abars**0.5)*wf + ((1-abars)**0.5)*wf_no_aa # hope is to define a linear path between no aa and correct aa wf, literally just making shit up at this point
+		# what the fuck, its working i think. see if it can predict wfaa just from base in one step
+		# noised_wf = wf_no_aa
+		# timesteps = torch.ones(wf.size(0), device=wf.device) # all at t=1 for consistent signal
+
+		# encode the wf in latent space
+		# wf_latent_mean, wf_latent_logvar = self.epoch_parent.training_run_parent.model(wf=wf, wf_no_aa=wf_no_aa, key_padding_mask=self.key_padding_mask, encoding=True)
+		# wf_encoded = self.epoch_parent.training_run_parent.model.wf_encoding.sample(wf_latent_mean, wf_latent_logvar)
+
+
+		# add noise
+		noised_wf, noise = self.epoch_parent.training_run_parent.model.wf_diffusion.noise(wf, timesteps)
+		# noise = (abars**0.5)*noise - ((1-abars)**0.5)*wf # v param
+
+		# predict noise
+		noise_pred = self.epoch_parent.training_run_parent.model(latent=noised_wf, t=timesteps, coords_alpha=self.coords_alpha, key_padding_mask=self.key_padding_mask, diffusion=True)
+
+		# convert to output object
+		return DiffusionOutput(self, noise_pred, noise, abars)
+
+	def run_mlm_training(self):
+		''' 
+		fucccccccccccck diffusion isnt working. doing mlm so i can at least get something for my thesis. but will go back to diffusion right after. the idea is too fucking good to fail.
+		have a special mask token embedded in wf representation. plan for inference is to update most confident token(s) and rerun with update until convergence
+		also allow the model to predict non masked residues, as wf embedding 
+		distributes aa info to all tokens, so basically non masked aas still are obfuscated by the mask token
+		also allows updates during inference as the model gains more context
+
+		probably going to do autoregressive inference, need to run a few tests, but always overfits when use true labels, so training
+		it on its own predictions as context. 
+		similar technique to recycles, except that always run no context first with no grad. 
+		'''
+
+		# first run it with no aa info, all mask tokens
+		# all_mask = torch.full_like(self.aas, 20)
+		# with torch.no_grad():
+		# 	wf = self.epoch_parent.training_run_parent.model.module(coords_alpha=self.coords_alpha, coords_beta=self.coords_beta, aas=all_mask, key_padding_mask=self.key_padding_mask, embedding=True)
+		# 	seq_pred = self.epoch_parent.training_run_parent.model.module(wf=wf, coords_alpha=self.coords_alpha, key_padding_mask=self.key_padding_mask, extraction=True)
+		# 	self.aas = seq_pred.argmax(dim=2)
+
+		# get random aa masking percentages
+		rand_aa_pct = torch.rand((self.size(0), 1), device=self.coords.device) * 0.75 # about 25% is the max context it gets
+
+		# apply the random aas (20 is mask token)
+		rand_vals = torch.rand_like(self.aas, dtype=torch.float32)
+		is_mask = rand_vals > rand_aa_pct
+		self.aas = torch.where(is_mask, 20, self.aas)
+
+		# only predict masked vals
+		self.labels = torch.where(is_mask, self.labels, -1)
+
+		# run wf embedding (slow, learnable aa)
+		wf = self.epoch_parent.training_run_parent.model.module(coords_alpha=self.coords_alpha, coords_beta=self.coords_beta, aas=self.aas, key_padding_mask=self.key_padding_mask, embedding=True)
+
+		# run wf extraction
+		seq_pred = self.epoch_parent.training_run_parent.model.module(wf=wf, coords_alpha=self.coords_alpha, key_padding_mask=self.key_padding_mask, extraction=True)
+
+		return ExtractionOutput(self, seq_pred, None, None) # no distogram for now
+	
+	def run_mlm_inference(self):
+		''' 
+		fucccccccccccck diffusion isnt working. doing mlm so i can at least get something for my thesis. but will go back to diffusion right after. the idea is too fucking good to fail.
+		have a special mask token embedded in wf representation. plan for inference is to update most confident token(s) and rerun with update until convergence
+		also allow the model to predict non masked residues, as wf embedding 
+		distributes aa info to all tokens, so basically non masked aas still are obfuscated by the mask token
+		also allows updates during inference as the model gains more context
+		'''
+
+
+		# apply the random aas (20 is mask token)
+		is_mask = ~self.chain_mask # give the model sequence info of non representative chains like in pmpnn
+		self.aas = torch.where(is_mask, 20, self.aas) 
+
+		# only predict masked vals
+		self.labels = torch.where(is_mask, self.labels, -1)
+
+		# run wf embedding (slow, learnable aa)
+		wf = self.epoch_parent.training_run_parent.model(coords_alpha=self.coords_alpha, coords_beta=self.coords_beta, aas=self.aas, key_padding_mask=self.key_padding_mask, temp=self.temp, inference=True)
+
+		# run wf extraction
+		seq_pred = self.epoch_parent.training_run_parent.model(wf=wf, coords_alpha=self.coords_alpha, key_padding_mask=self.key_padding_mask, extraction=True)
+
+		return ExtractionOutput(self, seq_pred)
+
+	def run_full_inference(self):
+
+		# inference uses random aas to test predictions from only structure, seq sim only computed for representative chain. model gets full structure info, but no sequence info
+		self.aas = -torch.ones_like(self.aas) # no sequence info at all. diffusion starts by making all non fixed (eq. -1) positions to random AA before running
+		t = torch.full((self.coords_alpha.size(0),), self.epoch_parent.training_run_parent.hyper_parameters.diffusion.scheduler.t_max)
+
+		seq_pred = self.epoch_parent.training_run_parent.model(	self.coords_alpha, coords_beta=self.coords_beta, aas=self.aas, key_padding_mask=self.key_padding_mask,
+																inference=True, t=t,
+																cycles=self.epoch_parent.training_run_parent.training_parameters.inference.cycles, 
+																temp=self.epoch_parent.training_run_parent.training_parameters.inference.temperature
+															)
+
+		return InferenceOutput(self, seq_pred)
+
+
+class VAEOutput():
+	'''
+	computes loss for true wf, and the aa ambiguous function, with the goal of forcing the encoder to map similar structures to similar latent spaces
+	'''
+	def __init__(self, 	batch_parent, 
+						latent_mean_pred, latent_log_var_pred, wf_mean_pred, 
+						latent_mean_pred_no_aa, latent_log_var_pred_no_aa, wf_mean_pred_no_aa,
+						wf_mean_true
+				):
+		
+		# batch parent
+		self.batch_parent = batch_parent 
+
+		# predictions
+		# encoder outputs, loss is computed by comparing to gaussian, so dont need a true
+		self.latent_mean_pred = latent_mean_pred # gaussian prior mean
+		self.latent_log_var_pred = latent_log_var_pred # gaussian prior log var
+		self.latent_mean_pred_no_aa = latent_mean_pred_no_aa # also do aa ambiguous
+		self.latent_log_var_pred_no_aa = latent_log_var_pred_no_aa 
+
+		# decoder outputs
+		self.wf_mean_pred = wf_mean_pred # wf prediction mean
+		self.wf_mean_pred_no_aa = wf_mean_pred_no_aa # wf prediction mean
+		self.wf_mean_true = wf_mean_true # true
+
+		# valid tokens for averaging
+		self.valid_toks = (batch_parent.labels!=-1).sum()
+
+	def compute_losses(self):
+		return self.batch_parent.epoch_parent.training_run_parent.losses.loss_function(	self.latent_mean_pred, self.latent_log_var_pred, 
+																						self.wf_mean_pred, 
+																						self.latent_mean_pred_no_aa, self.latent_log_var_pred_no_aa, self.wf_mean_pred_no_aa, 
+																						self.wf_mean_true, 
+																						self.batch_parent.labels==-1, 
+																					)
+
+class DiffusionOutput():
+	def __init__(self, batch_parent, noise_pred, true_noise, abars):
+		self.batch_parent = batch_parent
+		self.noise_pred = noise_pred
+		self.true_noise = true_noise
+		self.mask = batch_parent.labels.unsqueeze(2)==-1
+		self.valid_toks = (~self.mask).sum()
+		self.abars = abars
+	def compute_losses(self):
+		return self.batch_parent.epoch_parent.training_run_parent.losses.loss_function(self.noise_pred, self.true_noise, self.abars, self.mask)
+
+class InferenceOutput():
+	def __init__(self, batch_parent, seq_pred):
+		self.batch_parent = batch_parent 
+		self.seq_pred = seq_pred
+		self.valid_toks = (batch_parent.labels!=-1).sum()
+		self.valid_samples = (batch_parent.labels!=-1).any(dim=1).sum()
+
+	def compute_matches(self):
+		'''greedy selection, computed seq sim here for simplicity, will do it with other losses later '''
+		
+		prediction_flat = self.seq_pred.view(-1) # batch*N
+		labels_flat = self.batch_parent.labels.view(-1) # batch x N --> batch*N,
+		valid_mask = labels_flat != -1 # batch*N, 
+		matches = ((prediction_flat == labels_flat) & (valid_mask)).sum() # 1, 
+		
+		return matches 
+
+	def compute_losses(self):
+		matches = self.compute_matches()
+
+		return [matches]
+
+def mlm_inference(self, coords_alpha, coords_beta, aas, key_padding_mask=None, entropy_increment=0.1, temp=1e-6):
+
+	entropy_threshold = 0.1 # entropy threshold
+	entropies = torch.zeros_like(aas, dtype=torch.float32) + float("inf") # will return this later so user knows confidence
+	fixed = (aas!=-1) | key_padding_mask # if not -1, then should be fixed as context
+	predicted = fixed # to keep track of predicted pos as loop through
+	aas.masked_fill_(~fixed, 20) # add the mask token to non fixed tokens
+
+	while not predicted.all(): # already deals w/ masking
+
+		# get wf
+		wf = self.wf_embedding(coords_alpha, coords_beta, aas, key_padding_mask=key_padding_mask)
+
+		# predict sequence
+		aa_logits = self.wf_extraction(wf, coords_alpha, key_padding_mask=key_padding_mask)
+		pred_aa = self.wf_extraction.sample(aa_logits, temp)
+
+		# compute entropy
+		probs = aa_logits.softmax(dim=2)
+		entropy = torch.sum(-probs*torch.log(probs), dim=2)
+		
+		# update
+		update_aa = (entropy < entropy_threshold) & (entropies == float("inf")) & (~predicted.all(dim=1, keepdim=True)) # dont update already finished samples
+		entropies[update_aa] = entropy[update_aa]
+		aas[update_aa] = pred_aa[update_aa]
+		predicted |= update_aa
+
+		# increment entropy threshold
+		entropy_threshold += entropy_increment
+
+	return aas
+
+def inference(self, coords_alpha, coords_beta, aas, key_padding_mask=None, cycles=10, diffusion_iters=1, temp=1e-6):
+
+	# prep
+	batch, N = aas.shape
+	t_max = self.wf_diffusion.noise_scheduler.t_max
+
+	# fixed position have an AA label, positions to predict are -1, so they are set to random aa. doesnt matter too much, bc starts at white noise
+	fixed_aas = aas!=-1
+	aas = torch.where(fixed_aas, aas, torch.randint_like(aas, 0, self.num_aas))
+
+	wf_no_aa = self.wf_embedding(coords_alpha, coords_beta, aas, key_padding_mask=key_padding_mask, no_aa=True)
+
+	# multiple embedding + encoding + diffusion + decoding + extraction runs, each giving a slightly better guess and thus using less noise
+	for t_fwd in range(t_max, 0, -t_max//cycles):
+
+		# perform embedding
+		wf = self.wf_embedding(coords_alpha, coords_beta, aas, key_padding_mask=key_padding_mask)
+
+		# all of the following modules do not use coords alpha, since replaced geo attn with regular attn + spatial encoding, but leaving it until i am sure geo attn is dead
+
+		# encode from wf space to latent space
+		protein = self.wf_encoding.encode(wf, key_padding_mask=key_padding_mask)
+		
+		for diffusion_iter in range(diffusion_iters): # slight nudge, then denoise, then repeat, nudging latent towards manifold, rather than starting from full gaussian
+			
+			# add gaussian noise to latent space
+			protein_noised, _ = self.wf_diffusion.noise(protein, t_fwd)
+
+			# remove the noise
+			protein = self.wf_diffusion.denoise(protein_noised, t_fwd, key_padding_mask=key_padding_mask)
+
+		# decode from latent space to wf space
+		wf_pred = self.wf_decoding(protein, wf_no_aa, key_padding_mask=key_padding_mask)
+
+		# extract sequence from wf
+		aa_pred = self.wf_extraction.extract(wf_pred, wf_no_aa, key_padding_mask=key_padding_mask)
+
+		# keeping fixed positions as they were for next iteration, 
+		aas = torch.where(fixed_aas, aas, aa_pred)
+
+	return aas
+
+class CrossFeatureNorm(nn.Module):
+	'''
+	normalizes each feature independantly across the sequence. it is independant of batches (not batch norm)
+	this is helpful because each feature for a given token (Ca atom) is the output of that token for the global 
+	superposed wavefunction at a particular wavelength. thus, each feature in a given token is only relevant
+	RELATIVE to the CORRESPONDING features of all other tokens in the sequence. 
+	This essentially normalizes each wavefunction's (psi_k) output to have mean of 0 and std of 1. 
+	Note that this normalizes the real part and the imaginary part independantly 
+	the resulting features are then scaled by 1/sqrt(d_model), so that the variance of the whole wf is 1
+	'''
+	def __init__(self, d_model):
+		super(CrossFeatureNorm, self).__init__()
+
+	def forward(self, x, mask=None):
+
+		batch, N, d_model = x.shape
+
+		mask = mask if mask is not None else torch.ones(batch, N, device=x.device, dtype=torch.bool) # Z x N
+		valid = (~mask).sum(dim=1, keepdim=True).unsqueeze(2).clamp(min=1) # Z x 1 x 1
+		mean = (x*(~mask).unsqueeze(2)).sum(dim=1, keepdim=True) / valid # Z x 1 x D
+		x = x - mean # Z x N x D
+		std = torch.sqrt(torch.where(x.sum(dim=1, keepdim=True)==0, 1, x.pow(2)).sum(dim=1, keepdim=True)/valid) # Z x 1 x D
+		x = x/std # Z x N x D
+		# x = x/(d_model**0.5) # Z x N x D
+
+		return x
+
+class PositionalEncoding(nn.Module):
+	def __init__(self, d_model=512):
+		super(PositionalEncoding, self).__init__()
+
+		self.d_model = d_model
+		self.register_buffer('wavenumbers', torch.pow(10000, -(torch.arange(0, d_model, 2, dtype=torch.float32) / d_model)))
+
+	def forward(self, pos):
+
+		batch, N = pos.shape
+
+		phase = pos[:, :, None] * self.wavenumbers[None, None, :]
+
+		pe = torch.stack([torch.sin(phase), torch.cos(phase)], dim=3).view(batch, N, self.d_model) # N x d_model
+		
+		return pe
+
+class FiLM(nn.Module):
+	def __init__(self, d_model=512, d_hidden=1024, hidden_layers=0, dropout=0.1):
+		super(FiLM, self).__init__()
+
+		# single mlp that outputs gamma and beta, manually split in fwd
+		self.gamma_beta = MLP(d_in=d_model, d_out=2*d_model, d_hidden=d_hidden, hidden_layers=hidden_layers, dropout=dropout)
+
+	def forward(self, e_t, x): # assumes e_t is Z x 1 x d_model
+		gamma_beta = self.gamma_beta(e_t)
+		gamma, beta = torch.split(gamma_beta, dim=-1, split_size_or_sections=gamma_beta.shape[-1] // 2)
+		return gamma*x + beta
+
+class adaLN(nn.Module):
+	'''adaptive layer norm to perform affine transformation conditioned on timestep. adaLNzero, where initialized to all zeros'''
+	def __init__(self, d_in=512, d_model=512, d_hidden=1024, hidden_layers=0, dropout=0.0):
+		super(adaLN, self).__init__()
+		self.gamma_beta = MLP(d_in=d_in, d_out=2*d_model, d_hidden=d_hidden, hidden_layers=hidden_layers, dropout=dropout, act="silu", zeros=False)
+		self.alpha = MLP(d_in=d_in, d_out=d_model, d_hidden=d_hidden, hidden_layers=hidden_layers, dropout=dropout, act="silu", zeros=True)
+
+	def forward(self, e_t):
+
+		gamma_beta = self.gamma_beta(e_t)
+		gamma, beta = torch.chunk(gamma_beta, chunks=2, dim=-1)
+		alpha = self.alpha(e_t)
+		return gamma, beta, alpha

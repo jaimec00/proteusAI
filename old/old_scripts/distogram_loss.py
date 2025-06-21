@@ -274,13 +274,14 @@ class _distogram_loss(torch.autograd.Function):
 	@staticmethod
 	def forward(ctx, features, coords, bins, bin_proj, mask, label_smoothing):
 
-		batch, N, B, d_k = features.shape
+		batch, N, d_model = features.shape
 		
 		features = (features).to(torch.float32).contiguous() # Z x N x B x Dk
 		coords = coords.transpose(1, 2).to(torch.float32).contiguous() # Z x 3 x N for coalesced access
 		bins = bins.to(torch.float32).contiguous() # B
 		bin_proj = bin_proj.to(torch.float32).contiguous() # B
 		mask = (~mask).contiguous() # Z x N
+		
 		d_features = torch.zeros_like(features).contiguous()
 		d_bin_proj = torch.zeros_like(bin_proj).contiguous()
 		out = torch.zeros_like(mask, dtype=torch.float32).contiguous()

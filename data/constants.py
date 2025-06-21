@@ -1,26 +1,38 @@
-from pathlib import Path
-import pandas as pd
-import torch
-import os
+
+three_2_one = {
+    'ALA': 'A',  # Alanine
+    'CYS': 'C',  # Cysteine
+    'ASP': 'D',  # Aspartic acid
+    'GLU': 'E',  # Glutamic acid
+    'PHE': 'F',  # Phenylalanine
+    'GLY': 'G',  # Glycine
+    'HIS': 'H',  # Histidine
+    'ILE': 'I',  # Isoleucine
+    'LYS': 'K',  # Lysine
+    'LEU': 'L',  # Leucine
+    'MET': 'M',  # Methionine
+    'ASN': 'N',  # Asparagine
+    'PRO': 'P',  # Proline
+    'GLN': 'Q',  # Glutamine
+    'ARG': 'R',  # Arginine
+    'SER': 'S',  # Serine
+    'THR': 'T',  # Threonine
+    'VAL': 'V',  # Valine
+    'TRP': 'W',  # Tryptophan
+    'TYR': 'Y',  # Tyrosine
+}
 
 canonical_aas = ['A', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'K', 'L', 'M', 'N', 'P', 'Q', 'R', 'S', 'T', 'V', 'W', 'Y']
 alphabet = canonical_aas + ['X', '<mask>']
+
 def aa_2_lbl(aa):
     if aa in alphabet:
         return alphabet.index(aa)
     else:
-        return -1
+        return alphabet.index("X")
+
 def lbl_2_aa(label): 
     if label==-1:
-        return None
+        return "X"
     else:
         return alphabet[label]
-
-# these volumes are from table 3 from "Volume changes on protein folding" by Yehouda Harpaz, Mark Gerstein, and Cyrus Chothia1 (1994)
-# Vp is the volume of the residue when in the protein core. SCp is Vp(AA) - Vp(GLY), i.e. just the side chain volume
-aa_volumes_path = Path(os.path.abspath(__file__)).parent / Path("AA_volumes.csv")
-# only use the volumes in the core for now
-aa_volumes = torch.tensor(pd.read_csv(aa_volumes_path, index_col=0).loc[canonical_aas, "SCp"].to_numpy(), device="cuda" if torch.cuda.is_available() else "cpu")
-
-# approximation of the side chain lengths along arbitrary axis
-aa_sizes = aa_volumes**(1/3)

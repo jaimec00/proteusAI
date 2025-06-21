@@ -14,7 +14,7 @@ def main():
 	coords = torch.rand((batch, N, 3), device=device) * 20
 	features = torch.rand((batch, N, d_model), device=device, requires_grad=True) 
 	bin_proj = torch.rand((d_model, bins), device=device, requires_grad=True)
-	mask = torch.rand((batch, N), device=device) > 0.8
+	mask = torch.rand((batch, N), device=device) > 1.0
 	bins = torch.cat([torch.tensor([0], device=device), torch.linspace(min_d, max_d, bins-1, device=device), torch.tensor([float("inf")], device=device)])
 
 	params = [features, coords, bins, bin_proj, mask, label_smoothing]

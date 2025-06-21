@@ -51,32 +51,6 @@ class MLP(nn.Module):
 
 		return x
 
-class CrossFeatureNorm(nn.Module):
-	'''
-	normalizes each feature independantly across the sequence. it is independant of batches (not batch norm)
-	this is helpful because each feature for a given token (Ca atom) is the output of that token for the global 
-	superposed wavefunction at a particular wavelength. thus, each feature in a given token is only relevant
-	RELATIVE to the CORRESPONDING features of all other tokens in the sequence. 
-	This essentially normalizes each wavefunction's (psi_k) output to have mean of 0 and std of 1. 
-	Note that this normalizes the real part and the imaginary part independantly 
-	the resulting features are then scaled by 1/sqrt(d_model), so that the variance of the whole wf is 1
-	'''
-	def __init__(self, d_model):
-		super(CrossFeatureNorm, self).__init__()
-
-	def forward(self, x, mask=None):
-
-		batch, N, d_model = x.shape
-
-		mask = mask if mask is not None else torch.ones(batch, N, device=x.device, dtype=torch.bool) # Z x N
-		valid = (~mask).sum(dim=1, keepdim=True).unsqueeze(2).clamp(min=1) # Z x 1 x 1
-		mean = (x*(~mask).unsqueeze(2)).sum(dim=1, keepdim=True) / valid # Z x 1 x D
-		x = x - mean # Z x N x D
-		std = torch.sqrt(torch.where(x.sum(dim=1, keepdim=True)==0, 1, x.pow(2)).sum(dim=1, keepdim=True)/valid) # Z x 1 x D
-		x = x/std # Z x N x D
-		# x = x/(d_model**0.5) # Z x N x D
-
-		return x
 
 class StaticLayerNorm(nn.Module):
 	'''just normalizes each token to have a mean of 0 and var of 1, no scaling and shifting'''
@@ -89,48 +63,7 @@ class StaticLayerNorm(nn.Module):
 		std = std.masked_fill(std==0, 1)
 		return centered / std
 
-class PositionalEncoding(nn.Module):
-	def __init__(self, d_model=512):
-		super(PositionalEncoding, self).__init__()
 
-		self.d_model = d_model
-		self.register_buffer('wavenumbers', torch.pow(10000, -(torch.arange(0, d_model, 2, dtype=torch.float32) / d_model)))
-
-	def forward(self, pos):
-
-		batch, N = pos.shape
-
-		phase = pos[:, :, None] * self.wavenumbers[None, None, :]
-
-		pe = torch.stack([torch.sin(phase), torch.cos(phase)], dim=3).view(batch, N, self.d_model) # N x d_model
-		
-		return pe
-
-class FiLM(nn.Module):
-	def __init__(self, d_model=512, d_hidden=1024, hidden_layers=0, dropout=0.1):
-		super(FiLM, self).__init__()
-
-		# single mlp that outputs gamma and beta, manually split in fwd
-		self.gamma_beta = MLP(d_in=d_model, d_out=2*d_model, d_hidden=d_hidden, hidden_layers=hidden_layers, dropout=dropout)
-
-	def forward(self, e_t, x): # assumes e_t is Z x 1 x d_model
-		gamma_beta = self.gamma_beta(e_t)
-		gamma, beta = torch.split(gamma_beta, dim=-1, split_size_or_sections=gamma_beta.shape[-1] // 2)
-		return gamma*x + beta
-
-class adaLN(nn.Module):
-	'''adaptive layer norm to perform affine transformation conditioned on timestep. adaLNzero, where initialized to all zeros'''
-	def __init__(self, d_in=512, d_model=512, d_hidden=1024, hidden_layers=0, dropout=0.0):
-		super(adaLN, self).__init__()
-		self.gamma_beta = MLP(d_in=d_in, d_out=2*d_model, d_hidden=d_hidden, hidden_layers=hidden_layers, dropout=dropout, act="silu", zeros=False)
-		self.alpha = MLP(d_in=d_in, d_out=d_model, d_hidden=d_hidden, hidden_layers=hidden_layers, dropout=dropout, act="silu", zeros=True)
-
-	def forward(self, e_t):
-
-		gamma_beta = self.gamma_beta(e_t)
-		gamma, beta = torch.chunk(gamma_beta, chunks=2, dim=-1)
-		alpha = self.alpha(e_t)
-		return gamma, beta, alpha
 
 # initializations for linear layers
 def init_orthogonal(m):

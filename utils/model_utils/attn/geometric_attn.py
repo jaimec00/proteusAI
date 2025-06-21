@@ -194,6 +194,7 @@ def _attn_fwd(
 
 		# set masked positions to -inf, include out of range dists in mask
 		attn_mask = (mask_i[:, None]) & (tl.load(mask_j_ptr, boundary_check=(0,), padding_option="zero").to(tl.int1)[None, :]) & (Rij <= max_rbf) & (Rij >= min_rbf) # N x N
+		# attn_mask = (mask_i[:, None]) & (tl.load(mask_j_ptr, boundary_check=(0,), padding_option="zero").to(tl.int1)[None, :]) & (dists < 15) #& (Rij <= max_rbf) & (Rij >= min_rbf) # N x N
 
 		# scale attention logits by Rij and mask invalid pairs
 		Rij_norm = ((2*(Rij-min_rbf)/rbf_range) - 1)
@@ -435,6 +436,7 @@ def _attn_bwd(
 		# mask out attention that is not relevant to this head
 		mask_i = tl.load(mask_i_ptr, boundary_check=(0, ), padding_option="zero").to(tl.int1)
 		attn_mask = (mask_i[:, None]) & (mask_j[None, :]) & (Rij <= max_rbf) & (Rij >= min_rbf) # N x N
+		# attn_mask = (mask_i[:, None]) & (mask_j[None, :]) & (dists < 15) #& (Rij <= max_rbf) & (Rij >= min_rbf) # N x N
 
 		# scale attention logits by RBFs
 		Rij_norm = ((2*(Rij-min_rbf)/rbf_range) - 1)

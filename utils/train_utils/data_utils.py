@@ -24,6 +24,8 @@ import psutil
 import math
 import os
 
+from data.constants import alphabet, aa_2_lbl, lbl_2_aa
+
 # ----------------------------------------------------------------------------------------------------------------------
 
 # add safe globals
@@ -179,7 +181,6 @@ class BioUnit():
 			self.coords = self.coords[:, 1, :] # idx 1 of dim 1 is Ca
 		
 		self.labels = biounit_dict["labels"] # no mask needed, masked vals have -1 for labels
-		self.labels = torch.where(self.labels==20, -1, self.labels) # don't predict NCAA
 		self.chain_idxs = biounit_dict["chain_idxs"] # dict of chain [start, end)
 
 	def __len__(self):
@@ -505,11 +506,6 @@ class DataCleaner():
 		self.cluster_info["BIOUNIT_SIZE"] = None
 		self.cluster_info["PDB"] = self.cluster_info.CHAINID.apply(lambda x: x.split("_")[0])
 
-		# useful conversions between aa and idx
-		self.amino_acids = "ACDEFGHIKLMNPQRSTVWYX"
-		self.aa_idx = {aa: idx for idx, aa in enumerate(self.amino_acids)}
-		self.rev_aa_idx = {idx: aa for idx, aa in enumerate(self.amino_acids)}
-
 		# compute biounits
 		self.get_pmpnn_pdbs()
 
@@ -643,7 +639,7 @@ class DataCleaner():
 
 			# get the labels
 			seq = chain["seq"]
-			labels = torch.tensor([self.aa_idx[aa] if aa in self.amino_acids else self.aa_idx["X"] for aa in seq])
+			labels = torch.tensor([aa_2_lbl(aa) for aa in seq])
 			labels = labels[mask]
 
 			# get the coords, removes masked pos. wf embedding for Ca only model computes virtual cb between adjacent Ca, 
@@ -737,11 +733,6 @@ class SingleChainDataCleaner():
 
 		self.cluster_info = {key: [] for key in ['CHAINID', 'DEPOSITION', 'RESOLUTION', 'HASH', 'CLUSTER', 'SEQUENCE', 'BIOUNIT', 'BIOUNIT_SIZE', 'PDB']}
 
-		# useful conversions between aa and idx
-		self.amino_acids = "ACDEFGHIKLMNPQRSTVWYX"
-		self.aa_idx = {aa: idx for idx, aa in enumerate(self.amino_acids)}
-		self.rev_aa_idx = {idx: aa for idx, aa in enumerate(self.amino_acids)}
-
 		# compute biounits
 		self.get_single_chain_pdbs(test)
 
@@ -816,7 +807,7 @@ class SingleChainDataCleaner():
 		Ca = COORDS["CA"]
 		C = COORDS["C"]
 
-		# missing coords are this
+		# missing coords are represented like this
 		missing_coords = [None, None, None]
 
 		# false is not masked, did this when started and not enough time to make the whole codebase consistent so keeping it
@@ -831,7 +822,7 @@ class SingleChainDataCleaner():
 		coords = torch.tensor([N, Ca, C]).transpose(0,1) # 3(NCaC) x N x 3(xyz) --> N x 3(NCaC) x 3(xyz)
 
 		# mask is baked into labels (-1)
-		labels = torch.tensor([self.aa_idx[aa] if (aa in self.amino_acids) else self.aa_idx["X"] for aa in SEQUENCE])
+		labels = torch.tensor([aa_2_lbl(aa) for aa in SEQUENCE])
 		labels = labels[~torch.tensor(mask)] # remove missing coords
 
 		# single chain, so just [0, len(chain)]

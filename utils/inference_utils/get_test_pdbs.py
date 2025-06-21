@@ -59,12 +59,12 @@ def parse_test_set(data_path, raw_pt_path, max_seq_size, max_resolution, out_pat
     pdb_path = out_path / Path("pdb")
     pdb_path.mkdir(exist_ok=True, parents=True)
 
-    download_pdb(list(biounits.items())[0], pdb_path)
-    # pbar = tqdm(total=len(pdbs), desc="downloading_pdbs", unit="pdbs")
-    # with ThreadPoolExecutor(max_workers=1) as executor:
-    #     futures = {executor.submit(download_pdb, biounit, pdb_path): biounit for biounit in biounits.items()}                
-    #     for future in as_completed(futures):
-    #         pbar.update(1)
+    # download_pdb(list(biounits.items())[0], pdb_path)
+    pbar = tqdm(total=len(pdbs), desc="downloading_pdbs", unit="pdbs")
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        futures = {executor.submit(download_pdb, biounit, pdb_path): biounit for biounit in biounits.items()}                
+        for future in as_completed(futures):
+            pbar.update(1)
 
 def download_pdb(pdb_biounits, out_path):
 

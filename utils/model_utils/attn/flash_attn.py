@@ -19,28 +19,27 @@ import os
 import random
 
 # hlper functions for dropout
-@triton.jit
-def hash5(a, b, c, d, seed):
-	# PCG-XSH-RR based hash algorithm used for dropout
-    h = seed
-    h ^= (a * 0x85ebca6b) + 0x9e3779b9
-    h ^= (b * 0xc2b2ae35) + 0x165667b1
-    h ^= (c * 0x27d4eb2f) + 0xd6e8feb8
-    h ^= (d * 0x85ebca6b) + 0x1b873593
-    h = (h ^ (h >> 16)) * 0x85ebca6b
-    h ^= (h >> 13)
-    h = (h ^ (h >> 16)) * 0xc2b2ae35
-    h ^= (h >> 16)
-    return h
+# @triton.jit
+# def hash5(a, b, c, d, seed):
+# 	# PCG-XSH-RR based hash algorithm used for dropout
+#     h = seed
+#     h ^= (a * 0x85ebca6b) + 0x9e3779b9
+#     h ^= (b * 0xc2b2ae35) + 0x165667b1
+#     h ^= (c * 0x27d4eb2f) + 0xd6e8feb8
+#     h ^= (d * 0x85ebca6b) + 0x1b873593
+#     h = (h ^ (h >> 16)) * 0x85ebca6b
+#     h ^= (h >> 13)
+#     h = (h ^ (h >> 16)) * 0xc2b2ae35
+#     h ^= (h >> 16)
+#     return h
 
-@triton.jit
-def dropout(Z, H, I, J, seed, dropout_prob):
-	# uses light hash algorithm for dropout to avoid cuda built in RNG
-	# reproducible, but not necessary, since bwd tensor is precomputed in fwd
-    h = hash5(Z, H, I, J, seed)
-    normalized = h / (0xffffffff) # Convert to [0,1]
-    return normalized < dropout_prob # is dropped
-
+# @triton.jit
+# def dropout(Z, H, I, J, seed, dropout_prob):
+# 	# uses light hash algorithm for dropout to avoid cuda built in RNG
+# 	# reproducible, but not necessary, since bwd tensor is precomputed in fwd
+#     h = hash5(Z, H, I, J, seed)
+#     normalized = h / (0xffffffff) # Convert to [0,1]
+#     return normalized < dropout_prob # is dropped
 
 # define configurations for autotuning
 configs = [	triton.Config({"BLOCK_I": i, "BLOCK_J": j}, num_warps=w)
@@ -162,7 +161,6 @@ def _attn_fwd(
 	# offs_Z_for_hash = tl.full((1,1), offs_Z, dtype=tl.uint32)
 	# offs_H_for_hash = tl.full((1,1), offs_H, dtype=tl.uint32)
 	# BLOCK_J_uint32 = tl.full((1,1), BLOCK_J, dtype=tl.uint32) # for incrementing J
-
 
 	# loop through columns of K and V
 	for j in tl.range(0, triton.cdiv(tot_Nkv, BLOCK_J), 1, loop_unroll_factor=1): # no loop unrolling

@@ -12,7 +12,6 @@ def calculate_error(A, B):
 
 	return rel_error_l2, abs_error_l2
 
-
 def profile_func(func, args, start_event, end_event):
 
 	torch.cuda.empty_cache() 
