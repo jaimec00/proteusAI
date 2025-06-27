@@ -9,7 +9,7 @@ description:	extracts sequence information from wavefunction representation of p
 import torch
 import torch.nn as nn
 from utils.model_utils.base_modules.encoder import Encoder
-from utils.model_utils.base_modules.base_modules import init_xavier, MLP
+from utils.model_utils.base_modules.base_modules import init_xavier, MLP, ConvFormer
 
 # ----------------------------------------------------------------------------------------------------------------------
 
@@ -38,9 +38,11 @@ class WaveFunctionExtraction(nn.Module):
 		self.mlp_post = MLP(d_in=d_model, d_out=d_model, d_hidden=d_hidden_post, hidden_layers=hidden_layers_post, dropout=dropout) if hidden_layers_post!=-1 else zero
 		self.norm_post = nn.LayerNorm(d_model) if hidden_layers_post!=-1 else identity
 
+		# self.convs = nn.ModuleList([ConvFormer((3,5,7), d_model=d_model, dropout=dropout) for _ in range(encoder_layers+1)])
+
 		self.encoders = nn.ModuleList([ Encoder(	d_model=d_model, d_other=d_model, heads=heads, 
 													min_rbf=min_rbf, bias=use_bias, learn_spreads=learn_spreads,
-													d_hidden=d_hidden_attn, hidden_layers=hidden_layers_attn, 
+													d_hidden=d_hidden_attn, hidden_layers=hidden_layers_attn, personal=True,
 													dropout=dropout
 												) 
 										for _ in range(encoder_layers)
@@ -50,17 +52,22 @@ class WaveFunctionExtraction(nn.Module):
 		self.out_proj = nn.Linear(d_model, num_aas)
 		init_xavier(self.out_proj)
 
-	def forward(self, wf, coords, key_padding_mask=None):
+	def forward(self, wf, coords, coords_beta, chain_idxs, key_padding_mask=None):
 
 		# linear projection
 		wf = self.proj_pre(wf)
+
 
 		# non linear tranformation for more intricate features
 		wf = self.norm_pre(wf + self.mlp_pre(wf))
 
 		# geometric/vanilla attn encoders
 		for encoder in self.encoders:
-			wf = encoder(wf, wf, wf, coords, mask=key_padding_mask)
+			# wf = conv(wf, chain_idxs)
+			# wf = encoder(wf, wf, wf, coords, mask=key_padding_mask)
+			wf = encoder(wf, wf, wf, coords, coords_beta, mask=key_padding_mask)
+
+		# wf = self.convs[-1](wf, chain_idxs)
 
 		# post process
 		wf = self.norm_post(wf + self.dropout(self.mlp_post(wf)))
@@ -98,4 +105,3 @@ class WaveFunctionExtraction(nn.Module):
 		aas = self.sample(aa_logits, temp)
 
 		return aas
-

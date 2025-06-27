@@ -267,12 +267,15 @@ def _attn_bwd(
 	Q_ptr, stride_Q_Z, stride_Q_H, stride_Q_N, stride_Q_D,
 	K_ptr, stride_K_Z, stride_K_H, stride_K_N, stride_K_D,
 	V_ptr, stride_V_Z, stride_V_H, stride_V_N, stride_V_D,
+
 	dO_ptr, stride_dO_Z, stride_dO_H, stride_dO_N, stride_dO_D,
 	dQ_ptr, stride_dQ_Z, stride_dQ_H, stride_dQ_N, stride_dQ_D,
 	dK_ptr, stride_dK_Z, stride_dK_H, stride_dK_N, stride_dK_D,
 	dV_ptr, stride_dV_Z, stride_dV_H, stride_dV_N, stride_dV_D,
+	
 	D_ptr, stride_D_Z, stride_D_H, stride_D_N,
 	L_ptr, stride_L_Z, stride_L_H, stride_L_N,
+	
 	coords_ptr, stride_coords_Z, stride_coords_N, stride_coords_S,
 	spreads_ptr, stride_spreads_H,
 	betas_ptr, stride_betas_H,

@@ -98,6 +98,7 @@ class ExtractionLossFunction(nn.Module):
 	def __init__(self, label_smoothing):
 		super(ExtractionLossFunction, self).__init__()
 		self.cel_raw = CrossEntropyLoss(reduction="sum", ignore_index=-1, label_smoothing=label_smoothing)
+		# self.cel_raw = FocalLoss(gamma=1)
 
 	def cel(self, seq_pred, seq_true):
 		'''
@@ -106,7 +107,7 @@ class ExtractionLossFunction(nn.Module):
 		'''
 
 		cel = self.cel_raw(seq_pred.view(-1, seq_pred.size(-1)), seq_true.view(-1)) # Z*N
-		
+		# cel = self.cel_raw(seq_pred, seq_true)
 		return cel
 
 	def compute_matches(self, seq_pred, seq_true):
@@ -134,3 +135,17 @@ class ExtractionLossFunction(nn.Module):
 		matches1, matches3, matches5 = self.compute_matches(seq_pred, seq_true)
 
 		return cel, matches1, matches3, matches5 # return all for logging, only full loss used for backprop
+
+
+class FocalLoss(nn.Module):
+	def __init__(self, gamma=1):
+		super(FocalLoss, self).__init__()
+		self.gamma = gamma
+	
+	def forward(self, seq_pred, seq_true):
+		logp = torch.nn.functional.log_softmax(seq_pred, dim=2)
+		p = torch.softmax(seq_pred, dim=2)
+
+		focal_loss = -((1-p)**self.gamma) * logp * (torch.arange(seq_pred.size(2), device=seq_pred.device)[None, None, :] == seq_true.unsqueeze(2))
+
+		return focal_loss.sum()

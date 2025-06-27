@@ -23,7 +23,7 @@ three_2_one = {
 }
 
 canonical_aas = ['A', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'K', 'L', 'M', 'N', 'P', 'Q', 'R', 'S', 'T', 'V', 'W', 'Y']
-alphabet = canonical_aas + ['X', '<mask>']
+alphabet = canonical_aas + ['X']
 
 def aa_2_lbl(aa):
     if aa in alphabet:

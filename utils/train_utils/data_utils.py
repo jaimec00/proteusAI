@@ -613,11 +613,17 @@ class DataCleaner():
 		
 		pdb = self.load_pdb(pdbid)
 		biounits = pdb["asmb_chains"]
-		
+
 		biounits = [biounit.split(',') for biounit in biounits]
 
 		# remove dupilcates
 		biounits = list(map(list, set(map(tuple, biounits))))
+
+		# also get the tm_scores
+		# chains = pdb["chains"]
+		# chain_tm_scores = pdb["tm"][:, :, 0]
+
+		# tm_scores = [chains.index(chain) for biounit in biounits for chain in biounit]
 		
 		return biounits
 

@@ -42,7 +42,7 @@ hyper_parameters:
       d_hidden: 1024
       hidden_layers: -1
     encoders:
-      layers: 4
+      layers: 3
       heads: 8
       use_bias: True
       learn_spreads: True
@@ -112,7 +112,7 @@ training_parameters:
   
   lr:
     lr_type: "attn"
-    lr_step: !!float 1.5e-3 # max lr, ramps up to this val before decreasing  
+    lr_step: !!float 1e-3 # max lr, ramps up to this val before decreasing  
     warmup_steps: 4000 # number of warmup steps before decreasing
     start_from_step: 0
 
@@ -134,7 +134,7 @@ data:
   # then recursively randomizes order of samples within batch, splits into two, and continues until batches are <= batch_tokens
   max_batch_size: 256  # maximum samples per batch
   min_seq_size: 16 # minimum sequence length, shorter is padded to this length, this is necessary due to triton matmul, min of 16, but with the option of having larger min
-  max_seq_size: 8192 # max sequence lengths, longer samples not included
+  max_seq_size: 1024 # max sequence lengths, longer samples not included
   batch_tokens: 16384 # number of valid tokens per batch (including non-representative chains, basically the tokens used in computation, not necessarily in loss)
   max_resolution: 3.5 # max_resolution of PDBs
 
@@ -142,7 +142,7 @@ data:
 
 # Output
 output:
-  out_path: "/scratch/hjc2538/projects/proteusAI/models/4enc_geoattn_scratch_anisotropicemb_15e4lr"
+  out_path: "/scratch/hjc2538/projects/proteusAI/models/masked_personalattn_15spreads"
   model_checkpoints: 10 # number of epochs to save a checkpoint of the model after
 
 # ------------------------------------------------------------------------------
@@ -151,6 +151,8 @@ debug:
   # prints each layers gradients after each step so can check for exploding/vanishing gradients
   # note that it is printed before grad clipping
   debug_grad: False # something is wrong with vae and i have no idea what, see what autograd anomoly detector finds
+  print_losses: False
+  print_grad_L2: False
 
 port: 29500 # in case want to run two independant instances of the training on a single machine (one for each gpu), you need different ports for each
 

@@ -138,8 +138,17 @@ class Batch():
 		# perform backward pass to accum grads
 		loss.backward()
 
+		if self.epoch_parent.training_run_parent.debug.print_losses:
+			if self.rank==0: # only printing for rank 0 for now
+				self.epoch_parent.training_run_parent.output.log.info(f"loss: {loss}")
+
 		if learn_step:
 		
+			if self.epoch_parent.training_run_parent.debug.print_grad_L2:
+				if self.rank==0:
+					L2 = sum(param.grad**2 for param in self.epoch_parent.training_run_parent.model.module.parameters() if param.grad is not None)
+					self.epoch_parent.training_run_parent.output.log.info(f"grad L2: {L2}")
+
 			# grad clip
 			if self.epoch_parent.training_run_parent.training_parameters.loss.grad_clip_norm:
 				torch.nn.utils.clip_grad_norm_(self.epoch_parent.training_run_parent.model.parameters(), max_norm=self.epoch_parent.training_run_parent.training_parameters.loss.grad_clip_norm)
@@ -169,7 +178,6 @@ class Batch():
 
 		# get wf
 		seq_logits = self.epoch_parent.training_run_parent.model.module(coords_alpha=self.coords, chain_idxs=self.chain_idxs, key_padding_mask=self.key_padding_mask, embedding=True, extraction=True)
-
 
 		# convert to output object
 		return ModelOutputs(self, seq_logits)

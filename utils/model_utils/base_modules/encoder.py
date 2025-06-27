@@ -2,21 +2,24 @@ import torch
 import torch.nn as nn
 from utils.model_utils.attn.flash_attn import flash_attn
 from utils.model_utils.attn.geometric_attn import geometric_attn
+from utils.model_utils.attn.personal_attn import personal_attn
 from utils.model_utils.base_modules.base_modules import MLP, StaticLayerNorm
 
 class Encoder(nn.Module):
 	'''
 	'''
 	def __init__(self, 	d_model=1024, d_other=256, heads=8, min_rbf=0.001,
-						d_hidden=2048, hidden_layers=0, dropout=0.10, bias=True, learn_spreads=True # make bias config later
+						d_hidden=2048, hidden_layers=0, dropout=0.10, bias=True, learn_spreads=True, personal=True # make bias config later
 					):
 		super(Encoder, self).__init__()
 
-		# cross-attention layers
-		if bias:
-			self.attn = GeoAttention(d_model=d_model, heads=heads, min_rbf=min_rbf, learn_spreads=learn_spreads)
+		if personal: # personal has priority for now
+			self.attn = PersonalAttention(d_model=d_model, heads=heads) # default spreads for now
 		else:
-			self.attn = Attention(d_model=d_model, d_other=d_other, heads=heads)
+			if bias:
+				self.attn = GeoAttention(d_model=d_model, heads=heads, min_rbf=min_rbf, learn_spreads=learn_spreads)
+			else:
+				self.attn = Attention(d_model=d_model, d_other=d_other, heads=heads)
 
 		self.attn_norm = nn.LayerNorm(d_model)
 	
@@ -27,10 +30,10 @@ class Encoder(nn.Module):
 		# dropout
 		self.dropout = nn.Dropout(dropout)
 
-	def forward(self, q, k, v, coords, mask=None):
+	def forward(self, q, k, v, coords, coords_beta, mask=None):
 
 		# attn
-		q = self.attn_norm(q + self.dropout(self.attn(q, k, v, coords, mask=mask)))
+		q = self.attn_norm(q + self.dropout(self.attn(q, k, v, coords, coords_beta, mask=mask)))
 
 		# ffn
 		q = self.ffn_norm(q + self.dropout(self.ffn(q)))
@@ -116,6 +119,76 @@ class GeoAttention(nn.Module):
 
 		# return
 		return out # batch x N x d_model
+
+
+class PersonalAttention(nn.Module):
+	'''
+	see the triton kernel script for a more in-depth description. at high level, it creates a personalized key matrix for every query token,
+	based on the gloabl wf features and biased by the personalized, granular, learnable, pairwise, and invariant geometric features 
+	'''
+
+	def __init__(self, 	d_model=512, 
+						heads=8, 
+						min_spread=2.0, max_spread=22.0, num_spreads=15,
+					):
+		super(PersonalAttention, self).__init__()
+
+		self.heads = heads
+		self.d_model = d_model
+
+		if self.d_model % self.heads != 0: raise ValueError(f"number of dimensions ({self.d_model}) must be divisible by number of attention heads ({self.heads})")
+		self.d_k = self.d_model // self.heads
+
+		self.register_buffer("spreads", torch.linspace(min_spread, max_spread, num_spreads))
+		self.d_g = num_spreads*4 + 2 
+
+		# QKV projection weight and bias matrices
+
+		# init xavier distribution
+		xavier_scale = (6/(self.d_k + d_model))**0.5
+
+		self.q_proj = nn.Parameter(-xavier_scale + torch.rand(self.heads, self.d_model, self.d_k) * (2*xavier_scale)) # heads x d_model x d_k
+		self.k_proj = nn.Parameter(-xavier_scale + torch.rand(self.heads, self.d_model, self.d_k) * (2*xavier_scale)) # heads x d_model x d_k
+		self.v_proj = nn.Parameter(-xavier_scale + torch.rand(self.heads, self.d_model, self.d_k) * (2*xavier_scale)) # heads x d_model x d_k
+
+		self.q_bias = nn.Parameter(torch.zeros(self.heads, self.d_k)) # heads x d_k
+		self.k_bias = nn.Parameter(torch.zeros(self.heads, self.d_k)) # heads x d_k
+		self.v_bias = nn.Parameter(torch.zeros(self.heads, self.d_k)) # heads x d_k
+
+		# the G projection, the innovation in this module
+		self.g_proj = nn.Parameter(torch.zeros(self.heads, self.d_g, self.d_k)) # init to zeros, so that no geometric bias at first
+
+		self.out_proj = nn.Linear(d_model, d_model, bias=False)
+
+	def forward(self, q, k, v, ca, cb, mask=None):
+		'''
+		performs scaled dot-product attention but with personalized key matrices for each query token based on global wf features and granular pairwise geometric features
+		'''
+
+		# make sure shape is compatible
+		assert q.shape == k.shape == v.shape
+		assert q.dim() == 3
+		batch, N, d_model = q.shape
+		assert d_model == self.d_model
+
+		# project the tensors
+		Q = torch.matmul(q.unsqueeze(1), self.q_proj.unsqueeze(0)) + self.q_bias.unsqueeze(0).unsqueeze(2) # batch x heads x N x d_k
+		K = torch.matmul(k.unsqueeze(1), self.k_proj.unsqueeze(0)) + self.k_bias.unsqueeze(0).unsqueeze(2) # batch x heads x N x d_k
+		V = torch.matmul(v.unsqueeze(1), self.v_proj.unsqueeze(0)) + self.v_bias.unsqueeze(0).unsqueeze(2) # batch x heads x N x d_k
+
+		# perform personal attention
+		out = personal_attn(Q, K, V, self.g_proj, ca, cb, self.spreads, mask=mask)  # batch x heads x N x d_k
+
+		# cat heads
+		out = out.permute(0,2,3,1) # batch x N x d_k x heads
+		out = out.reshape(batch, N, self.d_model) # batch x N x d_k x heads --> batch x N x d_model
+
+		# project through final linear layer
+		out = self.out_proj(out) # batch x N x d_model --> batch x N x d_model
+
+		# return
+		return out # batch x N x d_model
+
 
 class Attention(nn.Module):
 	'''

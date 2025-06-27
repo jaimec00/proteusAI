@@ -68,7 +68,7 @@ class proteusAI(nn.Module):
 		if embedding: # encode the structure + sequence via wave function embedding
 			wf = self.wf_embedding(coords_alpha, coords_beta, key_padding_mask=key_padding_mask)
 		if extraction: # run extraction
-			wf = self.wf_extraction(wf, coords_alpha, key_padding_mask=key_padding_mask)
+			wf = self.wf_extraction(wf, coords_alpha, coords_beta, chain_idxs, key_padding_mask=key_padding_mask)
 
 		return wf
 

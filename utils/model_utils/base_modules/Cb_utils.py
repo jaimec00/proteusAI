@@ -1,7 +1,7 @@
 
 import torch
 
-def get_coords(coords, chain_idxs=None): 
+def get_coords(coords, chain_idxs=None, norm=True): 
     '''
     utility method to get Cb coords
     '''
@@ -10,15 +10,15 @@ def get_coords(coords, chain_idxs=None):
     if coords.dim() == 3: # Ca only model
         if chain_idxs is None:
             raise ValueError("chain_idxs must be provided for Ca only model")
-        coords_alpha, coords_beta = get_Cb_from_Ca(coords, chain_idxs)
+        coords_alpha, coords_beta = get_Cb_from_Ca(coords, chain_idxs, norm)
     elif coords.dim() == 4: # backbone model
-        coords_alpha, coords_beta = get_Cb_from_BB(coords)
+        coords_alpha, coords_beta = get_Cb_from_BB(coords, norm)
     else:
         raise ValueError(f"invalid input size for coordinates, expected (batch,N,3) for Ca only model or (batch,N,3,3) for backbone model, but got {coords.shape=}")
     
     return coords_alpha, coords_beta
     
-def get_Cb_from_Ca(coordsA, chain_idxs):
+def get_Cb_from_Ca(coordsA, chain_idxs, norm=True):
     '''
     compute beta carbon coords (not absolute, just relative to Ca). used for anisotropic wf embedding, in testing
     approximates N and C as being on the line connecting adjacent Ca, with ideal bond distances
@@ -90,11 +90,12 @@ def get_Cb_from_Ca(coordsA, chain_idxs):
     coordsB[is_logical_CA] = virtual_CB
 
     # make a unit vector
-    coordsB = coordsB / torch.linalg.vector_norm(coordsB, dim=2, keepdim=True).clamp(1e-6)
-
+    norm = 1 / torch.linalg.vector_norm(cb, dim=2, keepdim=True).clamp(1e-6) if norm else 1
+    coordsB = coordsB * norm
+    
     return coordsA, coordsB
 
-def get_Cb_from_BB(coords):
+def get_Cb_from_BB(coords, norm=False):
 
     '''
     don't need chain idxs here, since the input is a batch x N x 3(N,Ca,C) x 3 tensor, so can use the coords tensor directly
@@ -111,6 +112,7 @@ def get_Cb_from_BB(coords):
 
     cb = -0.58273431*b2 + 0.56802827*b1 - 0.54067466*b3
 
-    cb = cb / torch.linalg.vector_norm(cb, dim=2, keepdim=True).clamp(1e-6)
+    norm = 1 / torch.linalg.vector_norm(cb, dim=2, keepdim=True).clamp(1e-6) if norm else 1
+    cb = cb * norm
 
     return ca, cb
