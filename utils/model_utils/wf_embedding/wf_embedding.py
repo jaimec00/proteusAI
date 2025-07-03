@@ -31,8 +31,6 @@ class WaveFunctionEmbedding(nn.Module):
 		wn = torch.log(torch.pi*2/wl)
 		self.wavenumbers = nn.Parameter(wn, requires_grad=learn_wl) # learns log of wavenumbers, initialized so all dmodel dims start w/ corresponding wavelength of 2pi
 		self.aa_magnitudes = nn.Parameter(torch.ones(d_wf//2), requires_grad=learn_aa)
-		self.norm = StaticLayerNorm(d_wf)
-
 		self.aniso = anisotropic
 
 	def get_wavenumbers(self):
@@ -44,13 +42,10 @@ class WaveFunctionEmbedding(nn.Module):
 			wf = wf_embedding_learnCB(coords_alpha, coords_beta, self.aa_magnitudes, self.get_wavenumbers(), mask=key_padding_mask)
 		else:
 			wf = wf_embedding_iso(coords_alpha, self.get_wavenumbers(), magnitude_type=1, dropout_p=0.0, mask=key_padding_mask)
-			
-		# norming improvves performance, norms each tokens features, no affine transformation, so not layernorm
-		wf = self.norm(wf)
 
 		return wf
 
-	def get_CaCb_coords(self, coords, chain_idxs=None):
-		return get_coords(coords, chain_idxs)
+	def get_CaCb_coords(self, coords, chain_idxs=None, norm=False):
+		return get_coords(coords, chain_idxs, norm)
 
 # ----------------------------------------------------------------------------------------------------------------------

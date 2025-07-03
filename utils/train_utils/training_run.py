@@ -15,7 +15,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.distributed as dist
 import torch.multiprocessing as mp
 
-from proteusAI import proteusAI
+from proteusAI import proteusAI 
 from utils.train_utils.io_utils import Output
 from utils.train_utils.data_utils import DataHolder
 from utils.train_utils.training_run_utils import Epoch, Batch
@@ -23,7 +23,7 @@ from utils.train_utils.losses import TrainingRunLosses
 
 # ----------------------------------------------------------------------------------------------------------------------
 
-# detect anomolies in training, particularly nans when training the VAE
+# detect anomolies in training
 torch.autograd.set_detect_anomaly(True, check_nan=True) # throws error when nan encountered
 
 class TrainingRun():
@@ -94,15 +94,14 @@ class TrainingRun():
 								args.data.batch_tokens, args.data.max_batch_size, 
 								args.data.min_seq_size, args.data.max_seq_size, 
 								args.training_parameters.regularization.use_chain_mask, args.data.max_resolution,
-								args.training_parameters.ca_only_model, self.rank, self.world_size, self.training_parameters.rng
+								args.training_parameters.ca_only_model, args.training_parameters.regularization.homo_thresh, self.rank, self.world_size, self.training_parameters.rng
 							)
 		
-		self.losses = TrainingRunLosses(args.training_parameters.loss.cel.label_smoothing)
+		self.losses = TrainingRunLosses(args.training_parameters.regularization.label_smoothing)
 
 		self.output = Output(args.output.out_path, model_checkpoints=args.output.model_checkpoints, rank=self.rank, world_size=self.world_size)
 
-		self.checkpoint = torch.load(self.training_parameters.checkpoint.path, weights_only=True, map_location=self.gpu) if self.training_parameters.checkpoint.path else None
-
+		self.checkpoint = torch.load(self.training_parameters.checkpoint.path, weights_only=True, map_location=self.gpu) if self.training_parameters.checkpoint.path else ""
 
 		self.setup_model()
 		self.setup_optim()
@@ -125,52 +124,20 @@ class TrainingRun():
 		
 		self.log("loading model...")
 		
-		self.model = proteusAI(	# model params
-								d_model=self.hyper_parameters.d_model, d_wf=self.hyper_parameters.d_wf, num_aas=self.hyper_parameters.num_aa,
-
-								# wf embedding params
-								min_wl=self.hyper_parameters.embedding.min_wl, max_wl=self.hyper_parameters.embedding.max_wl, base_wl=self.hyper_parameters.embedding.base_wl, 
-								anisotropic=self.hyper_parameters.embedding.anisotropic, learn_wl=self.hyper_parameters.embedding.learn_wl, learn_aa=self.hyper_parameters.embedding.learn_aa,
-
-								# wf extraction params
-
-								# wf preprocessing
-								d_hidden_pre=self.hyper_parameters.extraction.pre_process.d_hidden, hidden_layers_pre=self.hyper_parameters.extraction.pre_process.hidden_layers,
-
-								# wf post_process
-								d_hidden_post=self.hyper_parameters.extraction.post_process.d_hidden, hidden_layers_post=self.hyper_parameters.extraction.post_process.hidden_layers,
-
-								# encoder layers
-								encoder_layers=self.hyper_parameters.extraction.encoders.layers, heads=self.hyper_parameters.extraction.encoders.heads,
-								use_bias=self.hyper_parameters.extraction.encoders.use_bias, learn_spreads=self.hyper_parameters.extraction.encoders.learn_spreads, min_rbf=self.hyper_parameters.extraction.encoders.min_rbf,
-								d_hidden_attn=self.hyper_parameters.extraction.encoders.d_hidden_attn, hidden_layers_attn=self.hyper_parameters.extraction.encoders.hidden_layers_attn,
-
-								# dropout
-								dropout=self.training_parameters.regularization.dropout,
-							)
+		self.model = proteusAI(	K=self.hyper_parameters.topk, De=self.hyper_parameters.d_e, Dw=self.hyper_parameters.d_wf, Dv=self.hyper_parameters.d_v, Ds=self.hyper_parameters.d_e,
+								min_wl=self.hyper_parameters.node_embedding.min_wl, max_wl=self.hyper_parameters.node_embedding.max_wl, base_wl=self.hyper_parameters.node_embedding.base_wl, anisotropic=self.hyper_parameters.node_embedding.anisotropic, learn_wl=self.hyper_parameters.node_embedding.learn_wl, learn_aa=self.hyper_parameters.node_embedding.learn_aa, 
+								min_rbf=self.hyper_parameters.edge_embedding.min_rbf, max_rbf=self.hyper_parameters.edge_embedding.max_rbf, num_rbfs=self.hyper_parameters.edge_embedding.num_rbfs,
+								enc_layers=self.hyper_parameters.encoder.layers, dec_layers=self.hyper_parameters.decoder.layers, dropout=self.training_parameters.regularization.dropout)
 	
 		# parallelize the model
 		self.model.to(self.gpu)
 		self.model = DDP(self.model, device_ids=[self.rank])
 
-		# which pretrained weights to use
-		if self.training_parameters.checkpoint.use_model:
-			self.model.module.load_weights(self.checkpoint["model"], embedding=True, extraction=True)
-		if self.training_parameters.checkpoint.use_embedding_weights:
-			self.model.module.load_weights(self.checkpoint["model"], embedding=True, extraction=False)
-		if self.training_parameters.checkpoint.use_extraction_weights:
-			self.model.module.load_weights(self.checkpoint["model"], embedding=False, extraction=True)
-
-		# what weights should be frozen depending on training type
-		if self.training_parameters.weights.embedding.freeze_at_seq_sim == 0.0: # option to freeze embedding right away, only use if have pretrained embedding weights
-			self.model.module.freeze_WFEmbedding_weights()
-		if self.training_parameters.weights.geo_attn.init_bias_off:
-			self.model.module.turn_off_bias() # turn off geo attn bias until certain seq sim
+		if self.checkpoint:
+			self.model.module.load_state_dict(self.checkpoint["model"])
 
 		# get number of parameters for logging
-		self.training_parameters.num_embedding_params = sum(p.numel() for p in self.model.module.wf_embedding.parameters())
-		self.training_parameters.num_extraction_params = sum(p.numel() for p in self.model.module.wf_extraction.parameters())
-		self.training_parameters.num_params = self.training_parameters.num_embedding_params +  self.training_parameters.num_extraction_params 
+		self.training_parameters.num_params = sum(p.numel() for p in self.model.module.parameters())
 
 		# print gradients at each step if in debugging mode
 		if self.debug.debug_grad: # havent tested with DDP, but might interfere with DDP hooks for grad reduce, will check later, prob not until i need to debug grads lol
@@ -200,7 +167,7 @@ class TrainingRun():
 										betas=(self.training_parameters.adam.beta1, self.training_parameters.adam.beta2), 
 										eps=float(self.training_parameters.adam.epsilon), weight_decay=self.training_parameters.adam.weight_decay)
 		self.optim.zero_grad()
-		if self.training_parameters.checkpoint.use_adam:
+		if self.checkpoint:
 			self.optim.load_state_dict(self.checkpoint["adam"], weights_only=True, map_location=self.gpu)
 
 	def setup_scheduler(self):
@@ -226,7 +193,7 @@ class TrainingRun():
 
 			def attn(step):
 				'''lr scheduler from attn paper'''
-				step = step + self.training_parameters.lr.start_from_step # in case job gets cancelled and want to start from where left off
+				step = step # in case job gets cancelled and want to start from where left off
 				return scale * min((step+1)**(-0.5), (step+1)*(self.training_parameters.lr.warmup_steps**(-1.5)))
 
 			self.scheduler = lr_scheduler.LambdaLR(self.optim, attn)
@@ -239,9 +206,8 @@ class TrainingRun():
 		else:
 			raise ValueError(f"invalid lr_type: {self.training_parameters.lr.lr_type}. options are ['attn', 'static']")
 
-		if self.training_parameters.checkpoint.use_scheduler:
+		if self.checkpoint:
 			self.scheduler.load_state_dict(self.checkpoint["scheduler"])
-
 
 	def model_checkpoint(self, epoch_idx):
 		if (epoch_idx+1) % self.output.model_checkpoints == 0: # model checkpointing
@@ -274,19 +240,6 @@ class TrainingRun():
 
 		return has_converged
 
-	def check_if_freeze_embedding(self):
-		if self.rank == 0:
-			if self.model.module.wf_embedding.aa_magnitudes.requires_grad or self.model.module.wf_embedding.wavenumbers.requires_grad:
-				if self.losses.val.get_last_match() >= self.training_parameters.weights.embedding.freeze_at_seq_sim:
-					self.model.module.freeze_WFEmbedding_weights()
-
-	def check_if_turn_bias_on(self):
-		if self.rank == 0:
-			if self.hyper_parameters.extraction.encoders.use_bias:
-				if not any(encoder.attn.beta_weights.requires_grad for encoder in self.model.module.wf_extraction.encoders):
-					if self.losses.val.get_last_match() >= self.training_parameters.weights.geo_attn.turn_bias_on_at_seq_sim:
-						self.model.module.turn_on_bias() # turn the geo attention bias on now that embedding and the QKV weights are expressive enough 
-	
 	def train(self):
 		'''
 		entry point for training the model. loads train and validation data, loops through epochs, plots training, 
@@ -301,7 +254,7 @@ class TrainingRun():
 
 		# log training info
 		self.log(f"\n\ninitializing training. "\
-					f"training on {len(self.data.train_data)} batches "\
+					f"training on approx. {len(self.data.train_data)} batches "\
 					f"of batch size {self.data.batch_tokens} tokens "\
 					f"for {self.training_parameters.epochs} epochs.\n" 
 				)
@@ -309,15 +262,13 @@ class TrainingRun():
 		# loop through epochs
 		for epoch_idx in range(self.training_parameters.epochs):
 
+			# initialize epoch and loop through batches
 			epoch = Epoch(self, epoch_idx)
 			epoch.epoch_loop()
 			
 			self.model_checkpoint(epoch_idx)
 			if self.training_converged(epoch_idx): break
 			
-			# self.check_if_freeze_embedding() # freeze embedding once validation seq sim gets high enough
-			# self.check_if_turn_bias_on() # turn geo attn bias on once QKV weights and embedding are well tuned
-
 		self.output.plot_training(self.losses, self.training_parameters.train_type)
 		self.output.save_model(self.model, train_type=self.training_parameters.train_type)
 
@@ -343,10 +294,10 @@ class TrainingRun():
 				val_pbar = tqdm(total=len(self.data.val_data), desc="epoch_validation_progress", unit="step")
 			
 			# loop through validation batches
-			for coords, labels, chain_idxs, chain_mask, key_padding_mask in self.data.val_data:
+			for data_batch in self.data.val_data:
 					
 				# init batch
-				batch = Batch(coords, labels, chain_idxs, chain_mask, key_padding_mask, epoch=dummy_epoch)
+				batch = Batch(data_batch, epoch=dummy_epoch)
 
 				# run the model
 				batch.batch_forward()
@@ -381,13 +332,12 @@ class TrainingRun():
 				test_pbar = tqdm(total=len(self.data.test_data), desc="test_progress", unit="step")
 
 			# loop through testing batches
-			for coords, labels, chain_idxs, chain_mask, key_padding_mask in self.data.test_data:
+			for data_batch in self.data.test_data:
 					
 				# init batch
-				batch = Batch(  coords, labels, chain_idxs, chain_mask, key_padding_mask, 
+				batch = Batch(  data_batch, 
 								temp=self.training_parameters.inference.temperature, 
-								inference=True, 
-								epoch=dummy_epoch
+								inference=True, epoch=dummy_epoch
 							)
 
 				# run the model

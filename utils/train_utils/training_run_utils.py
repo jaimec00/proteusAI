@@ -3,7 +3,7 @@
 import torch
 from tqdm import tqdm
 from utils.train_utils.model_outputs import ModelOutputs
-from data.constants import alphabet
+from data.constants import aa_2_lbl
 
 # ----------------------------------------------------------------------------------------------------------------------
 
@@ -34,10 +34,10 @@ class Epoch():
 			epoch_pbar = tqdm(total=len(self.training_run_parent.data.train_data), desc="epoch_progress", unit="step")
 
 		# loop through batches
-		for b_idx, (coords, labels, chain_idxs, chain_mask, key_padding_mask) in enumerate(self.training_run_parent.data.train_data):
+		for b_idx, data_batch in enumerate(self.training_run_parent.data.train_data):
 
 			# instantiate this batch
-			batch = Batch(coords, labels, chain_idxs, chain_mask, key_padding_mask, b_idx=b_idx, epoch=self)
+			batch = Batch(data_batch, b_idx=b_idx, epoch=self)
 
 			# learn
 			batch.batch_learn()
@@ -62,14 +62,19 @@ class Epoch():
 # ----------------------------------------------------------------------------------------------------------------------
 
 class Batch():
-	def __init__(self, 	coords, labels, chain_idxs, chain_mask, key_padding_mask, 
-						b_idx=None, epoch=None, inference=False, temp=0.1):
+	def __init__(self, data_batch, b_idx=None, epoch=None, inference=False, temp=1e-6):
 
-		self.coords = coords 
-		self.labels = labels
-		self.chain_idxs = chain_idxs
-		self.chain_mask = chain_mask
-		self.key_padding_mask = key_padding_mask
+		self.coords = data_batch.coords 
+		self.labels = data_batch.labels
+		self.aas = data_batch.labels if not inference else -torch.ones_like(data_batch.labels)# self.labels is edited for loss computation, keep this one for model input
+		self.chain_idxs = data_batch.chain_idxs
+		self.chain_mask = data_batch.chain_masks | data_batch.homo_masks
+		self.key_padding_mask = data_batch.key_padding_masks
+
+		# this is how pmpnn does the decoding order so that visible chains more likely to be predicted first. bit obtuse but whatever
+		rand_vals = (self.chain_mask+0.0001) * torch.abs(torch.randn_like(self.chain_mask, dtype=torch.float32))
+		rand_vals = torch.where(self.key_padding_mask, float("inf"), rand_vals) # masked positions decoded last to make inference quicker
+		self.decoding_order = torch.argsort(rand_vals, dim=1) # Z x N
 
 		self.b_idx = b_idx
 		self.epoch_parent = epoch
@@ -83,9 +88,11 @@ class Batch():
 	def move_to(self, device):
 
 		self.labels = self.labels.to(device)
+		self.aas = self.aas.to(device)
 		self.coords = self.coords.to(device)
 		self.chain_mask = self.chain_mask.to(device)
 		self.key_padding_mask = self.key_padding_mask.to(device)
+		self.decoding_order = self.decoding_order.to(device)
 
 	def batch_learn(self):
 		'''
@@ -110,7 +117,7 @@ class Batch():
 		self.move_to(self.epoch_parent.training_run_parent.gpu)
 
 		# update labels for accurate loss computation (used by output objects)
-		self.labels = self.labels.masked_fill(self.chain_mask | self.key_padding_mask | (self.labels==alphabet.index("X")), -1)
+		self.labels = self.labels.masked_fill((~self.chain_mask) | self.key_padding_mask | (self.labels == aa_2_lbl("X")), -1)
 
 		# get model outputs
 		self.outputs = self.get_outputs()
@@ -135,12 +142,12 @@ class Batch():
 		# get last loss (ddp avgs the gradients, i want the sum, so mult by world size)
 		loss = self.epoch_parent.training_run_parent.losses.tmp.get_last_loss() * self.epoch_parent.training_run_parent.world_size # no scaling by accumulation steps, as already handled by grad clipping and scaling would introduce batch size biases
 
-		# perform backward pass to accum grads
-		loss.backward()
-
 		if self.epoch_parent.training_run_parent.debug.print_losses:
 			if self.rank==0: # only printing for rank 0 for now
 				self.epoch_parent.training_run_parent.output.log.info(f"loss: {loss}")
+
+		# perform backward pass to accum grads
+		loss.backward()
 
 		if learn_step:
 		
@@ -176,8 +183,12 @@ class Batch():
 		used to get output predictions
 		'''
 
-		# get wf
-		seq_logits = self.epoch_parent.training_run_parent.model.module(coords_alpha=self.coords, chain_idxs=self.chain_idxs, key_padding_mask=self.key_padding_mask, embedding=True, extraction=True)
+		# run the model
+		seq_logits = self.epoch_parent.training_run_parent.model.module(	self.coords, self.aas, self.chain_idxs, 
+																			node_mask=self.key_padding_mask, 
+																			decoding_order=self.decoding_order, 
+																			inference=self.inference, temp=self.temp
+																		)
 
 		# convert to output object
 		return ModelOutputs(self, seq_logits)

@@ -1183,6 +1183,188 @@ class PositionalEncoding(nn.Module):
 		
 		return pe
 
+class WaveFunctionExtraction(nn.Module):
+	
+	def __init__(self, 	d_model=512, d_wf=128, num_aas=20, # model dimension
+						d_hidden_pre=2048, hidden_layers_pre=0,
+						d_hidden_post=2048, hidden_layers_post=0,
+						encoder_layers=4, heads=8, 
+						use_bias=False, learn_spreads=True, min_rbf=0.001,
+						d_hidden_attn=2048, hidden_layers_attn=0,
+						dropout=0.10
+				):
+
+		super(WaveFunctionExtraction, self).__init__()
+
+		
+		identity = lambda x: x # identity functino to skip computation
+		zero = lambda x: torch.zeros_like(x) # returns zeros tensor, for funcs that are included in skip connection
+
+		self.dropout = nn.Dropout(dropout)
+
+		self.proj_pre = nn.Linear(d_wf, d_model) if d_wf!=d_model else identity # skip linear if same dims
+		self.mlp_pre = MLP(d_in=d_model, d_out=d_model, d_hidden=d_hidden_pre, hidden_layers=hidden_layers_pre, dropout=dropout) if hidden_layers_pre!=-1 else zero
+		self.norm_pre = nn.LayerNorm(d_model) if hidden_layers_pre!=-1 else identity
+		self.mlp_post = MLP(d_in=d_model, d_out=d_model, d_hidden=d_hidden_post, hidden_layers=hidden_layers_post, dropout=dropout) if hidden_layers_post!=-1 else zero
+		self.norm_post = nn.LayerNorm(d_model) if hidden_layers_post!=-1 else identity
+
+		# self.convs = nn.ModuleList([ConvFormer((3,5,7), d_model=d_model, dropout=dropout) for _ in range(encoder_layers+1)])
+
+		self.encoders = nn.ModuleList([ Encoder(	d_model=d_model, d_other=d_model, heads=heads, 
+													min_rbf=min_rbf, bias=use_bias, learn_spreads=learn_spreads,
+													d_hidden=d_hidden_attn, hidden_layers=hidden_layers_attn, personal=True,
+													dropout=dropout
+												) 
+										for _ in range(encoder_layers)
+									])
+
+		# map to aa prob logits
+		self.out_proj = nn.Linear(d_model, num_aas)
+		init_xavier(self.out_proj)
+
+	def forward(self, wf, coords, coords_beta, chain_idxs, key_padding_mask=None):
+
+		# linear projection
+		wf = self.proj_pre(wf)
+
+
+		# non linear tranformation for more intricate features
+		wf = self.norm_pre(wf + self.mlp_pre(wf))
+
+		# geometric/vanilla attn encoders
+		for encoder in self.encoders:
+			# wf = conv(wf, chain_idxs)
+			# wf = encoder(wf, wf, wf, coords, mask=key_padding_mask)
+			wf = encoder(wf, wf, wf, coords, coords_beta, mask=key_padding_mask)
+
+		# wf = self.convs[-1](wf, chain_idxs)
+
+		# post process
+		wf = self.norm_post(wf + self.dropout(self.mlp_post(wf)))
+
+		# map to probability logits
+		aa_logits = self.out_proj(wf)
+
+		return aa_logits
+
+	def sample(self, aa_probs, temp=1e-6):
+
+		batch, N, num_aas = aa_probs.shape
+
+		# sample from the distributions
+		aa_labels = torch.multinomial(aa_probs.view(batch*N, num_aas), num_samples=1, replacement=False).view(batch, N)
+
+		return aa_labels
+
+	def get_probs(self, wf, coords_alpha, key_padding_mask=None, temp=1e-6):
+
+		# perform extraction
+		aa_logits = self.forward(wf, coords_alpha, key_padding_mask)
+
+		# softmax on temp scaled logits to get AA probs
+		aa_probs = torch.softmax(aa_logits/temp, dim=2)
+
+		return aa_probs
+
+	def extract(self, wf, coords_alpha, key_padding_mask=None, temp=1e-6):
+
+		# get temp scaled probs
+		aa_probs = self.get_probs(wf, coords_alpha, key_padding_mask, temp) 
+
+		# sample from distribution
+		aas = self.sample(aa_logits, temp)
+
+		return aas
+
+class StaticLayerNorm(nn.Module):
+	'''just normalizes each token to have a mean of 0 and var of 1, no scaling and shifting'''
+	def __init__(self, d_model):
+		super(StaticLayerNorm, self).__init__()
+		self.d_model = d_model
+	def forward(self, x):
+		centered = x - x.mean(dim=2, keepdim=True) 
+		std = centered.std(dim=2, keepdim=True)
+		std = std.masked_fill(std==0, 1)
+		return centered / std
+
+
+
+class ConvFormer(nn.Module):
+	def __init__(self, kernel_sizes=(3,5,7), d_model=256, dropout=0.0):
+		super(ConvFormer, self).__init__()
+		self.conv_weights = nn.ParameterList([nn.Parameter(torch.randn((d_model, d_model, kernel_size))) for kernel_size in kernel_sizes])
+		self.conv_biases = nn.ParameterList([nn.Parameter(torch.randn((d_model))) for kernel_size in kernel_sizes])
+		self.mlp = MLP(d_in=d_model, d_out=d_model, d_hidden=4*d_model, hidden_layers=0, dropout=dropout) 
+		self.norm1 = nn.LayerNorm(d_model)
+		self.norm2 = nn.LayerNorm(d_model)
+		self.dropout = nn.Dropout(dropout)
+
+	def forward(self, x, chain_idxs):
+
+		B, L, _ = x.shape
+
+		chain_tensor  = torch.zeros(x.size(0), x.size(1), dtype=torch.int32, device=x.device)
+		for sample_idx, sample in enumerate(chain_idxs):
+			for sample_chain_idx, (chain_start, chain_stop) in enumerate(sample, start=1): # start at one so that padded positions have idx=0, ie not mixed with nonpadded
+				chain_tensor[sample_idx, chain_start:chain_stop] = sample_chain_idx
+
+		x1 = x.permute(0,2,1)
+		for conv_weight, conv_bias in zip(self.conv_weights, self.conv_biases):
+
+			cin, cout, K = conv_weight.shape
+
+			# Compute output length O = ceil(L / stride)
+			O = L
+			# Compute total padding
+			P_total = K-1
+			if P_total < 0:
+				P_total = 0
+			pad_left = P_total // 2
+			pad_right = P_total - pad_left
+
+			# Pad x along length
+			# F.pad works for 3D input: pad=(pad_left, pad_right) on last dim
+			x_padded = torch.nn.functional.pad(x1, (pad_left, pad_right))
+
+			# Pad idxs along length with pad_value
+			# Build a new tensor of shape (B, L + pad_left + pad_right)
+			L_padded = L + pad_left + pad_right
+			device = x.device
+			dtype_idxs = chain_tensor.dtype
+			idxs_padded = torch.full((B, L_padded), 0, dtype=dtype_idxs, device=device)
+			# copy original idxs into center
+			idxs_padded[:, pad_left: pad_left + L] = chain_tensor
+
+			# Extract windows via unfold
+			# x_padded.unfold -> shape (B, cin, O, K)
+			Xw = x_padded.unfold(dimension=2, size=K, step=1)
+			# idxs_padded.unfold -> shape (B, O, K)
+			idxs_windows = idxs_padded.unfold(dimension=1, size=K, step=1)
+
+			# Build mask: keep positions where idx == center idx
+			center = K // 2
+			center_idxs = idxs_windows[:, :, center]        # shape (B, O)
+			mask = (idxs_windows == center_idxs.unsqueeze(2))  # shape (B, O, K), bool
+
+			# Apply mask: broadcast over cin
+			# Xw: (B, cin, O, K); mask.unsqueeze(1): (B,1,O,K) -> broadcast to (B,cin,O,K)
+			Xw_masked = Xw * mask.unsqueeze(1)
+
+			# Contract with weight via einsum
+			# weight shape: (cout, cin, K)
+			# out[b, o, i] = sum_c,k Xw_masked[b, c, i, k] * weight[o, c, k]
+			out = torch.einsum('b c i k, o c k -> b o i', Xw_masked, conv_weight)
+			# Add bias if provided
+			out = out + conv_bias.view(1, cout, 1)
+
+			x1 = out
+
+		x = self.norm1(x + self.dropout(x1.permute(0,2,1)))
+		x = self.norm2(x + self.dropout(self.mlp(x)))
+
+		return x
+
+
 class FiLM(nn.Module):
 	def __init__(self, d_model=512, d_hidden=1024, hidden_layers=0, dropout=0.1):
 		super(FiLM, self).__init__()

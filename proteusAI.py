@@ -2,118 +2,117 @@
 '''
 author: 		jaime cardenas
 title:  		proteusAI.py
-description:	predicts the amino acid sequence of a protein based on alpha carbon coordinates. 
+description:	predicts the amino acid sequence of a protein based on backbone coordinates. 
 '''
 # ----------------------------------------------------------------------------------------------------------------------
 
 import torch
 import torch.nn as nn
-from utils.model_utils.wf_embedding.wf_embedding import WaveFunctionEmbedding
-from utils.model_utils.wf_extraction import WaveFunctionExtraction
+
+from utils.model_utils.gnn.gnn import FeaturizeProtein, GNNEncoder, GNNDecoder
+from data.constants import canonical_aas
 
 # ----------------------------------------------------------------------------------------------------------------------
 
 class proteusAI(nn.Module):
-	'''
-	proteusAI. holds the five models, embedding, encoding, diffusion, decoding, and extraction. for inference, set inference=True in forward method
-	'''
-	
-	def __init__(self, 	# model dimension and number of amino acid classes
-						d_model=256, d_wf=256, num_aas=20, 
-
-						# wf embedding params
-						min_wl=4.0, max_wl=35.0, base_wl=20.0, anisotropic=True, learn_wl=True, learn_aa=True,
-						
-						# wf extraction params
-						d_hidden_pre=1024, hidden_layers_pre=-1, 
-						d_hidden_post=1024, hidden_layers_post=-1,
-						encoder_layers=4, heads=8,
-						use_bias=False, learn_spreads=False, min_rbf=0.001,
-						d_hidden_attn=1024, hidden_layers_attn=0,
-
-						# dropout params
-						dropout=0.10,
-				):
+	def __init__(self,  K=30, De=128, Dw=128, Dv=128, Ds=128, # model dims
+						min_wl=3.5, max_wl=25.0, base_wl=20.0, anisotropic=True, learn_wl=True, learn_aa=False, # node embedding
+						min_rbf=2.0, max_rbf=22.0, num_rbfs=16, # edge embedding
+						enc_layers=3, dec_layers=3, dropout=0.00 # general
+					):
 
 		super(proteusAI, self).__init__()
 
-		self.num_aas = num_aas
+		self.featurizer = FeaturizeProtein( K=K, De=De, Dw=Dw, Dv=Dv, # model dims
+											min_wl=min_wl, max_wl=max_wl, base_wl=base_wl, anisotropic=anisotropic, learn_wl=learn_wl, learn_aa=learn_aa, # node features (wf embedding)
+											min_rbf=min_rbf, max_rbf=max_rbf, num_rbfs=num_rbfs # edge features
+										)
 
-		# have num_aa + 1 for mask token in MLM
-		self.wf_embedding = WaveFunctionEmbedding(	d_wf=d_wf, min_wl=min_wl, max_wl=max_wl, base_wl=base_wl, 
-													anisotropic=anisotropic, learn_wl=learn_wl, learn_aa=learn_aa,
-												)
+		self.encoders = nn.ModuleList([GNNEncoder(De=De, Dv=Dv, dropout=dropout) for _ in range(enc_layers)])
+		self.decoders = nn.ModuleList([GNNDecoder(De=De, Dv=Dv, dropout=dropout) for _ in range(dec_layers)])
 
-		self.wf_extraction = WaveFunctionExtraction(	d_model=d_model, d_wf=d_wf, num_aas=num_aas,
-														d_hidden_pre=d_hidden_pre, hidden_layers_pre=hidden_layers_pre,
-														d_hidden_post=d_hidden_post, hidden_layers_post=hidden_layers_post,
-														encoder_layers=encoder_layers, heads=heads, 
-														use_bias=use_bias, learn_spreads=learn_spreads, min_rbf=min_rbf,
-														d_hidden_attn=d_hidden_attn, hidden_layers_attn=hidden_layers_attn,
-														dropout=dropout
-													)
+		self.out_proj = nn.Linear(Dv, len(canonical_aas))
 
-	def forward(self, 	coords_alpha=None, wf=None, chain_idxs=None, key_padding_mask=None, 
-						embedding=False, extraction=False,
-						inference=False, temp=1e-6 # last row is for inference only
-				):
-
-		if embedding or inference:
-			coords_alpha, coords_beta = self.wf_embedding.get_CaCb_coords(coords_alpha, chain_idxs) 
-
-		if inference:			
-			with torch.no_grad():
-				return self.inference(coords_alpha, coords_beta, key_padding_mask=key_padding_mask, temp=temp)
-
-		if embedding: # encode the structure + sequence via wave function embedding
-			wf = self.wf_embedding(coords_alpha, coords_beta, key_padding_mask=key_padding_mask)
-		if extraction: # run extraction
-			wf = self.wf_extraction(wf, coords_alpha, coords_beta, chain_idxs, key_padding_mask=key_padding_mask)
-
-		return wf
-
-	def inference(self, coords_alpha, coords_beta, key_padding_mask=None, temp=1.0):
-		wf = self.wf_embedding(coords_alpha, coords_beta, key_padding_mask=key_padding_mask)
-		aas = self.wf_extraction.extract(wf, coords_alpha, key_padding_mask=key_padding_mask)
-
-		return aas
-
-	# easier to deal with weights for seperate modules individually and partition in the training run script, also allows people to freeze certain modules by editing the code if interested
-
-	def freeze_WFEmbedding_weights(self):
-		for param in self.wf_embedding.parameters():
-			param.requires_grad = False
-
-	def freeze_WFExtraction_weights(self):
-		for param in self.wf_extraction.parameters():
-			param.requires_grad = False
-
-	def load_weights(self, model_weights, embedding=True, extraction=True):
-		embedding_weights = {".".join(i.split(".")[1:]): model_weights[i] for i in model_weights.keys() if i.startswith("wf_embedding")}
-		extraction_weights = {".".join(i.split(".")[1:]): model_weights[i] for i in model_weights.keys() if i.startswith("wf_extraction")}
-
-		if embedding:
-			self.wf_embedding.load_state_dict(embedding_weights)
-		if extraction:
-			self.wf_extraction.load_state_dict(extraction_weights)
-
-	def turn_off_bias(self):
+	def forward(self, C, L, chain_idxs, node_mask=None, decoding_order=None, inference=False, temp=1e-6):
 		'''
-		i think it would be better for the initial wf embedding to be learned without any bias
-		then, once reach a certain seq sim, freeze wf embedding, and allow the bias to be learnable
-		i see worse performance when training these end to end, so i think that the geo attn relies too
-		much on the bias at the begginging, but then when the features become expressive, it overrides them 
-		with the bias, which stalls learning
-		whenever i start with pretrained wf embedding and fresh encoders, performance is much better,
-		so i am pretty convinced this is the issue
+		C is coords
+		L is labels (-1 means to be decoded, unless nodemask is true at that position)
 		'''
-		with torch.no_grad():
-			for encoder in self.wf_extraction.encoders:
-				encoder.attn.beta_weights.fill_(-float('inf')) # learns log of betas, so beta = exp(-inf) = 0. now just keeping it frozen
-				encoder.attn.beta_weights.requires_grad = False
 
-	def turn_on_bias(self):
-		with torch.no_grad():
-			for encoder in self.wf_extraction.encoders:
-				encoder.attn.beta_weights.fill_(0) # init the betas to exp(0) = 1
-				encoder.attn.beta_weights.requires_grad = True
+		# featurize protein
+		V, E, K, S, edge_mask, autoregressive_mask = self.featurizer(C, L, chain_idxs, node_mask, decoding_order)
+
+		# encode structure
+		V, E = self.encode(V, E, K, edge_mask)
+
+		# decode sequence
+		if inference:
+			V = self.inference(V, E, K, S, L, edge_mask, decoding_order, autoregressive_mask, temp)
+		else:
+			V = self.decode(V, E, K, S, edge_mask, autoregressive_mask)
+
+		return V
+
+	def encode(self, V, E, K, edge_mask):
+
+		for encoder in self.encoders:
+			V, E = torch.utils.checkpoint.checkpoint(encoder, V, E, K, edge_mask, use_reentrant=False)
+
+		return V, E
+
+	def decode(self, V, E, K, S, edge_mask, autoregressive_mask):
+
+		V_new = V # use this to gather original nodes, not updated by neighbor seqs for autoregressive training
+		for decoder in self.decoders:
+			V_new = torch.utils.checkpoint.checkpoint(decoder, V_new, V, E, K, S, edge_mask, autoregressive_mask, use_reentrant=False)
+
+		V = self.out_proj(V_new)
+
+		return V
+
+	def inference(self, V, E, K, S, L, edge_mask, decoding_order, autoregressive_mask, temp=1e-6):
+
+		# initialize boolean mask of fixed positions (where L != -1)
+		fixed = L!=-1 # Z x N
+
+		# skip nodes that need not be decoded (masked nodes in edge_mask have all edges=False)
+		decoded = edge_mask.all(dim=2) | fixed # Z x N
+
+		# keep track of the current position to be decoded
+		decoding_position = 0
+
+		# done when all nodes have been decoded
+		while not decoded.all():
+
+			# decode the sequence, new var name for nodes so decoder always starts with original encoder nodes
+			V_new = self.decode(V, E, K, S, edge_mask, autoregressive_mask) # Z x N x len(canonical_aas)
+
+			# sample an amino acid
+			L_sampled = self.sample(V_new, temp) # Z x N
+
+			# decide which positions to update if it is not fixed
+			update_seq = (decoding_order == decoding_position) & (~decoded) # Z x N 
+
+			# update the labels 
+			L.masked_fill_(update_seq, L_sampled) # Z x N
+
+			# featurize the updated sequence for the next iteration
+			S = self.featurizer.featurize_seq(L) # Z x N x De
+			
+			# update the decoded mask
+			decoded |= update_seq # Z x N
+
+			# increment decoding position for next iteration
+			decoding_position += 1
+
+		return L # Z x N
+
+	def sample(self, V, temp=1e-6):
+
+		# convert to aa probabilities
+		probs = torch.softmax(V / temp, dim=2) # Z x N x len(canonical_aas)
+
+		# sample from the distribution
+		sample = torch.multinomial(probs, 1) # Z x N
+
+		return sample

@@ -30,7 +30,6 @@ class Output():
 		self.seq_plot = self.out_path / Path("seq_plot.png")
 		self.test_plot = self.out_path / Path("test_plot.png")
 		self.weights_path = self.out_path / Path("model_parameters.pth")
-		self.adam_path = self.out_path / Path("adam.pth")
 		self.log = self.setup_logging(self.out_path / Path("log.txt"))
 		self.model_checkpoints = model_checkpoints
 
@@ -61,39 +60,9 @@ class Output():
 
 		training the {"Ca only model" if training_parameters.ca_only_model else "full backbone model"}
 
-		wave function embedding parameters: {training_parameters.num_embedding_params:,}
-		wave function extraction parameters: {training_parameters.num_extraction_params:,}
 		total parameters: {training_parameters.num_params:,}
 		
 		model hyper-parameters:
-
-			d_model: {hyper_parameters.d_model} 
-			d_wf: {hyper_parameters.d_wf} 
-			num_aa: {hyper_parameters.num_aa}
-		
-			wave function embedding:
-				min_wavelength: {hyper_parameters.embedding.min_wl}
-				max_wavelength: {hyper_parameters.embedding.max_wl}
-				base_wavelength: {hyper_parameters.embedding.base_wl}
-				anisotropic: {hyper_parameters.embedding.anisotropic}
-				learnable_wavelengths: {hyper_parameters.embedding.learn_wl}
-				learnable_amino_acids: {hyper_parameters.embedding.learn_aa}
-			
-			wave function extraction:
-				wf preprocessing:
-					d_hidden: {hyper_parameters.extraction.pre_process.d_hidden}
-					hidden_layers: {hyper_parameters.extraction.pre_process.hidden_layers}
-				wf post_process:
-					d_hidden: {hyper_parameters.extraction.post_process.d_hidden}
-					hidden_layers: {hyper_parameters.extraction.post_process.hidden_layers}
-				encoder:
-					encoder_layers: {hyper_parameters.extraction.encoders.layers}
-					heads: {hyper_parameters.extraction.encoders.heads}
-					min_rbf: {hyper_parameters.extraction.encoders.min_rbf}
-					d_hidden_attn: {hyper_parameters.extraction.encoders.d_hidden_attn}
-					hidden_layers_attn: {hyper_parameters.extraction.encoders.hidden_layers_attn}
-					use_bias: {hyper_parameters.extraction.encoders.use_bias}
-					min_rbf (N/A if use_bias is False): {hyper_parameters.extraction.encoders.min_rbf}
 
 		data:
   			data_path: {data.data_path}
@@ -109,17 +78,8 @@ class Output():
 
 		training-parameters:
 			epochs: {training_parameters.epochs}
-			weights:
-				freeze embedding weigths after sequence similarity >= {training_parameters.weights.embedding.freeze_at_seq_sim}%
-				turn geometric attention bias off to start: {training_parameters.weights.geo_attn.init_bias_off}
-				turn geometric attention bias on after sequence similarity >= {training_parameters.weights.geo_attn.turn_bias_on_at_seq_sim}%
 			checkpoint:
 				checkpoint_path: {training_parameters.checkpoint.path}
-				use_model: {training_parameters.checkpoint.use_model}
-				use_embedding_weights: {training_parameters.checkpoint.use_embedding_weights}
-				use_extraction_weights: {training_parameters.checkpoint.use_extraction_weights}
-				use_adam: {training_parameters.checkpoint.use_adam}
-				use_scheduler: {training_parameters.checkpoint.use_scheduler}
 			inference:
 				temperature: {training_parameters.inference.temperature}
 			early_stopping:
@@ -133,9 +93,10 @@ class Output():
 				dropout: {training_parameters.regularization.dropout}
 				noise_coords_std: {training_parameters.regularization.noise_coords_std}
 				use_chain_mask: {training_parameters.regularization.use_chain_mask}
+				homo_thresh: {training_parameters.regularization.homo_thresh}
+				label_smoothing: {training_parameters.regularization.label_smoothing}
 			loss:
 				accumulation_steps: {training_parameters.loss.accumulation_steps} 
-				label_smoothing: {training_parameters.loss.cel.label_smoothing}
 				grad_clip_norm: {training_parameters.loss.grad_clip_norm}
 			lr:
 				lr_step: {training_parameters.lr.lr_step}
@@ -184,12 +145,13 @@ class Output():
 
 		tmp_losses = []
 
-		cel, seq_sim1, seq_sim3, seq_sim5 = losses.tmp.get_avg()
+		cel, seq_sim1, seq_sim3, seq_sim5, probs = losses.tmp.get_avg()
 		self.log.info(f"{mode} cross entropy loss per token: {str(cel)}")
 		self.log.info(f"{mode} top1 accuracy per token: {str(seq_sim1)}")	
 		self.log.info(f"{mode} top3 accuracy per token: {str(seq_sim3)}")	
-		self.log.info(f"{mode} top5 accuracy per token: {str(seq_sim5)}\n")	
-		tmp_losses.extend([cel, seq_sim1, seq_sim3, seq_sim5])
+		self.log.info(f"{mode} top5 accuracy per token: {str(seq_sim5)}")	
+		self.log.info(f"{mode} true aa probability per token: {str(probs)}\n")	
+		tmp_losses.extend([cel, seq_sim1, seq_sim3, seq_sim5, probs])
 		
 		if mode == "train":
 			losses.train.add_losses(*tmp_losses)
