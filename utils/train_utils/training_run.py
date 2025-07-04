@@ -97,7 +97,7 @@ class TrainingRun():
 								args.training_parameters.ca_only_model, args.training_parameters.regularization.homo_thresh, self.rank, self.world_size, self.training_parameters.rng
 							)
 		
-		self.losses = TrainingRunLosses(args.training_parameters.regularization.label_smoothing)
+		self.losses = TrainingRunLosses(args.training_parameters.regularization.label_smoothing, args.training_parameters.loss.alpha)
 
 		self.output = Output(args.output.out_path, model_checkpoints=args.output.model_checkpoints, rank=self.rank, world_size=self.world_size)
 
@@ -124,10 +124,16 @@ class TrainingRun():
 		
 		self.log("loading model...")
 		
-		self.model = proteusAI(	K=self.hyper_parameters.topk, De=self.hyper_parameters.d_e, Dw=self.hyper_parameters.d_wf, Dv=self.hyper_parameters.d_v, Ds=self.hyper_parameters.d_e,
+		self.model = proteusAI(	K=self.hyper_parameters.topk, d_model=self.hyper_parameters.d_model,
 								min_wl=self.hyper_parameters.node_embedding.min_wl, max_wl=self.hyper_parameters.node_embedding.max_wl, base_wl=self.hyper_parameters.node_embedding.base_wl, anisotropic=self.hyper_parameters.node_embedding.anisotropic, learn_wl=self.hyper_parameters.node_embedding.learn_wl, learn_aa=self.hyper_parameters.node_embedding.learn_aa, 
 								min_rbf=self.hyper_parameters.edge_embedding.min_rbf, max_rbf=self.hyper_parameters.edge_embedding.max_rbf, num_rbfs=self.hyper_parameters.edge_embedding.num_rbfs,
-								enc_layers=self.hyper_parameters.encoder.layers, dec_layers=self.hyper_parameters.decoder.layers, dropout=self.training_parameters.regularization.dropout)
+								struct_enc_layers=self.hyper_parameters.structure_encoder.layers, 
+								seq_enc_layers=self.hyper_parameters.sequence_encoder.layers, 
+								seq_diff_layers=self.hyper_parameters.sequence_denoiser.layers, 
+								seq_dec_layers=self.hyper_parameters.sequence_decoder.layers, 
+								t_max=self.hyper_parameters.sequence_denoiser.t_max,
+								dropout=self.training_parameters.regularization.dropout
+							)
 	
 		# parallelize the model
 		self.model.to(self.gpu)
@@ -235,9 +241,6 @@ class TrainingRun():
 
 		has_converged = converged(best, self.training_parameters.early_stopping.thresh)
 
-		if has_converged:
-			self.output.log.info(f"training converged after {epoch_idx} epochs")
-
 		return has_converged
 
 	def train(self):
@@ -268,9 +271,15 @@ class TrainingRun():
 			
 			self.model_checkpoint(epoch_idx)
 			if self.training_converged(epoch_idx): break
-			
-		self.output.plot_training(self.losses, self.training_parameters.train_type)
-		self.output.save_model(self.model, train_type=self.training_parameters.train_type)
+
+		# announce trainnig is done
+		self.log(f"training done after {epoch.epoch} epochs", fancy=True)
+
+		# plot training losses
+		self.output.plot_training(self.losses)
+
+		# save the model
+		self.output.save_checkpoint(self.model, self.optim, self.scheduler, appended_str="final")
 
 	def validation(self):
 		
@@ -313,6 +322,8 @@ class TrainingRun():
 
 		# switch to evaluation mode
 		self.model.eval()
+
+		self.log("starting testing", fancy=True)
 		
 		# load testing data
 		self.log("loading testing data...")
@@ -324,12 +335,12 @@ class TrainingRun():
 		# dummy epoch so can still access training run parent
 		dummy_epoch = Epoch(self)
 
+		# progress bar
+		if self.rank == 0:
+			test_pbar = tqdm(total=len(self.data.test_data), desc="test_progress", unit="step")
+
 		# turn off gradient calculation
 		with torch.no_grad():
-
-			# progress bar
-			if self.rank == 0:
-				test_pbar = tqdm(total=len(self.data.test_data), desc="test_progress", unit="step")
 
 			# loop through testing batches
 			for data_batch in self.data.test_data:
@@ -350,6 +361,12 @@ class TrainingRun():
 		# log the losses
 		self.output.log_test_losses(self.losses)
 
-	def log(self, message):
+		# done
+		self.log(f"fin", fancy=True)
+
+	def log(self, message, fancy=False):
+		if fancy:
+			message = f"\n\n{'-'*80}\n{message}\n{'-'*80}\n"
+
 		if self.rank==0:
 			self.output.log.info(message)

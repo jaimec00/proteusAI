@@ -10,9 +10,9 @@ from data.constants import canonical_aas
 
 class TrainingRunLosses():
 
-	def __init__(self, label_smoothing=0.0):
+	def __init__(self, label_smoothing=0.0, alpha=0.5):
 
-		self.loss_function = LossFunction(label_smoothing)
+		self.loss_function = LossFunction(label_smoothing, alpha)
 
 		self.train = Losses()
 		self.val = Losses()
@@ -39,6 +39,8 @@ class Losses():
 		self.matches3 = [] 
 		self.matches5 = [] 
 		self.probs = []
+		self.mse = []
+		self.loss = []
 
 		# to scale losses for logging, does not affect backprop
 		self.valid_toks = 0 # valid tokens to compute avg per token per cha
@@ -48,19 +50,23 @@ class Losses():
 
 		valid_toks = self.valid_toks
 		avg_cel = sum(cel.item() for cel in self.cel if cel) / valid_toks
-		avg_seq_sim = 100*sum(match.item() for match in self.matches1 if match) / valid_toks
-		avg_seq_sim3 = 100*sum(match.item() for match in self.matches3 if match) / valid_toks
-		avg_seq_sim5 = 100*sum(match.item() for match in self.matches5 if match) / valid_toks
-		avg_probs = 100*sum(prob.item() for prob in self.probs if prob) / valid_toks
+		avg_seq_sim = sum(match.item() for match in self.matches1 if match) / valid_toks
+		avg_seq_sim3 = sum(match.item() for match in self.matches3 if match) / valid_toks
+		avg_seq_sim5 = sum(match.item() for match in self.matches5 if match) / valid_toks
+		avg_probs = sum(prob.item() for prob in self.probs if prob) / valid_toks
+		avg_mse = sum(mse.item() for mse in self.mse if mse) / valid_toks
+		avg_loss = sum(loss.item() for loss in self.loss if loss) / valid_toks
 		
-		return avg_cel, avg_seq_sim, avg_seq_sim3, avg_seq_sim5, avg_probs
+		return avg_cel, avg_seq_sim, avg_seq_sim3, avg_seq_sim5, avg_probs, avg_mse, avg_loss
 
-	def add_losses(self, cel, matches1, matches3, matches5, probs, valid_toks=1):
+	def add_losses(self, cel, matches1, matches3, matches5, probs, mse, loss, valid_toks=1):
 		self.cel.append(cel)
 		self.matches1.append(matches1)
 		self.matches3.append(matches3)
 		self.matches5.append(matches5)
 		self.probs.append(probs)
+		self.mse.append(mse)
+		self.loss.append(loss)
 		self.valid_toks += valid_toks
 
 	def extend_losses(self, other):
@@ -69,6 +75,8 @@ class Losses():
 		self.matches3.extend(other.matches3)
 		self.matches5.extend(other.matches5)
 		self.probs.extend(other.probs)
+		self.mse.extend(other.mse)
+		self.loss.extend(other.loss)
 		self.valid_toks += other.valid_toks
 
 	def clear_losses(self):
@@ -77,10 +85,12 @@ class Losses():
 		self.matches3 = []
 		self.matches5 = []
 		self.probs = []
+		self.mse = []
+		self.loss = []
 		self.valid_toks = 0
 
 	def get_last_loss(self):
-		return self.cel[-1]
+		return self.loss[-1]
 
 	def get_last_match(self):
 		return self.matches1[-1]
@@ -92,18 +102,27 @@ class Losses():
 		self.matches3 = [match.detach().to("cpu").numpy() if isinstance(match, torch.Tensor) else np.array([match]) for match in self.matches3]
 		self.matches5 = [match.detach().to("cpu").numpy() if isinstance(match, torch.Tensor) else np.array([match]) for match in self.matches5]
 		self.probs = [prob.detach().to("cpu").numpy() if isinstance(prob, torch.Tensor) else np.array([prob]) for prob in self.probs]
+		self.mse = [mse.detach().to("cpu").numpy() if isinstance(mse, torch.Tensor) else np.array([mse]) for mse in self.mse]
+		self.loss = [loss.detach().to("cpu").numpy() if isinstance(loss, torch.Tensor) else np.array([loss]) for loss in self.loss]
 
 	def __len__(self):
-		return len(self.cel)
+		return len(self.loss)
 
 # ----------------------------------------------------------------------------------------------------------------------
 # loss functions 
 
 class LossFunction(nn.Module):
 
-	def __init__(self, label_smoothing):
+	def __init__(self, label_smoothing, alpha):
 		super(LossFunction, self).__init__()
 		self.cel_raw = CrossEntropyLoss(reduction="sum", ignore_index=-1, label_smoothing=label_smoothing)
+		self.alpha = alpha
+
+	def mse(self, noise, noise_pred, mask):
+
+		mse = torch.sum(mask.unsqueeze(2) * (noise - noise_pred)**2)
+
+		return mse
 
 	def cel(self, seq_pred, seq_true):
 		'''
@@ -112,7 +131,6 @@ class LossFunction(nn.Module):
 		'''
 
 		cel = self.cel_raw(seq_pred.view(-1, seq_pred.size(-1)), seq_true.view(-1)) # Z*N
-		# cel = self.cel_raw(seq_pred, seq_true)
 		return cel
 
 	def compute_matches(self, seq_pred, seq_true):
@@ -142,7 +160,7 @@ class LossFunction(nn.Module):
 
 		return probs_sum
 
-	def forward(self, seq_pred, seq_true, inference=False):
+	def forward(self, Z_mu, Z_logvar, noise, noise_pred, seq_pred, seq_true, inference=False):
 
 		if inference: # seq pred is Z x N labels tensor of predictions, convert to one hot for simplicity
 			no_seq = seq_pred == -1
@@ -151,5 +169,7 @@ class LossFunction(nn.Module):
 		cel = self.cel(seq_pred, seq_true)
 		matches1, matches3, matches5 = self.compute_matches(seq_pred, seq_true)
 		probs = self.compute_probs(seq_pred, seq_true)
+		mse = self.mse(noise, noise_pred, seq_true!=-1)
+		loss = self.alpha*mse + (1-self.alpha)*cel
 
-		return cel, matches1, matches3, matches5, probs # return all for logging, only full loss used for backprop
+		return cel, matches1, matches3, matches5, probs, mse, loss # return all for logging, only full loss used for backprop

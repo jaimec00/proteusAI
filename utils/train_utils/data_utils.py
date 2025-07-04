@@ -10,6 +10,7 @@ description:	fetches data from proteinMPNN curated dataset and converts to DataH
 
 import torch
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from data.constants import alphabet, aa_2_lbl, lbl_2_aa
 from collections import defaultdict
 from threading import Thread
 from threading import Lock
@@ -23,8 +24,6 @@ import random
 import psutil
 import math
 import os
-
-from data.constants import alphabet, aa_2_lbl, lbl_2_aa
 
 # ----------------------------------------------------------------------------------------------------------------------
 

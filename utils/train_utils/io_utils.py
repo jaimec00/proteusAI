@@ -26,10 +26,12 @@ class Output():
 		self.out_path = Path(out_path)
 		self.out_path.mkdir(parents=True, exist_ok=True)
 
+		# training plot paths
 		self.cel_plot = self.out_path / Path("cel_plot.png")
-		self.seq_plot = self.out_path / Path("seq_plot.png")
-		self.test_plot = self.out_path / Path("test_plot.png")
-		self.weights_path = self.out_path / Path("model_parameters.pth")
+		self.acc_plot = self.out_path / Path("acc_plot.png")
+		self.mse_plot = self.out_path / Path("mse_plot.png")
+		self.loss_plot = self.out_path / Path("loss_plot.png")
+
 		self.log = self.setup_logging(self.out_path / Path("log.txt"))
 		self.model_checkpoints = model_checkpoints
 
@@ -63,7 +65,25 @@ class Output():
 		total parameters: {training_parameters.num_params:,}
 		
 		model hyper-parameters:
-
+			d_model: {hyper_parameters.d_model} 
+			topk: {hyper_parameters.topk}
+			t_max: {hyper_parameters.sequence_denoiser.t_max}
+			node_embedding:
+				min_wl: {hyper_parameters.node_embedding.min_wl}
+				max_wl: {hyper_parameters.node_embedding.max_wl}
+				base_wl: {hyper_parameters.node_embedding.base_wl}
+				anisotropic: {hyper_parameters.node_embedding.anisotropic}
+				learn_wl: {hyper_parameters.node_embedding.learn_wl}
+				learn_aa: {hyper_parameters.node_embedding.learn_aa}
+			edge_embedding:
+				min_rbf: {hyper_parameters.edge_embedding.min_rbf}
+				max_rbf: {hyper_parameters.edge_embedding.max_rbf}
+				num_rbfs: {hyper_parameters.edge_embedding.num_rbfs}
+			structure encoder layers: {hyper_parameters.structure_encoder.layers}
+			sequence encoder layers: {hyper_parameters.sequence_encoder.layers}
+			sequence denoiser layers: {hyper_parameters.sequence_denoiser.layers}
+			sequence decoder layers: {hyper_parameters.sequence_decoder.layers}
+				
 		data:
   			data_path: {data.data_path}
 			dataset split ({data.num_train + data.num_val + data.num_test:,} clusters total): 
@@ -78,6 +98,7 @@ class Output():
 
 		training-parameters:
 			epochs: {training_parameters.epochs}
+			rng: {training_parameters.rng}
 			checkpoint:
 				checkpoint_path: {training_parameters.checkpoint.path}
 			inference:
@@ -89,6 +110,7 @@ class Output():
 				beta1: {training_parameters.adam.beta1}
 				beta2: {training_parameters.adam.beta2}
 				epsilon: {training_parameters.adam.epsilon}
+				weight_decay: {training_parameters.adam.weight_decay}
 			regularization:
 				dropout: {training_parameters.regularization.dropout}
 				noise_coords_std: {training_parameters.regularization.noise_coords_std}
@@ -96,9 +118,11 @@ class Output():
 				homo_thresh: {training_parameters.regularization.homo_thresh}
 				label_smoothing: {training_parameters.regularization.label_smoothing}
 			loss:
-				accumulation_steps: {training_parameters.loss.accumulation_steps} 
+				accumulation_steps: {training_parameters.loss.accumulation_steps} {"tokens" if training_parameters.loss.token_based_step else "batches"} 
 				grad_clip_norm: {training_parameters.loss.grad_clip_norm}
+				alpha: {training_parameters.loss.alpha}
 			lr:
+				lr_type: {training_parameters.lr.lr_type}
 				lr_step: {training_parameters.lr.lr_step}
 				warmup_steps: {training_parameters.lr.warmup_steps}
 		
@@ -145,13 +169,15 @@ class Output():
 
 		tmp_losses = []
 
-		cel, seq_sim1, seq_sim3, seq_sim5, probs = losses.tmp.get_avg()
+		cel, seq_sim1, seq_sim3, seq_sim5, probs, mse, loss = losses.tmp.get_avg()
+		self.log.info(f"{mode} top 1 accuracy per token: {str(seq_sim1)}")	
+		self.log.info(f"{mode} top 3 accuracy per token: {str(seq_sim3)}")	
+		self.log.info(f"{mode} top 5 accuracy per token: {str(seq_sim5)}")	
+		self.log.info(f"{mode} true aa predicted likelihood per token: {str(probs)}")	
 		self.log.info(f"{mode} cross entropy loss per token: {str(cel)}")
-		self.log.info(f"{mode} top1 accuracy per token: {str(seq_sim1)}")	
-		self.log.info(f"{mode} top3 accuracy per token: {str(seq_sim3)}")	
-		self.log.info(f"{mode} top5 accuracy per token: {str(seq_sim5)}")	
-		self.log.info(f"{mode} true aa probability per token: {str(probs)}\n")	
-		tmp_losses.extend([cel, seq_sim1, seq_sim3, seq_sim5, probs])
+		self.log.info(f"{mode} mean equared error per token: {str(mse)}")	
+		self.log.info(f"{mode} full loss per token: {str(loss)}\n")	
+		tmp_losses.extend([cel, seq_sim1, seq_sim3, seq_sim5, probs, mse, loss])
 		
 		if mode == "train":
 			losses.train.add_losses(*tmp_losses)
@@ -170,76 +196,80 @@ class Output():
 	def log_test_losses(self, losses):
 		self.log_losses(losses, "test")
 
-	def plot_training(self, losses, training_type):
+	def plot_training(self, losses):
 
 		# convert to numpy arrays
 		losses.to_numpy()
 
 		epochs = [i + 1 for i in range(len(losses.train))]
-		self.plot_extraction(losses, epochs)
 
-	def plot_extraction(self, losses, epochs):
-
-		# Create the plot, only plotting final loss, will add functionality to plot kldiv, cel, and mse seperately later
+		# plot cel
 		plt.plot(epochs, losses.train.cel, marker='o', color='red', label="Training")
 		plt.plot(epochs, losses.val.cel, marker='o', color='blue', label="Validation")
 
-		# Adding title and labels
-		plt.title('Loss vs. Epochs')
+		plt.title('Cross Entropy Loss vs. Epochs')
 		plt.xlabel('Epochs')
 		plt.ylabel('Cross Entropy Loss')
-		
-		# Add a legend to distinguish the line plots
 		plt.legend()
-		
-		# Display the plot
 		plt.grid(True)
 		plt.savefig(self.cel_plot)
-		self.log.info(f"graph of loss vs. epoch saved to {self.cel_plot}")
+		self.log.info(f"plot of cross_entropy loss vs. epochs saved to {self.cel_plot}")
 
 		plt.figure()
 
-		plt.plot(epochs, losses.train.matches1, marker='o', color='red', label="Training")
-		plt.plot(epochs, losses.train.matches3, marker='x', color='red', label="Training")
-		plt.plot(epochs, losses.train.matches5, marker='-', color='red', label="Training")
-		plt.plot(epochs, losses.val.matches1, marker='o', color='blue', label="Validation")
-		plt.plot(epochs, losses.val.matches3, marker='x', color='blue', label="Validation")
-		plt.plot(epochs, losses.val.matches5, marker='-', color='blue', label="Validation")
+		# plot accuracy
+		plt.plot(epochs, losses.train.matches1, marker='o', color='red', label="Training (Top 1)")
+		plt.plot(epochs, losses.train.matches3, marker='x', color='red', label="Training (Top 3)")
+		plt.plot(epochs, losses.train.matches5, marker='^', color='red', label="Training (Top 5)")
+		plt.plot(epochs, losses.train.probs, marker='v', color='red', label="Training (Predicted Likelihood of True AA)")
+		plt.plot(epochs, losses.val.matches1, marker='o', color='blue', label="Validation (Top 1)")
+		plt.plot(epochs, losses.val.matches3, marker='x', color='blue', label="Validation (Top 3)")
+		plt.plot(epochs, losses.val.matches5, marker='^', color='blue', label="Validation (Top 5)")
+		plt.plot(epochs, losses.val.probs, marker='v', color='red', label="Validation (Predicted Likelihood of True AA)")
 		
-		# Adding title and labels
-		plt.title('Sequence Similarity vs. Epochs')
+		plt.title('Accuracy vs. Epochs')
 		plt.xlabel('Epochs')
-		plt.ylabel('Sequence Similarity (%)')
-		
-		# Add a legend to distinguish the line plots
+		plt.ylabel('Accuracy')
 		plt.legend()
-		
-		# Display the plot
 		plt.grid(True)
-		plt.savefig(self.seq_plot)
-		self.log.info(f"graph of seq_similarity vs. epoch saved to {self.seq_plot}")
+		plt.savefig(self.acc_plot)
+		self.log.info(f"plot of accuracy vs. epochs saved to {self.acc_plot}")
 
-	def plot_testing(self, losses): # not implemented
+		plt.figure()
 
-		losses.test.to_numpy()
+		# plot mse
+		plt.plot(epochs, losses.train.mse, marker='o', color='red', label="Training")
+		plt.plot(epochs, losses.val.mse, marker='o', color='blue', label="Validation")
 		
-		# Create a histogram with 30 bins and add a black edge to each bin for clarity
-		plt.hist(losses.test.matches, bins=100, edgecolor='black')
-
-		# Label the axes and add a title
-		plt.xlabel('Sequence Similarity')
-		plt.ylabel('Frequency')
-		plt.title('Histogram of Sequence Similarities')
-		
-		# Display the plot
+		plt.title('Mean Squared Error vs. Epochs')
+		plt.xlabel('Epochs')
+		plt.ylabel('Mean Squared Error')
+		plt.legend()
 		plt.grid(True)
-		plt.savefig(self.test_plot)
-		self.log.info(f"histogram of test seq_sims saved to {self.test_plot}")
+		plt.savefig(self.mse_plot)
+		self.log.info(f"plot of mean squared error vs. epochs saved to {self.mse_plot}")
+
+		plt.figure()
+
+		# plot loss
+		plt.plot(epochs, losses.train.loss, marker='o', color='red', label="Training")
+		plt.plot(epochs, losses.val.loss, marker='o', color='blue', label="Validation")
+		
+		plt.title('Loss vs. Epochs')
+		plt.xlabel('Epochs')
+		plt.ylabel('Loss')
+		plt.legend()
+		plt.grid(True)
+		plt.savefig(self.loss_plot)
+		self.log.info(f"plot of loss vs. epochs saved to {self.loss_plot}")
 
 	def save_checkpoint(self, model, adam=None, scheduler=None, appended_str=""):
 
-		checkpoint_path = self.weights_path.parent / Path(f"checkpoint_{appended_str}.pth")
-		checkpoint = {"model": model.module.state_dict(), "adam": adam.state_dict(), "scheduler": scheduler.state_dict()}
+		checkpoint = {	"model": model.module.state_dict(), 
+						"adam": (None if adam is None else adam.state_dict()), 
+						"scheduler": (None if scheduler is None else scheduler.state_dict())
+					}
+		checkpoint_path = self.out_path / Path(f"checkpoint_{appended_str}.pth")
 		torch.save(checkpoint, checkpoint_path)
 		self.log.info(f"checkpoint saved to {checkpoint_path}")
 

@@ -311,153 +311,6 @@ class WaveFunctionDecoding(nn.Module):
 
 		return wf
 
-
-class WaveFunctionDiffusion(nn.Module):
-	
-	def __init__(self, 	d_latent=256, d_proj=256,
-						alpha_bar_min=0.0, noise_schedule_type="linear", t_max=100,
-						d_in_timestep=256, d_hidden_timestep=1024, hidden_layers_timestep=1,
-						d_hidden_post=1024, hidden_layers_post=0,
-						encoder_layers=4, heads=8,
-						use_bias=False, min_rbf=0.000,
-						d_hidden_attn=2048, hidden_layers_attn=0,
-						dropout=0.10
-				):
-
-		super(WaveFunctionDiffusion, self).__init__()
-
-		# compute wavenumbers for sinusoidal embeddings of timesteps
-		self.register_buffer("wavenumbers", 10000**(-torch.arange(0, d_in_timestep, 2) / d_latent))
-		self.noise_scheduler = NoiseScheduler(alpha_bar_min=alpha_bar_min, noise_schedule_type=noise_schedule_type, t_max=t_max)
-
-		d_proj = 512 # testing if projecting to high dim before attn is beneficial, then projecting back to latent
-		self.d_proj = nn.Linear(d_latent, d_proj)
-
-		self.encoders = nn.ModuleList([ DiTEncoder(	d_model=d_proj, heads=heads, 
-													d_hidden=d_hidden_attn, hidden_layers=hidden_layers_attn, 
-													d_in_t=d_in_timestep, d_hidden_t=d_hidden_timestep, hidden_layers_t=hidden_layers_timestep,		
-													min_rbf=min_rbf, bias=use_bias,
-													dropout=dropout,
-												)
-										for _ in range(encoder_layers)
-									])
-
-		# # self.out_norm = nn.LayerNorm(d_latent)
-		self.noise_proj = nn.Linear(d_proj, d_latent, bias=False)
-		init_xavier(self.noise_proj)
-
-	# wf is the noised wf, context is unnoised, but with no aa info, used as kv in cross attention, defaults to self-attention if context is none
-	def forward(self, wf, t, coords_alpha, key_padding_mask=None):
-
-		# featurize the timestep w/ frequency embedding
-		t_features = self.featurize_t(t)
-
-		# testing if projecting to higher dim before attn helps
-		wf = self.d_proj(wf)
-
-		for encoder in self.encoders:
-			wf = encoder(wf, t_features, coords_alpha, key_padding_mask=key_padding_mask)
-
-		# linear projection for noise pred, no bias
-		noise = self.noise_proj(wf)
-
-		# return noise
-		return noise
-
-	def featurize_t(self, t):
-
-		# once in the latent space, add token embedding info
-		# featurize the timestep (shape: batch, -> batch x 1 x d_latent) with  sinusoidal embedding
-		phase = self.wavenumbers.unsqueeze(0).unsqueeze(1)*t.unsqueeze(1).unsqueeze(2)
-		sine = torch.sin(phase) # Z x 1 x K
-		cosine = torch.cos(phase) # Z x 1 x K
-		t_features = torch.stack([sine, cosine], dim=3).view(t.size(0), 1, self.wavenumbers.size(0)*2) # Z x 1 x d_latent
-
-		return t_features
-
-	def get_random_timesteps(self, batch_size, device):
-		return torch.randint(1, self.noise_scheduler.t_max+1, (batch_size,), device=device)
-
-	def noise(self, wf, t):
-
-		if isinstance(t, int):
-			t = torch.full((wf.size(0), 1, 1), t, device=wf.device)
-		elif isinstance(t, torch.Tensor):
-			t = t.unsqueeze(1).unsqueeze(2)
-		alpha_bar_t, _ = self.noise_scheduler(t) 
-		noise = torch.randn_like(wf)
-		wf = (alpha_bar_t**0.5)*wf + ((1-alpha_bar_t)**0.5)*noise
-
-		return wf, noise
-
-	def denoise(self, wf, t_start, key_padding_mask=None): # meant to operate on same t for all samples in batch during inference
-
-		# convert to tensor
-		t_bwd = torch.full((wf.size(0), 1, 1), t_start, device=wf.device)
-			
-		# perform diffusion
-		while (t_bwd>=1).any():
-
-			# compute alpha_bar for t and t-1
-			alpha_bar_t, alpha_bar_tminus1 = self.noise_scheduler(t_bwd) 
-			
-			# predict the noise
-			noise_pred = self.forward(wf, t_bwd.squeeze(1,2), key_padding_mask=key_padding_mask)
-
-			# update wf, use ode flow to deterministically move the wf towards high prob denisty manifold. non-markovian denoising
-			pred_wf_0 = (wf - ((1-alpha_bar_t)**0.5)*noise_pred)/(alpha_bar_t**0.5)
-
-			pred_wf_grad_t = ((1 - alpha_bar_tminus1)**0.5) * noise_pred
-
-			wf = (alpha_bar_tminus1**0.5)*pred_wf_0 + pred_wf_grad_t
-
-			# update t
-			t_bwd -= 1
-
-		return wf
-
-
-class NoiseScheduler(nn.Module):
-	def __init__(self, alpha_bar_min=0.0, noise_schedule_type="linear", t_max=100):
-		super(NoiseScheduler, self).__init__()
-
-		self.alpha_bar_min = alpha_bar_min # 0.0 is full noise , no signal
-		self.noise_scheduler = self.get_scheduler(noise_schedule_type)
-		self.t_max = t_max
-
-	def forward(self, t: torch.Tensor): # Z x 1 x 1
-		return self.noise_scheduler(t) # Z x 1 x 1
-
-	def cosine_scheduler(self, t: torch.Tensor, s=0.008): # s is approx pixel bin width, no direct equivilant for my data, so just start with this and tune
-		f = lambda t_in: self.alpha_bar_min + (1 - self.alpha_bar_min)*(torch.cos((torch.pi/2)*(t_in/self.t_max + s)/(1 + s))**2)
-		f_t = f(t)
-		f_tminus1 = f(t-1) 
-		f_0 = f(torch.zeros_like(t))
-		alpha_bar_t = f_t / f_0
-		alpha_bar_tminus1 = f_tminus1 / f_0
-
-		return alpha_bar_t, alpha_bar_tminus1
-
-	def linear_scheduler(self, t: torch.Tensor):
-
-		# fuck it, im doing a linear abar scheduler instead
-		alpha_bar_t = self.alpha_bar_min + (1 - (t / self.t_max))*(1 - self.alpha_bar_min)
-		alpha_bar_tminus1 = self.alpha_bar_min + (1 - ((t-1) / self.t_max))*(1 - self.alpha_bar_min)
-		
-		return alpha_bar_t, alpha_bar_tminus1
-
-	def get_scheduler(self, schedule_type):
-
-		schedules = {	
-						"cosine": self.cosine_scheduler,
-						"linear": self.linear_scheduler
-					}
-		try:
-			return schedules[schedule_type]
-		except KeyValueError as e:
-			e(f"invalid noise scheduler chosen. valid options are {schedules.keys()}")
-
-
 class WaveFunctionEncoding(nn.Module):
 	def __init__(self,  d_model=256, d_latent=32, d_proj=512,
 						d_hidden_pre=1024, hidden_layers_pre=0,
@@ -676,21 +529,6 @@ class PositionalEncoding(nn.Module):
 		pe = self.positional_encoding[None, :, :].to(x.device) # batch x N x d_model
 		x = x + pe # batch x N x d_model
 		return x
-
-class StaticLayerNorm(nn.Module):
-	def __init__(self, normalized_shape, eps=1e-5):
-		super(StaticLayerNorm, self).__init__()
-		self.normalized_shape = normalized_shape
-		self.eps = eps  # Small epsilon to prevent division by zero
-
-	def forward(self, x):
-		# Calculate the mean and variance along the feature dimension
-		mean = x.mean(dim=-1, keepdim=True)  # Shape: (batch_size, N, 1)
-		var = x.var(dim=-1, keepdim=True, unbiased=False)  # Shape: (batch_size, N, 1)
-
-		# Normalize to zero mean and unit variance without learned parameters
-		x_normalized = (x - mean) / torch.sqrt(var + self.eps)
-		return x_normalized
 
 def pt_to_data(pts: Path, all_bb: int=0, device="cpu", features=False, num_inputs=512, max_size=10000):
 	all_tensors = []
@@ -1276,17 +1114,21 @@ class WaveFunctionExtraction(nn.Module):
 
 		return aas
 
-class StaticLayerNorm(nn.Module):
-	'''just normalizes each token to have a mean of 0 and var of 1, no scaling and shifting'''
-	def __init__(self, d_model):
-		super(StaticLayerNorm, self).__init__()
-		self.d_model = d_model
-	def forward(self, x):
-		centered = x - x.mean(dim=2, keepdim=True) 
-		std = centered.std(dim=2, keepdim=True)
-		std = std.masked_fill(std==0, 1)
-		return centered / std
 
+class StaticLayerNorm(nn.Module):
+	def __init__(self, normalized_shape, eps=1e-5):
+		super(StaticLayerNorm, self).__init__()
+		self.normalized_shape = normalized_shape
+		self.eps = eps  # Small epsilon to prevent division by zero
+
+	def forward(self, x):
+		# Calculate the mean and variance along the feature dimension
+		mean = x.mean(dim=-1, keepdim=True)  # Shape: (batch_size, N, 1)
+		var = x.var(dim=-1, keepdim=True, unbiased=False)  # Shape: (batch_size, N, 1)
+
+		# Normalize to zero mean and unit variance without learned parameters
+		x_normalized = (x - mean) / torch.sqrt(var + self.eps)
+		return x_normalized
 
 
 class ConvFormer(nn.Module):
@@ -1377,16 +1219,3 @@ class FiLM(nn.Module):
 		gamma, beta = torch.split(gamma_beta, dim=-1, split_size_or_sections=gamma_beta.shape[-1] // 2)
 		return gamma*x + beta
 
-class adaLN(nn.Module):
-	'''adaptive layer norm to perform affine transformation conditioned on timestep. adaLNzero, where initialized to all zeros'''
-	def __init__(self, d_in=512, d_model=512, d_hidden=1024, hidden_layers=0, dropout=0.0):
-		super(adaLN, self).__init__()
-		self.gamma_beta = MLP(d_in=d_in, d_out=2*d_model, d_hidden=d_hidden, hidden_layers=hidden_layers, dropout=dropout, act="silu", zeros=False)
-		self.alpha = MLP(d_in=d_in, d_out=d_model, d_hidden=d_hidden, hidden_layers=hidden_layers, dropout=dropout, act="silu", zeros=True)
-
-	def forward(self, e_t):
-
-		gamma_beta = self.gamma_beta(e_t)
-		gamma, beta = torch.chunk(gamma_beta, chunks=2, dim=-1)
-		alpha = self.alpha(e_t)
-		return gamma, beta, alpha

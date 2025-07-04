@@ -71,10 +71,6 @@ class Batch():
 		self.chain_mask = data_batch.chain_masks | data_batch.homo_masks
 		self.key_padding_mask = data_batch.key_padding_masks
 
-		# this is how pmpnn does the decoding order so that visible chains more likely to be predicted first. bit obtuse but whatever
-		rand_vals = (self.chain_mask+0.0001) * torch.abs(torch.randn_like(self.chain_mask, dtype=torch.float32))
-		rand_vals = torch.where(self.key_padding_mask, float("inf"), rand_vals) # masked positions decoded last to make inference quicker
-		self.decoding_order = torch.argsort(rand_vals, dim=1) # Z x N
 
 		self.b_idx = b_idx
 		self.epoch_parent = epoch
@@ -92,7 +88,6 @@ class Batch():
 		self.coords = self.coords.to(device)
 		self.chain_mask = self.chain_mask.to(device)
 		self.key_padding_mask = self.key_padding_mask.to(device)
-		self.decoding_order = self.decoding_order.to(device)
 
 	def batch_learn(self):
 		'''
@@ -184,14 +179,13 @@ class Batch():
 		'''
 
 		# run the model
-		seq_logits = self.epoch_parent.training_run_parent.model.module(	self.coords, self.aas, self.chain_idxs, 
-																			node_mask=self.key_padding_mask, 
-																			decoding_order=self.decoding_order, 
-																			inference=self.inference, temp=self.temp
-																		)
+		Z_mu, Z_logvar, noise, noise_pred, seq_logits = self.epoch_parent.training_run_parent.model.module(	self.coords, self.aas, self.chain_idxs, 
+																											node_mask=self.key_padding_mask, 
+																											inference=self.inference, temp=self.temp
+																										)
 
 		# convert to output object
-		return ModelOutputs(self, seq_logits)
+		return ModelOutputs(self, Z_mu, Z_logvar, noise, noise_pred, seq_logits)
 
 	def size(self, idx):
 		return self.labels.size(idx)
