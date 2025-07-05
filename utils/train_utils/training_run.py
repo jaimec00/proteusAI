@@ -235,9 +235,6 @@ class TrainingRun():
 
 		has_converged = converged(best, self.training_parameters.early_stopping.thresh)
 
-		if has_converged:
-			self.output.log.info(f"training converged after {epoch_idx} epochs")
-
 		return has_converged
 
 	def train(self):
@@ -269,8 +266,14 @@ class TrainingRun():
 			self.model_checkpoint(epoch_idx)
 			if self.training_converged(epoch_idx): break
 			
-		self.output.plot_training(self.losses, self.training_parameters.train_type)
-		self.output.save_model(self.model, train_type=self.training_parameters.train_type)
+		# announce trainnig is done
+		self.log(f"training done after {epoch.epoch} epochs", fancy=True)
+
+		# plot training losses
+		self.output.plot_training(self.losses)
+
+		# save the model
+		self.output.save_checkpoint(self.model, self.optim, self.scheduler, appended_str="final")
 
 	def validation(self):
 		
@@ -313,6 +316,8 @@ class TrainingRun():
 
 		# switch to evaluation mode
 		self.model.eval()
+
+		self.log("starting testing", fancy=True)
 		
 		# load testing data
 		self.log("loading testing data...")
@@ -350,6 +355,9 @@ class TrainingRun():
 		# log the losses
 		self.output.log_test_losses(self.losses)
 
-	def log(self, message):
+	def log(self, message, fancy=False):
+		if fancy:
+			message = f"\n\n{'-'*80}\n{message}\n{'-'*80}\n"
+
 		if self.rank==0:
 			self.output.log.info(message)

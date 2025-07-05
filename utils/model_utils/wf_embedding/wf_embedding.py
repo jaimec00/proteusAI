@@ -17,7 +17,7 @@ from utils.model_utils.wf_embedding.anisotropic.aa_scaling.learnable_aa.learnabl
 from utils.model_utils.wf_embedding.anisotropic.aa_scaling.static_aa.cuda.wf_embedding import wf_embedding as wf_embedding_staticAA
 from utils.model_utils.wf_embedding.anisotropic.cb_scaling.learnable_wavenumbers.cuda.wf_embedding import wf_embedding as wf_embedding_learnCB
 from utils.model_utils.base_modules.Cb_utils import get_coords
-from utils.model_utils.base_modules.base_modules import StaticLayerNorm
+# from utils.model_utils.base_modules.base_modules import StaticLayerNorm
 
 # ----------------------------------------------------------------------------------------------------------------------
 

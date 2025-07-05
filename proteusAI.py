@@ -8,6 +8,7 @@ description:	predicts the amino acid sequence of a protein based on backbone coo
 
 import torch
 import torch.nn as nn
+# from torch.utils.checkpoint import checkpoint
 
 from utils.model_utils.gnn.gnn import FeaturizeProtein, GNNEncoder, GNNDecoder
 from data.constants import canonical_aas
@@ -16,7 +17,7 @@ from data.constants import canonical_aas
 
 class proteusAI(nn.Module):
 	def __init__(self,  K=30, De=128, Dw=128, Dv=128, Ds=128, # model dims
-						min_wl=3.5, max_wl=25.0, base_wl=20.0, anisotropic=True, learn_wl=True, learn_aa=False, # node embedding
+						min_wl=3.5, max_wl=12.0, base_wl=20.0, anisotropic=True, learn_wl=True, learn_aa=False, # node embedding
 						min_rbf=2.0, max_rbf=22.0, num_rbfs=16, # edge embedding
 						enc_layers=3, dec_layers=3, dropout=0.00 # general
 					):
@@ -56,7 +57,7 @@ class proteusAI(nn.Module):
 	def encode(self, V, E, K, edge_mask):
 
 		for encoder in self.encoders:
-			V, E = torch.utils.checkpoint.checkpoint(encoder, V, E, K, edge_mask, use_reentrant=False)
+			V, E = encoder(V, E, K, edge_mask)
 
 		return V, E
 
@@ -64,7 +65,7 @@ class proteusAI(nn.Module):
 
 		V_new = V # use this to gather original nodes, not updated by neighbor seqs for autoregressive training
 		for decoder in self.decoders:
-			V_new = torch.utils.checkpoint.checkpoint(decoder, V_new, V, E, K, S, edge_mask, autoregressive_mask, use_reentrant=False)
+			V_new = decoder(V_new, V, E, K, S, edge_mask, autoregressive_mask)
 
 		V = self.out_proj(V_new)
 
@@ -94,7 +95,7 @@ class proteusAI(nn.Module):
 			update_seq = (decoding_order == decoding_position) & (~decoded) # Z x N 
 
 			# update the labels 
-			L.masked_fill_(update_seq, L_sampled) # Z x N
+			L[update_seq] = L_sampled[update_seq] # Z x N
 
 			# featurize the updated sequence for the next iteration
 			S = self.featurizer.featurize_seq(L) # Z x N x De
@@ -113,6 +114,6 @@ class proteusAI(nn.Module):
 		probs = torch.softmax(V / temp, dim=2) # Z x N x len(canonical_aas)
 
 		# sample from the distribution
-		sample = torch.multinomial(probs, 1) # Z x N
+		sample = torch.multinomial(probs.view(-1, probs.size(-1)), 1).view(probs.size(0), probs.size(1)) # Z x N
 
 		return sample

@@ -117,7 +117,7 @@ data:
 
 # Output
 output:
-  out_path: "/scratch/hjc2538/projects/proteusAI/models/gnn/30neighbors_12Amask"
+  out_path: "/scratch/hjc2538/projects/proteusAI/models/gnn/no_decoder"
   model_checkpoints: 10 # number of epochs to save a checkpoint of the model after
 
 # ------------------------------------------------------------------------------
@@ -129,7 +129,7 @@ debug:
   print_losses: False
   print_grad_L2: False
 
-port: 29501 # in case want to run multiple independant instances of the training on a single machine (one for each gpu), you need different ports for each
+port: 29500 # in case want to run multiple independant instances of the training on a single machine (one for each gpu), you need different ports for each
 
 # ------------------------------------------------------------------------------
 
