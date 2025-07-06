@@ -71,6 +71,7 @@ class TrainingRun():
 		self.setup_training(args)
 		self.train()
 		self.test()
+		self.log("fin!", fancy=True)
 
 	def setup_training(self, args):
 		'''
@@ -124,10 +125,14 @@ class TrainingRun():
 		
 		self.log("loading model...")
 		
-		self.model = proteusAI(	K=self.hyper_parameters.topk, De=self.hyper_parameters.d_e, Dw=self.hyper_parameters.d_wf, Dv=self.hyper_parameters.d_v, Ds=self.hyper_parameters.d_e,
-								min_wl=self.hyper_parameters.node_embedding.min_wl, max_wl=self.hyper_parameters.node_embedding.max_wl, base_wl=self.hyper_parameters.node_embedding.base_wl, anisotropic=self.hyper_parameters.node_embedding.anisotropic, learn_wl=self.hyper_parameters.node_embedding.learn_wl, learn_aa=self.hyper_parameters.node_embedding.learn_aa, 
-								min_rbf=self.hyper_parameters.edge_embedding.min_rbf, max_rbf=self.hyper_parameters.edge_embedding.max_rbf, num_rbfs=self.hyper_parameters.edge_embedding.num_rbfs,
-								enc_layers=self.hyper_parameters.encoder.layers, dec_layers=self.hyper_parameters.decoder.layers, dropout=self.training_parameters.regularization.dropout)
+		self.model = proteusAI(	K=self.hyper_parameters.topk, d_model=self.hyper_parameters.d_model,
+								min_wl=self.hyper_parameters.node_embedding.min_wl, max_wl=self.hyper_parameters.node_embedding.max_wl, 
+								base_wl=self.hyper_parameters.node_embedding.base_wl, learn_wl=self.hyper_parameters.node_embedding.learn_wl, 
+								min_rbf=self.hyper_parameters.edge_embedding.min_rbf, max_rbf=self.hyper_parameters.edge_embedding.max_rbf, 
+								num_rbfs=self.hyper_parameters.edge_embedding.num_rbfs,
+								layers=self.hyper_parameters.layers, 
+								dropout=self.training_parameters.regularization.dropout
+							)
 	
 		# parallelize the model
 		self.model.to(self.gpu)
@@ -168,7 +173,7 @@ class TrainingRun():
 										eps=float(self.training_parameters.adam.epsilon), weight_decay=self.training_parameters.adam.weight_decay)
 		self.optim.zero_grad()
 		if self.checkpoint:
-			self.optim.load_state_dict(self.checkpoint["adam"], weights_only=True, map_location=self.gpu)
+			self.optim.load_state_dict(self.checkpoint["adam"])
 
 	def setup_scheduler(self):
 		'''
@@ -212,7 +217,7 @@ class TrainingRun():
 	def model_checkpoint(self, epoch_idx):
 		if (epoch_idx+1) % self.output.model_checkpoints == 0: # model checkpointing
 			if self.rank==0:
-				self.output.save_checkpoint(self.model, adam=self.optim, scheduler=self.scheduler, appended_str=f"e{epoch_idx}_s{round(self.losses.val.get_last_loss(),2)}")
+				self.output.save_checkpoint(self.model, adam=self.optim, scheduler=self.scheduler, appended_str=f"E{epoch_idx}_L{round(self.losses.val.get_last_loss(),2)}")
 
 	def training_converged(self, epoch_idx):
 
@@ -286,16 +291,16 @@ class TrainingRun():
 		# dummy epoch so can still access training run parent
 		dummy_epoch = Epoch(self)
 		
+		# logging
+		self.log("running validation...")
+
+		# progress bar
+		if self.rank == 0:
+			val_pbar = tqdm(total=len(self.data.val_data), desc="epoch_validation_progress", unit="step")
+		
 		# turn off gradient calculation
 		with torch.no_grad():
 
-			# logging
-			self.log("running validation...")
-
-			# progress bar
-			if self.rank == 0:
-				val_pbar = tqdm(total=len(self.data.val_data), desc="epoch_validation_progress", unit="step")
-			
 			# loop through validation batches
 			for data_batch in self.data.val_data:
 					
@@ -309,8 +314,8 @@ class TrainingRun():
 				if self.rank == 0:
 					val_pbar.update(self.world_size)
 
-			# add the avg losses to the global loss and log
-			self.output.log_val_losses(self.losses)
+		# add the avg losses to the global loss and log
+		self.output.log_val_losses(self.losses)
 
 	def test(self):
 
@@ -329,12 +334,12 @@ class TrainingRun():
 		# dummy epoch so can still access training run parent
 		dummy_epoch = Epoch(self)
 
+		# progress bar
+		if self.rank == 0:
+			test_pbar = tqdm(total=len(self.data.test_data), desc="test_progress", unit="step")
+
 		# turn off gradient calculation
 		with torch.no_grad():
-
-			# progress bar
-			if self.rank == 0:
-				test_pbar = tqdm(total=len(self.data.test_data), desc="test_progress", unit="step")
 
 			# loop through testing batches
 			for data_batch in self.data.test_data:

@@ -36,8 +36,8 @@ export NVCC_WRAPPER_DEFAULT_COMPILER=\$(which g++)
 export CUDAHOSTCXX=\$(which g++)
 
 # define triton cache dir so dont run out of space in home
-export TRITON_HOME="/scratch/hjc2538/projects/proteusAI" # leaving this for now
-export TRITON_CACHE_DIR="\$TRITON_HOME/.triton/cache"
+# export TRITON_HOME="/scratch/hjc2538/projects/proteusAI" # leaving this for now
+# export TRITON_CACHE_DIR="\$TRITON_HOME/.triton/cache"
 
 EOF 
 

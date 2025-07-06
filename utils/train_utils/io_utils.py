@@ -18,7 +18,7 @@ import sys
 
 class Output():
 
-	def __init__(self, out_path, model_checkpoints=10, rank=0, world_size=1):\
+	def __init__(self, out_path, model_checkpoints=10, rank=0, world_size=1):
 
 		self.rank = rank # deal with the loggin logic here
 		self.world_size = world_size
@@ -61,7 +61,18 @@ class Output():
 		total parameters: {training_parameters.num_params:,}
 		
 		model hyper-parameters:
-
+			d_model: {hyper_parameters.d_model}
+			topk: {hyper_parameters.topk}
+			layers: {hyper_parameters.layers}
+			node_embedding:
+				min_wl: {hyper_parameters.node_embedding.min_wl}
+				max_wl: {hyper_parameters.node_embedding.max_wl}
+				base_wl: {hyper_parameters.node_embedding.base_wl}
+				learn_wl: {hyper_parameters.node_embedding.learn_wl}
+			edge_embedding:
+				min_rbf: {hyper_parameters.edge_embedding.min_rbf}
+				max_rbf: {hyper_parameters.edge_embedding.max_rbf}
+				num_rbfs: {hyper_parameters.edge_embedding.num_rbfs}
 		data:
   			data_path: {data.data_path}
 			dataset split ({data.num_train + data.num_val + data.num_test:,} clusters total): 
@@ -81,6 +92,7 @@ class Output():
 				checkpoint_path: {training_parameters.checkpoint.path}
 			inference:
 				temperature: {training_parameters.inference.temperature}
+				cycles: {training_parameters.inference.cycles}
 			early_stopping:
 				thresh: {training_parameters.early_stopping.thresh} 
 				tolerance: {training_parameters.early_stopping.tolerance}
@@ -146,11 +158,11 @@ class Output():
 		tmp_losses = []
 
 		cel, seq_sim1, seq_sim3, seq_sim5, probs = losses.tmp.get_avg()
+		self.log.info(f"{mode} cross entropy loss per token: {str(cel)}")
 		self.log.info(f"{mode} top 1 accuracy per token: {str(seq_sim1)}")	
 		self.log.info(f"{mode} top 3 accuracy per token: {str(seq_sim3)}")	
 		self.log.info(f"{mode} top 5 accuracy per token: {str(seq_sim5)}")	
-		self.log.info(f"{mode} true aa predicted likelihood per token: {str(probs)}")	
-		self.log.info(f"{mode} cross entropy loss per token: {str(cel)}")
+		self.log.info(f"{mode} true aa predicted likelihood per token: {str(probs)}\n")	
 		tmp_losses.extend([cel, seq_sim1, seq_sim3, seq_sim5, probs])
 		
 		if mode == "train":
@@ -170,10 +182,7 @@ class Output():
 	def log_test_losses(self, losses):
 		self.log_losses(losses, "test")
 
-	def plot_training(self, losses, training_type):
-
-		# convert to numpy arrays
-		losses.to_numpy()
+	def plot_training(self, losses):
 
 		# convert to numpy arrays
 		losses.to_numpy()
@@ -190,7 +199,7 @@ class Output():
 		plt.legend()
 		plt.grid(True)
 		plt.savefig(self.cel_plot)
-		self.log.info(f"plot of cross_entropy loss vs. epochs saved to {self.cel_plot}")
+		self.log.info(f"plot of cross entropy loss vs. epochs saved to {self.cel_plot}")
 
 		plt.figure()
 
@@ -202,12 +211,12 @@ class Output():
 		plt.plot(epochs, losses.val.matches1, marker='o', color='blue', label="Validation (Top 1)")
 		plt.plot(epochs, losses.val.matches3, marker='x', color='blue', label="Validation (Top 3)")
 		plt.plot(epochs, losses.val.matches5, marker='^', color='blue', label="Validation (Top 5)")
-		plt.plot(epochs, losses.val.probs, marker='v', color='red', label="Validation (Predicted Likelihood of True AA)")
+		plt.plot(epochs, losses.val.probs, marker='v', color='blue', label="Validation (Predicted Likelihood of True AA)")
 		
 		plt.title('Accuracy vs. Epochs')
 		plt.xlabel('Epochs')
 		plt.ylabel('Accuracy')
-		plt.legend()
+		plt.legend(fontsize="x-small")
 		plt.grid(True)
 		plt.savefig(self.acc_plot)
 		self.log.info(f"plot of accuracy vs. epochs saved to {self.acc_plot}")

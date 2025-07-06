@@ -3,7 +3,7 @@ import torch.nn as nn
 from torch.nn import CrossEntropyLoss
 import numpy as np
 import math
-from data.constants import canonical_aas
+from data.constants import canonical_aas, aa_2_lbl
 
 # ----------------------------------------------------------------------------------------------------------------------
 # losses 
@@ -48,10 +48,10 @@ class Losses():
 
 		valid_toks = self.valid_toks
 		avg_cel = sum(cel.item() for cel in self.cel if cel) / valid_toks
-		avg_seq_sim = 100*sum(match.item() for match in self.matches1 if match) / valid_toks
-		avg_seq_sim3 = 100*sum(match.item() for match in self.matches3 if match) / valid_toks
-		avg_seq_sim5 = 100*sum(match.item() for match in self.matches5 if match) / valid_toks
-		avg_probs = 100*sum(prob.item() for prob in self.probs if prob) / valid_toks
+		avg_seq_sim = sum(match.item() for match in self.matches1 if match) / valid_toks
+		avg_seq_sim3 = sum(match.item() for match in self.matches3 if match) / valid_toks
+		avg_seq_sim5 = sum(match.item() for match in self.matches5 if match) / valid_toks
+		avg_probs = sum(prob.item() for prob in self.probs if prob) / valid_toks
 		
 		return avg_cel, avg_seq_sim, avg_seq_sim3, avg_seq_sim5, avg_probs
 
@@ -145,7 +145,7 @@ class LossFunction(nn.Module):
 	def forward(self, seq_pred, seq_true, inference=False):
 
 		if inference: # seq pred is Z x N labels tensor of predictions, convert to one hot for simplicity
-			no_seq = seq_pred == -1
+			no_seq = (seq_pred == -1) | (seq_pred == aa_2_lbl("X"))
 			seq_pred = torch.nn.functional.one_hot(torch.where(no_seq, 0, seq_pred), num_classes=len(canonical_aas)).to(torch.float32) # Z x N x canonical_aas
 
 		cel = self.cel(seq_pred, seq_true)

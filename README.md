@@ -1,48 +1,105 @@
 # proteusAI
-## Protein Sequence Prediction of Target Structure via Wave Function Embedding and Multi-Scale Geometric Flash-Attention
+## Protein Sequence Prediction of Target Structure via Wave Function Embedding, Message Passing, and Masked Language Modeling
 
-proteusAI is a transformer model that predicts the optimal protein sequence given a target structure of alpha-carbon ($C_a$) coordinates. 
+## Summary
 
-Many protein sequence prediction AI models use contact maps, distance metrics, and/or dihedral angles of the protein structure as input features to AI models. However, these features fail to encode local AND global interactions of the $C_a$/backbone atoms in a concise and efficient way that the model can gain a reasonable inductive bias from. 
+proteusAI is masked language model for protein sequence prediction conditioned on structure. It is based on ProteinMPNN, but with a few innovations and customizations aimed to better suit the inverse folding problem.
 
-To achieve a greater inductive bias, we propose a method of encoding the three-dimensional coordinates of each token, i.e. each $C_a$, into high dimensional feature space through the use of wave functions. We model each $C_a$ as a point source via the Green's function solution to the Hemholtz equation in three dimensions, and create a global wave function that is a superpositions of all $C_a$ atom point sources. More precisely, the global wavefunction, $\psi_k$ is defined as:
+The key innovation is the use of wavefunction embedding to initialize the nodes in the original graph. ProteinMPNN initializes the nodes as zeros, and allows the edges to update them. We aimed to give the model
+a global view of the protein by encoding the environment of each residue through the superposition of the effects of all other residues. We accomplish this by modeling each $C_\alpha$ as an anisotropic point source, where the anisotropy comes from the orientation of the virtual $C_\beta$. We evaluate multiple wavefunction, each using a learnable wavenumber that corresponds to a feature index. Additionally we chose to encode the identity of each amino acid by scaling the magnitude of the corresponding $C_\beta$, with a learnable scaling factor per wavenumber, per amino acid. This allows the model to learn how each amino acid affects the environment around it, at each scale, and most importantly, in the context of its spatial configuration. once the embedding is computed, we norm the features and pass it through a linear layer. 
 
-$\psi_k(r) = \sum_{j=0}^N \frac{e^{ik|r-r_j|}}{|r - r_j|}$
+The edge features are computed the same way as ProteinMPNN does, through 16 radial basis functions with evenly spaced centers from 2 to 22 $\AA$. The edge features are also normed and passed through a linear layer.
 
-where $|r - r_j|$ is Euclidaean norm of the positions vector of the $j^\text{th}$ $C_a$ source and the observer, i.e. the input to the wavefunction, and k is the wavenumber, related to the wavelength $\lambda$ by $k = \frac{2\pi}{\lambda}$.
+After embedding the global environment of each residue along with the nearest-neighbor relationships, we pass it through several encoder layers, which are identical to those used by ProteinMPNN, in which several message passing operations are executed, each of which updates the node and edge representations. We ommited the decoder implemented by ProteinMPNN, instead treating the encoder as a bidirectional encoder that predicts the amino acid identity of positions with the special \<mask\> token. 
 
-Moreover, we can define multiple wavefunctions, each with a different k, and thus a different wavelength. In this case, wave functions corresponding to small $\lambda$ encode local interactions between the $C_a$ atoms, while larger $\lambda$ encode global interactions. Thus, the output of a wave function, $\psi_k$, corresponds to two features of the input $C_a$, a real part and imaginary part, i.e. a cos and sin term. To emphasize local interactions, since these are more prone to large fluctuations from small changes in wavelength, the wavelengths are sampled logarithmically from $\lambda_{min}$ to $\lambda_{max}$, given a base, $b$. This gives the general wave function featurization formula, termed Wavefunction Embedding (WE):
+For training, we allowed the model to start with the true amino acids for non-target chains, but set all of the amino acids for the target chain to the special \<mask\> token. We used an alphafold style recycle regimen, where we randomly sampled a number between 0 and $N_\text{recycle}$-1, ran the model with no gradients for that number of cycles, and randomly replaced 1/$N_\text{recycle}$ of residues with the models predictions. this served as input to the model, with gradients on. This allows the model to be trained not only with sequences in the PDB as context, but also with viable alternative sequences, as predicted by the model, in the hope that it will learn more robust structure to sequence relationships not captured by evolution.
 
-$WE(2i, r) = \sum_{j=0}^N \frac{1}{{|r-r_j|}} cos( k_{i} |r-r_j| ) $
+### Getting Started
+#### Installation
+First you will need a working Linux machine with a GPU set up on it, preferably with an H100 GPU, as the wave function embedding CUDA kernel was optimized for this hardware (mostly the generous amount of shared memory). 
 
-$WE(2i+1, r) = \sum_{j=0}^N \frac{1}{|r-r_j|} sin( k_{i} |r-r_j| ) $
+Assuming this, you will run the setup.sh script, which creates a conda environment named protAI_env:
 
-Where, 
+```bash
+./setup.sh
+```
+We are currently working on a script to automatically compile the cuda kernel, but for now you can do it manually
 
-$k_{i} = \frac{2\pi}{\lambda_{i}}$
+```python
+conda activate protAI_env
 
-$\lambda_{i} = \lambda_{min} + (\lambda_{max}-\lambda_{min})(\frac{ b^{ 2i/d_{model} } - 1 } {b - 1} )$
+# go to path for learnable wave function embedding 
+cd utils.model_utils/wf_embedding/anisotropic/aa_scaling/learnable_aa/learnable_wavenumber/cuda
+python setup.py build_ext --inplace
 
-Note the similarity between this formula and the traditional positional encoding formula:
+# go to path for static wave function embedding (much faster)
+cd utils.model_utils/wf_embedding/anisotropic/aa_scaling/static_aa/cuda
+python setup.py build_ext --inplace
 
-$PE(2i, p) = sin(\frac{p}{10000^{2i/d_{model}}})$
+```
 
-$PE(2i+1, p) = cos(\frac{p}{10000^{2i/d_{model}}})$
+This will compile the kernels so they can be used in training and inference.
 
-This is because the wave function embedding process can be seen as a generalization of positional encoding for irregularly spaced tokens in arbitrary dimensions.
+#### Inference
+TBD
 
-This method offers several advantages to existing methods. For one, it offers rotationally and translationally invariant representation of the protein, since the wave function only accounts for relative distances. Additionally, by using multiple wave functions of differing granularity (with different k), the model will capture a wide range of representations of the same structure, in which both local and global interactions are encoded. While computing the superposed wave function outputs for each Ca, and for each of the d_model//2 wave functions, scales O($N^2$) in compute, memory, and time, we have implemented a custom cuda kernel that fuses all of the operations into a single GPU kernel, which significantly speeds up the computation and drastically reduces memory usage. For batch size of 1, sequence length of 16384, and d_model of 512, the kernel runs in 386 ms on h100 GPU, while a naive pytorch version takes minutes, due to the necessary tiling for an input of that size.
+#### Training
+##### Data Preperation
+We use two data sets to train this model. 
 
-Additionally, the Wavefunction Embedding module implements an extremely efficient backwards pass, achieving 10X speedup and 1000X memory reduction WITHOUT any hardware optimizations, written fully in PyTorch. This is achieved by storing the sums of the cosine terms for each token and the sum of the sin terms during the forward pass, each of which is only batch x N x d_model//2. this avoids both storing large intermediate tensors and recomputation, and is accomplished by analytically simplifying the gradient computation, dropping the computational complexity of the backward pass from $O(N^2)$ in to $O(N)$. This allows the function to compute the gradients with respect to the wavenumbers, which makes it possible to make the wavelengths themselved to be learnable, allowing end to end differentiability, adaptive and interpretable featurization, and requiring only the coordinates to be served to the model as input.
+    Multi-chain: https://files.ipd.uw.edu/pub/training_sets/pdb_2021aug02.tar.gz 
 
-The wavefunction features are combined with ESM2 amino acid embeddings which contain rich evolutionary and structural information, by adding the two features together. The resulting features align very well with the rest of the model, which is a stack of traditional Encoder layers from the original transformer paper. While transformers are known for their ability to perform long range attention, it is still beneficial to inject a spatial bias into the model, so that extremely distant residues do not affect each other too much. To solve this problem, we introduce Geometric Attention, which is a novel multi-head attention (MHA) mechanism. In the custom MHA module, the attention logits are scaled by Radial Basis Functions (RBF). Each head of the MHA module gets assigned a specific spread ($\sigma_{head}$) to compute the RBFs. The RBF is thus:
+    Single-chain: https://people.csail.mit.edu/ingraham/graph-protein-design/data/cath/{chain_set.jsonl,chain_set_splits.json} 
 
-$RBF_{head}(r_q, r_k) = 1 + exp(-\frac{|r_q-r_k|^2}{2\sigma_{head}^2})$
+You can download the data sets like this
 
-Where $r_q$ is the physical position of the token corresponding to the query matrix row, and $r_k$ is the physical position of the token corresponding to the key matrix (transposed) column. The added 1 to the RBF serves to stabilize gradient for Q and K, but still ensures multiplicative interactions between the RBF and the attention logits, rather than adding a bias, which leads to cross talk between the RBFs and the attention logits in the backwards pass, allowing the Q and K matrices to learn directly from the geometry of the structures.
+```bash
+# download multi chain
+wget https://files.ipd.uw.edu/pub/training_sets/pdb_2021aug02.tar.gz /path/to/multichain/data
+nohup tar -xzv /path/to/multchain/data/pdb_2021aug02.tar.gz & # recommended to run in background with nohup, takes a while
 
-To reduce the memory footprint and speed up the computation, the Multi-Scale Geometric Attention module is fused into a single GPU kernel using triton, taking inspiration from the Flash Attention 2 paper (https://arxiv.org/abs/2205.14135). A custom backwards pass is also implemented to make not only Q, K, and V learnable, but also the spread of each attention head. Thus, each head learns at what scale it should evaluate the RBFs, and how to weigh pairs of tokens. This design aligns very well with the previously described featurization process, since the features themselves correspond to different representations of the same structure at distinct scales via the learned wavelength ranges ($\lambda_{min} and \lambda_{max}$) and distributions ($b$). since each head operates on a well defined feature space, $d_k = d_{model}/n_{heads}$, the heads can learn what scale to evaluate the features they are working on.
+# download single chain
+wget  https://people.csail.mit.edu/ingraham/graph-protein-design/data/cath/chain_set.jsonl /path/to/singlechain/data
+wget  https://people.csail.mit.edu/ingraham/graph-protein-design/data/cath/chain_set_splits.json /path/to/singlechain/data
+```
 
-This multi-scale geometric attention mechanism can be seen as a generalization of graph neural networks (GNN), since the scaled attention mechanism creates soft, continuous edges between token pairs, which are defined at multiple scales. 
+You will then have to clean the data so that it is compatible with the training script. You can do this easily by running the following commands from the proteusAI directory
 
-After passing through all Encoder layers, the logits pass through a linear layer to convert the $d_{model}$ feature space into AA feature space (20 dimensions, one for each amino acid) and softmax is performed to get amino acid probabilities for each position. The model selects the most confident prediction and auto-regressively updates the sequence, until the final prediction is reached. 
+```bash
+# clean multi-chain data
+nohup python utils/train_utils/data_utils   --clean_pdbs True \
+                                            --data_path '/path/to/multichain/data/pdb_2021aug02'\
+                                            --new_data_path '/path/to/multichain/data/pdb_2021aug02/processed'\
+                                            --single_chain False\
+                                            --test False &
+
+# clean single-chain data
+nohup python utils/train_utils/data_utils   --clean_pdbs True \
+                                            --data_path '/path/to/singlechain/data/'\
+                                            --new_data_path '/path/to/singlechain/data/processed'\
+                                            --single_chain True\
+                                            --test False &
+```
+
+Now the data should be ready for use, and you can simply specifify the path in the config/train.yml file for each dataset
+
+```yml
+data:
+  single_chain_data_path: /path/to/singlechain/data/processed
+  multi_chain_data_path: /path/to/multichain/data/processed
+```
+
+##### Training
+we have included an example HPC submission script which uses SLURM. you will have to make your own script if you are using a different job scheduler.
+
+```bash
+sbatch hpc_scripts/train.sh
+```
+
+But in general, you can start training like this if your machine has GPU(s) attached
+
+```bash
+nohup python learn_seqs.py > train.out 2> train.err &
+```
+
+note that this reads the configuration file, so make sure to edit it depending on your goal. it should be pretty self-explanatory.

@@ -8,49 +8,46 @@ description:	predicts the amino acid sequence of a protein based on backbone coo
 
 import torch
 import torch.nn as nn
-# from torch.utils.checkpoint import checkpoint
 
-from utils.model_utils.gnn.gnn import FeaturizeProtein, GNNEncoder, GNNDecoder
-from data.constants import canonical_aas
+from utils.model_utils.mpnn.mpnn import MPNN
+from utils.model_utils.mpnn.featurize import FeaturizeProtein
+from data.constants import canonical_aas, aa_2_lbl
 
 # ----------------------------------------------------------------------------------------------------------------------
 
 class proteusAI(nn.Module):
-	def __init__(self,  K=30, De=128, Dw=128, Dv=128, Ds=128, # model dims
-						min_wl=3.5, max_wl=12.0, base_wl=20.0, anisotropic=True, learn_wl=True, learn_aa=False, # node embedding
+	def __init__(self,  K=30, d_model=128, # model dims
+						min_wl=3.5, max_wl=12.0, base_wl=20.0, learn_wl=True, # node embedding
 						min_rbf=2.0, max_rbf=22.0, num_rbfs=16, # edge embedding
-						enc_layers=3, dec_layers=3, dropout=0.00 # general
+						layers=3, dropout=0.00 # general
 					):
 
 		super(proteusAI, self).__init__()
 
-		self.featurizer = FeaturizeProtein( K=K, De=De, Dw=Dw, Dv=Dv, # model dims
-											min_wl=min_wl, max_wl=max_wl, base_wl=base_wl, anisotropic=anisotropic, learn_wl=learn_wl, learn_aa=learn_aa, # node features (wf embedding)
+		self.featurizer = FeaturizeProtein( K=K, d_model=128, # model dims
+											min_wl=min_wl, max_wl=max_wl, base_wl=base_wl, learn_wl=learn_wl, # node features (wf embedding)
 											min_rbf=min_rbf, max_rbf=max_rbf, num_rbfs=num_rbfs # edge features
 										)
 
-		self.encoders = nn.ModuleList([GNNEncoder(De=De, Dv=Dv, dropout=dropout) for _ in range(enc_layers)])
-		self.decoders = nn.ModuleList([GNNDecoder(De=De, Dv=Dv, dropout=dropout) for _ in range(dec_layers)])
+		self.encoders = nn.ModuleList([MPNN(d_model=128, dropout=dropout, update_edge=i!=(layers-1)) for i in range(layers)])
 
-		self.out_proj = nn.Linear(Dv, len(canonical_aas))
+		self.out_proj = nn.Linear(d_model, len(canonical_aas))
 
-	def forward(self, C, L, chain_idxs, node_mask=None, decoding_order=None, inference=False, temp=1e-6):
+	def forward(self, C, L, chain_idxs, node_mask=None, inference=False, temp=1e-6, cycles=4):
 		'''
 		C is coords
 		L is labels (-1 means to be decoded, unless nodemask is true at that position)
 		'''
 
-		# featurize protein
-		V, E, K, S, edge_mask, autoregressive_mask = self.featurizer(C, L, chain_idxs, node_mask, decoding_order)
-
-		# encode structure
-		V, E = self.encode(V, E, K, edge_mask)
-
-		# decode sequence
 		if inference:
-			V = self.inference(V, E, K, S, L, edge_mask, decoding_order, autoregressive_mask, temp)
+			V = self.inference(C, L, chain_idxs, node_mask=node_mask, temp=temp, cycles=cycles)
 		else:
-			V = self.decode(V, E, K, S, edge_mask, autoregressive_mask)
+
+			# featurize protein
+			V, E, K, edge_mask = self.featurizer(C, L, chain_idxs, node_mask=node_mask)
+
+			# encode structure
+			V = self.encode(V, E, K, edge_mask)
 
 		return V
 
@@ -59,61 +56,55 @@ class proteusAI(nn.Module):
 		for encoder in self.encoders:
 			V, E = encoder(V, E, K, edge_mask)
 
-		return V, E
-
-	def decode(self, V, E, K, S, edge_mask, autoregressive_mask):
-
-		V_new = V # use this to gather original nodes, not updated by neighbor seqs for autoregressive training
-		for decoder in self.decoders:
-			V_new = decoder(V_new, V, E, K, S, edge_mask, autoregressive_mask)
-
-		V = self.out_proj(V_new)
+		V = self.out_proj(V)
 
 		return V
 
-	def inference(self, V, E, K, S, L, edge_mask, decoding_order, autoregressive_mask, temp=1e-6):
-
-		# initialize boolean mask of fixed positions (where L != -1)
-		fixed = L!=-1 # Z x N
-
-		# skip nodes that need not be decoded (masked nodes in edge_mask have all edges=False)
-		decoded = edge_mask.all(dim=2) | fixed # Z x N
-
-		# keep track of the current position to be decoded
-		decoding_position = 0
-
-		# done when all nodes have been decoded
-		while not decoded.all():
-
-			# decode the sequence, new var name for nodes so decoder always starts with original encoder nodes
-			V_new = self.decode(V, E, K, S, edge_mask, autoregressive_mask) # Z x N x len(canonical_aas)
-
-			# sample an amino acid
-			L_sampled = self.sample(V_new, temp) # Z x N
-
-			# decide which positions to update if it is not fixed
-			update_seq = (decoding_order == decoding_position) & (~decoded) # Z x N 
-
-			# update the labels 
-			L[update_seq] = L_sampled[update_seq] # Z x N
-
-			# featurize the updated sequence for the next iteration
-			S = self.featurizer.featurize_seq(L) # Z x N x De
-			
-			# update the decoded mask
-			decoded |= update_seq # Z x N
-
-			# increment decoding position for next iteration
-			decoding_position += 1
-
-		return L # Z x N
-
 	def sample(self, V, temp=1e-6):
 
-		# convert to aa probabilities
-		probs = torch.softmax(V / temp, dim=2) # Z x N x len(canonical_aas)
+		probs = torch.softmax(V, dim=2)
+		entropy = -torch.sum(probs*torch.log(probs), dim=2)
+		sample = torch.multinomial(probs.view(-1,probs.size(2)), 1).view(probs.size(0), probs.size(1))
+		return sample, entropy
 
-		# sample from the distribution
-		sample = torch.multinomial(probs.view(-1, probs.size(-1)), 1).view(probs.size(0), probs.size(1)) # Z x N
+	def inference(self, C, L, chain_idxs, node_mask=None, temp=1e-6, cycles=4):
 
-		return sample
+		# initialize boolean mask of fixed positions (where L is not the <mask> token)
+		fixed = L != aa_2_lbl("<mask>") # Z x N
+
+		# threshold for rand_val*entropy_normed to update the aas
+		update_thresh = 1/cycles
+
+		# get constant values so dont recompute
+		C, Ca, Cb = self.featurizer.get_coords(C, chain_idxs, norm=False)
+		K, edge_mask = self.featurizer.get_neighbors(Ca, node_mask)
+		E = self.featurizer.get_edges(C, K)
+
+		# perform multiple cycles
+		for cycle in range(cycles):
+
+			# get nodes
+			V = self.featurizer.get_nodes(Ca, Cb, L, node_mask)
+
+			# get seq logits
+			L_logits = self.encode(V, E, K, edge_mask)
+			
+			# sample aas and get entropies
+			L_sampled, entropies = self.sample(L_logits, temp=temp)
+
+			# norm entropies so fall in between 0 and 1 for each sample
+			entropy_min =  entropies.min(dim=1, keepdim=True).values
+			entropy_max = entropies.max(dim=1, keepdim=True).values
+			entropies_norm = (entropies - entropy_min) / (entropy_max - entropy_min)
+
+			# decide which aas to update, low entropy vals more likely to be updated, regardless of whether theyve been decoded or not
+			update_aa = ((torch.rand_like(L, dtype=torch.float32) * entropies_norm) < update_thresh) & (~fixed)
+
+			# update L
+			L = torch.where(update_aa, L_sampled, L)
+
+		# after go through last cycles use the last round of predictions as the final prediction
+		L = torch.where(fixed, L, L_sampled)
+
+		return L # dont return entropies yet
+

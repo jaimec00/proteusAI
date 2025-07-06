@@ -868,7 +868,7 @@ class SingleChainDataCleaner():
 		missing_coords = [None, None, None]
 
 		# false is not masked, did this when started and not enough time to make the whole codebase consistent so keeping it
-		mask = [(n!=missing_coords) | (ca!=missing_coords) | (c!=missing_coords) for n, ca, c in zip(N, Ca, C)]
+		mask = [(n!=missing_coords) & (ca!=missing_coords) & (c!=missing_coords) for n, ca, c in zip(N, Ca, C)]
 
 		# remove missing coords, not a problem for full backbone model, but makes Cb approximation for Ca only model more innacurate, but better than skipping Ca whose sequence neighbor is missing
 		N = [coords for coords, valid in zip(N, mask) if valid]

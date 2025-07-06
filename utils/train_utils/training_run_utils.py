@@ -3,7 +3,7 @@
 import torch
 from tqdm import tqdm
 from utils.train_utils.model_outputs import ModelOutputs
-from data.constants import aa_2_lbl
+from data.constants import aa_2_lbl, alphabet
 
 # ----------------------------------------------------------------------------------------------------------------------
 
@@ -66,21 +66,31 @@ class Batch():
 
 		self.coords = data_batch.coords 
 		self.labels = data_batch.labels
-		self.aas = data_batch.labels if not inference else -torch.ones_like(data_batch.labels)# self.labels is edited for loss computation, keep this one for model input
 		self.chain_idxs = data_batch.chain_idxs
+
 		self.chain_mask = data_batch.chain_masks | data_batch.homo_masks
 		self.key_padding_mask = data_batch.key_padding_masks
 
-		# this is how pmpnn does the decoding order so that visible chains more likely to be predicted first. bit obtuse but whatever
-		rand_vals = (self.chain_mask+0.0001) * torch.abs(torch.randn_like(self.chain_mask, dtype=torch.float32))
-		rand_vals = torch.where(self.key_padding_mask, float("inf"), rand_vals) # masked positions decoded last to make inference quicker
-		self.decoding_order = torch.argsort(rand_vals, dim=1) # Z x N
+
+		# insert random aas for padded positions so the wf embedding kernel queries diff lane ids, doesnt affect output, just for speed
+		rand_aas = torch.randint_like(self.labels, 0, len(alphabet))
+		self.aas = torch.where(self.labels==-1, rand_aas, self.labels) 
+
+		# all predicted positions start with mask token
+		self.aas = self.aas.masked_fill(self.chain_mask, aa_2_lbl("<mask>")) 
+
+		# also replace 10% of context positions with mask so it doesnt overrely on this
+		remove_context = (torch.rand_like(self.labels, dtype=torch.float32)*(~self.chain_mask)) > 0.90
+		self.aas = self.aas.masked_fill(remove_context, aa_2_lbl("<mask>"))
 
 		self.b_idx = b_idx
 		self.epoch_parent = epoch
 
 		self.inference = inference
 		self.temp = temp
+		cycles = self.epoch_parent.training_run_parent.training_parameters.inference.cycles
+		self.cycles = torch.randint(0,cycles, (1,)).item() if not inference else cycles # random number of cycles to perform
+		self.replace_thresh = 1/cycles
 
 		self.world_size = epoch.training_run_parent.world_size
 		self.rank = epoch.training_run_parent.rank
@@ -92,7 +102,6 @@ class Batch():
 		self.coords = self.coords.to(device)
 		self.chain_mask = self.chain_mask.to(device)
 		self.key_padding_mask = self.key_padding_mask.to(device)
-		self.decoding_order = self.decoding_order.to(device)
 
 	def batch_learn(self):
 		'''
@@ -183,12 +192,45 @@ class Batch():
 		used to get output predictions
 		'''
 
-		# run the model
-		seq_logits = self.epoch_parent.training_run_parent.model.module(	self.coords, self.aas, self.chain_idxs, 
-																			node_mask=self.key_padding_mask, 
-																			decoding_order=self.decoding_order, 
-																			inference=self.inference, temp=self.temp
-																		)
+		model = self.epoch_parent.training_run_parent.model.module # convenience
+
+		if not self.inference:
+			
+			# call the individual funcs for now so dont recompute intial edges everytime, and skip node creation until within loop
+			C, Ca, Cb = model.featurizer.get_coords(self.coords, self.chain_idxs, norm=False)
+			K, edge_mask = model.featurizer.get_neighbors(Ca, self.key_padding_mask)
+			E = model.featurizer.get_edges(C, K)
+
+			# first run the model a few times to feed it its outputs, not the same as inference mode, replacement of aas is random for ribustness
+			with torch.no_grad():
+				
+				for cycle in range(self.cycles):
+
+					# compute nodes from new aas
+					V = model.featurizer.get_nodes(Ca, Cb, self.aas, self.key_padding_mask)
+
+					# pass through encoders to get sequence logits
+					seq_logits = model.encode(V, E, K, edge_mask)
+
+					# sample a sequence
+					sampled_aas, _ = model.sample(seq_logits, temp=self.temp) # Z x N
+
+					# replace random amount of aas with prediction, regardless of whether it is part of target chain or not
+					replace = torch.rand_like(sampled_aas, dtype=torch.float32) < self.replace_thresh
+					self.aas = torch.where(replace, sampled_aas, self.aas)
+					
+			# compute nodes with grad on
+			V = model.featurizer.get_nodes(Ca, Cb, self.aas, self.key_padding_mask)
+
+			# compute final seq logits
+			seq_logits = model.encode(V, E, K, edge_mask)
+
+		else:
+			# run the model
+			seq_logits = model(	self.coords, self.aas, self.chain_idxs, 
+								node_mask=self.key_padding_mask, 
+								inference=self.inference, temp=self.temp, cycles=self.cycles
+							)
 
 		# convert to output object
 		return ModelOutputs(self, seq_logits)

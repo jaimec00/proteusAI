@@ -4,62 +4,43 @@
 
 # ------------------------------------------------------------------------------
 
-# Path to the YAML config file. defined here for clarity, but need to call this 
-# as CL arg for it to work
-config: "config/train.yml" 
-
-# ------------------------------------------------------------------------------
-
 # hyperparameters
 hyper_parameters:
 
   # ----------------------------------------------------------------------------
 
   # main stuff
-  d_wf: 128 # d_wf // 2 is the number of wavefunctions defined for each protein, since each wf produces real and imag part
-  d_v: 128
-  d_e: 128
+  d_model: 128
   topk: 30
-
-  # ----------------------------------------------------------------------------
+  layers: 8
   
   node_embedding:
-    min_wl: 3.5
-    max_wl: 12
+    min_wl: 2
+    max_wl: 22
     base_wl: 20.0
-    anisotropic: True
     learn_wl: True # learn the wavenumbers
-    learn_aa: False # learn the scaling factors
 
-  edge_embedding: # pmpnn does linearly spaced centers, not spreads, will test autoregressive first before changing this
+  edge_embedding: 
     min_rbf: 2.0
     max_rbf: 22.0
     num_rbfs: 16.0
-
-  encoder:
-    layers: 3
-
-  decoder:
-    layers: 3
 
 # ------------------------------------------------------------------------------
 
 # training params
 training_parameters:
 
-  rng: 0 # for data loading
-
+  epochs: 1000  # number of epochs, training until convergence
   single_chain: False # single chain or multichain model, automatically chooses the correct dataset from this, as long as defined below
   ca_only_model: False # Ca only or full backbone model, haven't tested full backbone yet
-
-  epochs: 1000  # number of epochs, training until convergence
+  rng: 0 # for data loading
 
   checkpoint:
     path: ""
     
   inference:
     temperature: !!float 1e-6
-    cycles: 10
+    cycles: 4
   
   # convergence criteria
   early_stopping:
@@ -109,15 +90,15 @@ data:
   # then recursively randomizes order of samples within batch, splits into two, and continues until batches are <= batch_tokens
   max_batch_size: 256  # maximum samples per batch
   min_seq_size: 16 # minimum sequence length, shorter is padded to this length, this is necessary due to triton matmul, min of 16, but with the option of having larger min
-  max_seq_size: 16384 # max sequence lengths, longer samples not included
-  batch_tokens: 16384 # number of valid tokens per batch (including non-representative chains, basically the tokens used in computation, not necessarily in loss)
+  max_seq_size: 10000 # max sequence lengths, longer samples not included
+  batch_tokens: 10000 # number of valid tokens per batch (including non-representative chains, basically the tokens used in computation, not necessarily in loss)
   max_resolution: 3.5 # max_resolution of PDBs
 
 # ------------------------------------------------------------------------------
 
 # Output
 output:
-  out_path: "/scratch/hjc2538/projects/proteusAI/models/gnn/no_decoder"
+  out_path: "/scratch/hjc2538/projects/proteusAI/models/mlm/8enc"
   model_checkpoints: 10 # number of epochs to save a checkpoint of the model after
 
 # ------------------------------------------------------------------------------
@@ -129,7 +110,7 @@ debug:
   print_losses: False
   print_grad_L2: False
 
-port: 29500 # in case want to run multiple independant instances of the training on a single machine (one for each gpu), you need different ports for each
+port: 29501 # in case want to run multiple independant instances of the training on a single machine (one for each gpu), you need different ports for each
 
 # ------------------------------------------------------------------------------
 
